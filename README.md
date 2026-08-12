@@ -70,7 +70,6 @@ Files added to the Library are copied into a managed library folder. Your origin
 ## Known beta limitations
 
 - **Windows only.** macOS and Linux are not supported in this beta.
-- **Keep one copy open.** Do not run yb-Reference a second time while it is already open. If you are unsure, close the visible copy before running it again.
 - **Mono and stereo audio only.** Files with more than two channels are skipped rather than changed.
 - **Measurements may take a moment.** New or existing sounds can show `…` while their waveform and loudness values are being measured. The sounds remain playable while this finishes. Very long files take longer.
 - **A missing Library folder stops startup deliberately.** If your Library is on a disconnected drive or unavailable network location, reconnect it and run the tool again. The tool will not replace it with an empty library.
