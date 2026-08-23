@@ -11,20 +11,16 @@
 -- the UI turns into the loud clipboard-plus-address fallback. Between those
 -- two ends there is nothing.
 --
--- The send is a TWO-TIER spawn, under 10 s end to end (user's call — 20 was
--- too long):
---   tier 1  the updater's proven wscript/VBS courier: invisible, no console
---           window. On a machine whose policy disables Windows Script Host it
---           does nothing (or shows a policy dialog //B can't suppress) —
---           which is exactly why tier 2 exists.
---   tier 2  curl launched directly. ExecProcess flashes a console window for
---           ~half a second (U6's finding) — accepted HERE and only here,
---           because the user just pressed Send; the updater's background
---           checks must never flash, so don't copy this shortcut there.
+-- The send has ONE windowless wscript/VBS courier, under 10 s end to end. A
+-- second POST is never launched automatically: Google can save a report before
+-- curl receives the reply, so retrying after a short timeout can turn one click
+-- into two reports. If Windows Script Host is unavailable or the request cannot
+-- be verified, the normal visible failure path keeps the message safe.
 --
--- Both tiers write the same reply file: tier 1's curl carries --max-time 4,
--- so it is dead before the 4.5 s watch hands over and the two can't race. A
--- tiny pending record keeps the message and active parity across a tool close
+-- The courier's curl carries --max-time 8 and the defer loop watches for 9 s.
+-- That leaves time for curl to finish before cleanup without making the REAPER
+-- interface wait indefinitely. A tiny pending record keeps the message and
+-- active parity across a tool close
 -- or restart. The next launch watches the existing courier without submitting
 -- a duplicate; an unverified result becomes the ordinary visible failure.
 --
@@ -46,10 +42,9 @@ local SEP = package.config:sub(1, 1)
 feedback.URL = "https://script.google.com/macros/s/AKfycbyO_6OjXKDv8kUfqImqqBYz7L1hjy51jn1Ux4_iCBCP8I9wLpt3-evxQq-vGdZ7VqCB/exec"
 feedback.ADDRESS = "yoni.ybtools@gmail.com"
 
--- Each tier gets 4.5 s of watching; its curl gets 4 s of network, so a stalled
--- try is dead before its watch ends. Worst case a report fails in 9 s.
-local TIER_WATCH = 4.5
-local CURL_SECS = 4
+-- Curl is dead before the watch ends, so cleanup cannot race a late file write.
+local SEND_WATCH = 9
+local CURL_SECS = 8
 
 -- What the UI reads (state.feedback in the entry script). One table for the
 -- session — mutated, never replaced. phase: nil | "sending" | "sent" |
@@ -63,7 +58,6 @@ local P = {
   payload = nil, reply = nil, vbs = nil, -- this send's files, set by start
   pending = nil,                         -- restart-safe message + active parity
   flip = 0, -- alternates per send (see start)
-  tier = 0,
   deadline = 0,
   recovered = false,
 }
@@ -118,12 +112,11 @@ local function clean_parity(n)
   os.remove(vbs)
 end
 
--- The tier-1 shim: wscript runs curl with its window hidden (style 0), waiting
+-- The courier shim: wscript runs curl with its window hidden (style 0), waiting
 -- so curl's --max-time bounds the whole thing. Same quoting ground rules as
 -- the updater's shim: Windows paths and URLs cannot contain double quotes, so
--- doubling quotes around them inside VBS strings is safe. No PowerShell
--- fallback here — POSTing a file with WebClient is a different shape, and
--- tier 2 already covers a curl-less or WSH-less machine ending in a loud fail.
+-- doubling quotes around them inside VBS strings is safe. There is no automatic
+-- fallback request: an unverified first POST may already have reached the Sheet.
 local function curl_cmd()
   return 'curl -s -L --max-time ' .. CURL_SECS
     .. ' -H "Content-Type: application/json"'
@@ -141,12 +134,6 @@ local function cleanup(keep_pending)
   os.remove(P.reply)
   os.remove(P.vbs)
   if not keep_pending then os.remove(P.pending) end
-end
-
--- Tier 2: the direct, policy-proof launch. Returns false when even starting it
--- failed — then there is nothing in flight and nothing to wait for.
-local function launch_direct()
-  return reaper.ExecProcess(curl_cmd(), -1) ~= nil
 end
 
 local function fail(keep_pending)
@@ -180,8 +167,7 @@ function feedback.init()
     S.recovered_message = message
     clean_parity(1 - parity)
     if read_file(P.payload) ~= nil then
-      P.tier = 2 -- the old courier gets one watch; never submit a duplicate
-      P.deadline = reaper.time_precise() + TIER_WATCH
+      P.deadline = reaper.time_precise() + SEND_WATCH
       P.recovered = true
       S.phase = "sending"
     else
@@ -239,16 +225,11 @@ function feedback.start(payload_json, message)
   S.phase = "sending"
   local quiet = write_shim()
     and reaper.ExecProcess('wscript.exe //B "' .. P.vbs .. '"', -1) ~= nil
-  if quiet then
-    P.tier = 1
-  elseif launch_direct() then
-    -- The quiet courier never left the garage — go straight to the visible try.
-    P.tier = 2
-  else
+  if not quiet then
     fail()
     return
   end
-  P.deadline = reaper.time_precise() + TIER_WATCH
+  P.deadline = reaper.time_precise() + SEND_WATCH
 end
 
 -- Every defer frame. Idle frames cost one compare; the file poll runs only
@@ -261,9 +242,7 @@ function feedback.tick()
     local reply = f:read("a") or ""
     f:close()
     -- Only the doorman's literal "ok" ends the wait early. Anything else in
-    -- the file (an error page, a half-written body) keeps the clock running —
-    -- tier 2 truncates and rewrites the same file, so a wrong answer from
-    -- tier 1 still gets its second chance.
+    -- the file (an error page, a half-written body) keeps the clock running.
     if fb_core.is_ok(reply) then
       cleanup()
       P.recovered = false
@@ -273,15 +252,10 @@ function feedback.tick()
   end
 
   if reaper.time_precise() >= P.deadline then
-    if P.tier == 1 and launch_direct() then
-      P.tier = 2
-      P.deadline = reaper.time_precise() + TIER_WATCH
-    else
-      -- A recovered courier is never re-launched automatically. Keep its plain
-      -- message on disk until the user deliberately retries, so another close
-      -- cannot silently discard the fallback too.
-      fail(P.recovered)
-    end
+    -- A recovered courier is never re-launched automatically. Keep its plain
+    -- message on disk until the user deliberately retries, so another close
+    -- cannot silently discard the fallback too.
+    fail(P.recovered)
   end
 end
 

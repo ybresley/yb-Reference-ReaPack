@@ -1,4 +1,4 @@
--- @description yb-Reference · audio reference library with instant preview
+-- @description yb-Reference
 -- @version 0.3.0
 -- @author Yoni Bresley
 -- @about
