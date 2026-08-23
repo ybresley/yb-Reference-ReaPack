@@ -21,7 +21,7 @@ Use a current version of REAPER, ReaPack, SWS and ReaImGui. Restart REAPER after
 2. Paste this address:
 
    ```text
-   https://raw.githubusercontent.com/ybresley/yb-Reference-releases/main/index.xml
+   https://raw.githubusercontent.com/ybresley/yb-Reference-ReaPack/main/index.xml
    ```
 
 3. Choose **Extensions → ReaPack → Browse packages…**
