@@ -1,8 +1,8 @@
-yb-Reference Quick Start Guide
+# yb-Reference Quick Start Guide
 
 **This beta is invite-only. Please don’t share the installation address or package files.**
 
-# Requirements
+## Requirements
 
 - **Windows**
 
@@ -14,7 +14,7 @@ yb-Reference Quick Start Guide
 
 Restart REAPER after installing or updating an extension.
 
-# Install yb-Reference
+## Install yb-Reference
 
 1.  In REAPER, choose **Extensions → ReaPack → Import repositories…**
 
@@ -30,7 +30,7 @@ Restart REAPER after installing or updating an extension.
 
 6.  Choose **Actions → Show action list…**, search for **yb-Reference.lua**, then run it.
 
-# Getting Started
+## Getting Started
 
 1.  When yb-Reference first opens, run through the quick **Walkthrough**. It shows how to use the app.
 
@@ -40,12 +40,12 @@ Restart REAPER after installing or updating an extension.
 
 4.  I recommend docking the “Working View” (where you see pinned references) to your Reaper UI
 
-# Beta Limitations
+## Beta Limitations
 
 - **Windows only.** macOS and Linux are not supported
 
 - **Mono and stereo audio files only (for now)**
 
-Send Feedback!
+## Send Feedback!
 
 I want to improve this tool and would really appreciate any feedback you may have, whether it’s a bug report, feature request, or just general thoughts! **And please be brutally honest!** You can send feedback from the tool, go to the Settings panel → Feedback tab. Adding your email is optional (if you want a response from me). Thanks for beta testing this tool and I hope it’s useful!
