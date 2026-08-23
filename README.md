@@ -1,94 +1,51 @@
-# yb-Reference — private beta
+yb-Reference Quick Start Guide
 
-yb-Reference is a floating or dockable reference library for REAPER. It keeps your chosen reference sounds close, previews them through Monitor FX, and lets you switch between your project and a selected reference with one hotkey.
+**This beta is invite-only. Please don’t share the installation address or package files.**
 
-This is an invite-only Windows beta. Please do not share the installation address or package files.
+# Requirements
 
-## Before you install
+- **Windows**
 
-You need:
+- **Reaper v7.xx ideally, otherwise 6.44+**
 
-- Windows
-- REAPER
-- [ReaPack](https://reapack.com/)
-- The free **SWS Extension** and **ReaImGui** packages, installed through ReaPack
+- **[<u>ReaPack</u>](https://reapack.com/) installed**
 
-Use a current version of REAPER, ReaPack, SWS and ReaImGui. Restart REAPER after installing or updating an extension.
+- **The free SWS Extension and ReaImGui API packages**, installed through ReaPack
 
-## Install yb-Reference
+Restart REAPER after installing or updating an extension.
 
-1. In REAPER, choose **Extensions → ReaPack → Import repositories…**
-2. Paste this address:
+# Install yb-Reference
 
-   ```text
-   https://raw.githubusercontent.com/ybresley/yb-Reference-ReaPack/main/index.xml
-   ```
+1.  In REAPER, choose **Extensions → ReaPack → Import repositories…**
 
-3. Choose **Extensions → ReaPack → Browse packages…**
-4. Search for **yb-Reference**.
-5. Select **yb-Reference**, choose **Install**, then select **Apply**.
-6. Restart REAPER.
-7. Choose **Actions → Show action list…**, search for **yb-Reference.lua**, and run it.
+2.  Paste this address:
 
-You can also add the main tool to a toolbar or give it a shortcut from REAPER's Action List.
+> https://raw.githubusercontent.com/ybresley/yb-Reference-ReaPack/main/index.xml
 
-## Set the reference-mode hotkey
+3.  Choose **Extensions → ReaPack → Browse packages…**
 
-1. Choose **Actions → Show action list…**
-2. Search for **yb-Reference_ToggleReferenceMode.lua**. Searching for **ToggleReferenceMode** is enough.
-3. Select the action and choose **Add…** beside the shortcut list.
-4. Press the shortcut you want to use and confirm it.
+4.  Search for **yb-Reference**, select **yb-Reference**, choose **Install**, then select **Apply**.
 
-The hotkey works while the main yb-Reference window is open. Pressing it while the tool is closed does nothing.
+5.  Restart REAPER.
 
-## Your first reference
+6.  Choose **Actions → Show action list…**, search for **yb-Reference.lua**, then run it.
 
-The first launch offers a short walkthrough. You can replay it later from **Settings → Help**.
+# Getting Started
 
-1. Save your REAPER project. Project references need a saved project folder.
-2. Open **Library** in yb-Reference.
-3. Select **Add sounds**, or drag audio files into the Library.
-4. Drag a Library sound onto the main yb-Reference window to pin it to the project.
-   - You can also drag an audio file directly onto the main window to add and pin it in one step.
-5. Choose the pinned reference from the name control in the main window.
-6. Select **R**, or use your new hotkey, to turn reference mode on.
-   - Your project is silenced as soon as reference mode turns on.
-   - Press Play in REAPER to hear the selected reference instead.
-7. Select **R** or press the hotkey again to restore normal project playback.
+1.  When yb-Reference first opens, run through the quick **Walkthrough**. It shows how to use the app.
 
-Files added to the Library are copied into a managed library folder. Your original files are not moved or changed. Pinned references are also copied into a `References` folder beside the saved REAPER project so the project keeps its own copy.
+2.  **Your reference library is global**, meaning it will persist no matter what project you open.
 
-## Useful basics
+3.  Pinning references to a project copies those files into a …/References subfolder in your project directory. **Save your REAPER project before pinning a reference.** Anyone with the tool can open the project and see the same pinned references.
 
-- Click a Library sound to audition it. Auto-audition can be turned off with the ear button.
-- Click the waveform to play from that point.
-- Drag the start and end handles to choose the part that plays and travels to the timeline.
-- Drag a sound from yb-Reference onto REAPER's arrange view to create an item.
-- Use the **◎** loudness panel to inspect measurements or set the sound's trim to a target.
-- Use **Settings → Feedback** to send a bug report or idea.
+4.  I recommend docking the “Working View” (where you see pinned references) to your Reaper UI
 
-## Known beta limitations
+# Beta Limitations
 
-- **Windows only.** macOS and Linux are not supported in this beta.
-- **Mono and stereo audio only.** Files with more than two channels are skipped rather than changed.
-- **Measurements may take a moment.** New or existing sounds can show `…` while their waveform and loudness values are being measured. The sounds remain playable while this finishes. Very long files take longer.
-- **A missing Library folder stops startup deliberately.** If your Library is on a disconnected drive or unavailable network location, reconnect it and run the tool again. The tool will not replace it with an empty library.
-- **Deleting has no Restore button yet.** Deleted audio and its information are moved into the Library's `Trash` folder, but restoration is currently a manual operation. Contact Yoni before changing anything in that folder.
-- **Loudness can differ from the SWS meter by roughly 0.5–1.7 dB.** yb-Reference uses REAPER's own file measurement, matching REAPER's render/export results. This known difference is not lost or damaged audio.
-- **Pause briefly when dragging across windows.** When dragging a sound from yb-Reference to REAPER's arrange view, keep holding for about half a second after crossing into REAPER before releasing it.
+- **Windows only.** macOS and Linux are not supported
 
-## Feedback and privacy
+- **Mono and stereo audio files only (for now)**
 
-Open the gear button, choose **Feedback**, type your message, and select **Send**. Adding your email is optional.
+Send Feedback!
 
-A report contains only:
-
-- Your message
-- Your optional email address
-- The yb-Reference version
-- The REAPER version
-- Whether yb-Reference was installed through ReaPack
-
-It does not send audio, file paths, project names or a machine identifier. Reports go to Yoni's private Google Sheet. If sending fails, your message stays in the panel and is copied to the Windows clipboard so you can email it instead.
-
-Thank you for testing yb-Reference. Honest reports about anything confusing, unreliable or awkward are more useful than polished feedback.
+I want to improve this tool and would really appreciate any feedback you may have, whether it’s a bug report, feature request, or just general thoughts! **And please be brutally honest!** You can send feedback from the tool, go to the Settings panel → Feedback tab. Adding your email is optional (if you want a response from me). Thanks for beta testing this tool and I hope it’s useful!
