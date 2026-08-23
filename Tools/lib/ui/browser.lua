@@ -1533,7 +1533,7 @@ local function draw_sound_list(ctx, state, res)
       if row_selected then
         reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderHovered(), T.FILL_PRIMARY)
       end
-      reaper.ImGui_Selectable(ctx,
+      local row_clicked = reaper.ImGui_Selectable(ctx,
         widgets.ellipsize(ctx, s.name, name_w) .. "##" .. s.id,
         row_selected, span, 0, row_h)
       if row_selected then reaper.ImGui_PopStyleColor(ctx, 1) end
@@ -1542,8 +1542,15 @@ local function draw_sound_list(ctx, state, res)
       reaper.ImGui_PopStyleVar(ctx, 2)
       if row_pressed then
         action = { type = "browse_sound", id = s.id,
-          selection = select_sound_rows(ctx, state, s.id) }
+          selection = select_sound_rows(ctx, state, s.id), quiet = true }
         nav_owner = "list" -- the arrows follow the last-clicked pane
+      end
+
+      -- The press above selects immediately but stays silent until ImGui confirms
+      -- a click on release. Moving far enough to begin a drag never produces this
+      -- activation, so pinning or dragging to the timeline cannot auto-audition.
+      if row_clicked then
+        action = { type = "audition_browse_sound", id = s.id }
       end
       -- Scroll the revealed row into the middle of the list, on the one frame
       -- the request is fresh.
@@ -1567,7 +1574,7 @@ local function draw_sound_list(ctx, state, res)
       -- lands is worked out when the mouse is let go.
       if state.deps.drag_out and not state.drag
         and reaper.ImGui_IsItemActive(ctx) and reaper.ImGui_IsMouseDragging(ctx, 0) then
-        action = action or { type = "drag_sound", id = s.id,
+        action = { type = "drag_sound", id = s.id,
           ids = sound_action_ids(state, s.id) }
       end
       -- Right-click the row: pin it to (or unpin it from) the current project, or

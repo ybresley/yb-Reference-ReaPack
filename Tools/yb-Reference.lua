@@ -961,6 +961,15 @@ end
 -- rather than silently losing the fight to sync_reference one frame later.
 local REF_PLAYING_MSG = "Reference mode is playing. Stop the transport to audition here."
 
+local function audition_browse_sound()
+  if not state.browse then return end
+  if state.reference.active then
+    state.status = REF_PLAYING_MSG
+    return
+  end
+  if state.auto_audition then play_sound(state.browse, 0, "browse") end
+end
+
 -- Browse a LIBRARY sound in the browser popup: entirely separate from
 -- select_sound above (DESIGN "browsing can never surprise-mute anything, and
 -- one readout — the working view's — tells what's armed"). Never touches
@@ -992,11 +1001,7 @@ local function browse_sound(id, quiet, selection)
   state.browse_info = reaper_api.source_info(sound_path(state.browse))
   holders.forget_wave("browse") -- same as select_sound: the loop fetches, a re-pick retries
   if quiet then return end
-  if state.reference.active then
-    state.status = REF_PLAYING_MSG
-    return
-  end
-  if state.auto_audition then play_sound(state.browse, 0, "browse") end
+  audition_browse_sound()
 end
 
 -- "Show in library" (a pin's right-click menu, 2026-08-01): open the browser on
@@ -1885,7 +1890,11 @@ local function handle_action(a)
     -- against is not a request to hear it right now.
     select_sound(a.id, a.quiet)
   elseif a.type == "browse_sound" then
-    browse_sound(a.id, false, a.selection)
+    browse_sound(a.id, a.quiet == true, a.selection)
+  elseif a.type == "audition_browse_sound" then
+    -- The browser selects on mouse-down, then sends this only when the gesture
+    -- finishes as a click. A drag never reaches this path.
+    if state.browse_id == a.id then audition_browse_sound() end
   elseif a.type == "show_in_library" then
     show_in_library(a.id)
   elseif a.type == "toggle_play" then
