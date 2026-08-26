@@ -1,5 +1,5 @@
--- span: the start/end points a sound can carry (DESIGN.md "Loudness tools &
--- working-view additions", 2026-08-06) — two handles on the working view's
+-- span: the start/end points a sound can carry (DESIGN.md "Preview controls")
+-- — two handles on the working view's
 -- waveform that frame the stretch play, REF playback and the loop run through,
 -- remembered per sound exactly like the trim (library record + pin snapshot,
 -- fields `span_start` / `span_end` in seconds).

@@ -123,7 +123,14 @@ end
 -- silently didn't take and we deleted the recovery note on that assumption, the mute
 -- would be stranded with nothing left to fix it.
 local function set_master_mute(proj, v)
-  reaper.SetMediaTrackInfo_Value(reaper.GetMasterTrack(proj), "B_MUTE", v)
+  local master = reaper.GetMasterTrack(proj)
+  reaper.SetMediaTrackInfo_Value(master, "B_MUTE", v)
+  if get_master_mute(proj) == v then return true end
+
+  -- Some REAPER setups can reject the raw track-property write. Retry only that
+  -- failed path through REAPER's dedicated mute command, isolated from track
+  -- grouping and selection ganging, then verify the result exactly as before.
+  if reaper.SetTrackUIMute then reaper.SetTrackUIMute(master, v, 3) end
   return get_master_mute(proj) == v
 end
 
@@ -467,7 +474,7 @@ function reference.latch_on()
       return false, pending
     end
     return false, "Reference mode couldn't mute the project's master track. Your project was not changed. " ..
-      "Reopen yb-Reference to retry."
+      "Try the Latch button again. If it still fails, send feedback from Settings."
   end
 
   latch.on, latch.proj, latch.path, latch.prev_mute, latch.token =
@@ -515,7 +522,7 @@ function reference.latch_off()
   -- note is kept either way, so the next run retries the cleanup.
   if not marker_clear(proj) then
     pending = "Reference mode restored the project's master track to its previous mute state, but couldn't " ..
-      "clear its recovery marker. Save the project or restart REAPER to retry recovery cleanup."
+      "clear its recovery marker. Save the project or restart Reaper to retry recovery cleanup."
     return false
   end
   if not journal_remove(token) then
@@ -654,7 +661,7 @@ local function recover_entries(include_unknown, stop_previews)
   end
   if failed_marker > 0 then
     pending = "Reference mode restored a project's master track to its previous mute state, but couldn't " ..
-      "clear its recovery marker. Save the project or restart REAPER to retry recovery cleanup."
+      "clear its recovery marker. Save the project or restart Reaper to retry recovery cleanup."
     return pending, true
   end
   if failed_marker_data > 0 then

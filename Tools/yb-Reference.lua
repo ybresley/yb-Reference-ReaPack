@@ -1,9 +1,9 @@
 -- @description yb-Reference
--- @version 0.3.0
+-- @version 0.3.1
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
---   inside REAPER, with instant preview through Monitor FX and Reference mode
+--   inside Reaper, with instant preview through Monitor FX and Reference mode
 --   for comparing sounds with your project.
 --
 --   **Windows only.** Requires the free [SWS](https://www.sws-extension.org/)
@@ -19,6 +19,26 @@
 --   [nomain] assets/windows/folder_picker.vbs
 --   [nomain] CHANGELOG.md
 --   [main] yb-Reference_ToggleReferenceMode.lua
+-- @changelog
+--    
+--   New
+--     • Preview: References can now be pitch-shifted.
+--     • Library: References with up to eight channels are now supported.
+--     • UI: UI size and accent colour can now be changed.
+--    
+--   Improved
+--     • Library: Category, sound, sorting and column choices are now
+--       remembered.
+--     • UI: The Settings panel now has a cleaner layout.
+--     • Settings: Settings now include new quality-of-life options.
+--     • Setup: The walkthrough now includes a Back button.
+--    
+--   Fixed
+--     • Latch mode: The Latch button now works on more Reaper setups.
+--     • Projects: Unsaved projects now show a warning when pinning is
+--       unavailable.
+--     • Library: File drops no longer stall between yb-Reference windows.
+--     • Library: The sound table no longer moves when switching categories.
 --
 -- RELEASE NOTES ARE GENERATED — never hand-write them here. CHANGELOG.md is the
 -- single source of truth (2026-08-08); `lua scripts/gen_header.lua` writes the
@@ -133,7 +153,7 @@ if not deps.imgui then
     "Install it (free) via ReaPack:\n" ..
     "  1. Extensions > ReaPack > Browse packages\n" ..
     "  2. Search \"ReaImGui\" and install it\n" ..
-    "  3. Restart REAPER, then run this again\n\n" ..
+    "  3. Restart Reaper, then run this again\n\n" ..
     "If ReaPack isn't installed, get it at https://reapack.com.\n\n" ..
     "Support: yoni.ybtools@gmail.com",
     "yb-Reference \u{00B7} Setup Needed")
@@ -148,11 +168,18 @@ if not deps.sws then
     "yb-Reference needs the SWS extension, which isn't installed.\n\n" ..
     "Install SWS (free) from:\n" ..
     "https://www.sws-extension.org/\n\n" ..
-    "Restart REAPER, then run this again.\n\n" ..
+    "Restart Reaper, then run this again.\n\n" ..
     "Support: yoni.ybtools@gmail.com",
     "yb-Reference \u{00B7} Setup Needed")
   return
 end
+
+-- Appearance is loaded before any ImGui context can open, including Library
+-- recovery. The same live theme table then serves every window for the whole
+-- run. Stored garbage falls back through the theme's supported range/palette.
+local theme = require("ui.theme")
+local ui_scale = theme.set_scale(reaper_api.get_ui_scale())
+local accent_colour = theme.set_accent(reaper_api.get_accent_colour())
 
 -- Loaded before the library so its one public support address is also available
 -- to the serious startup failures below. Loading the adapter has no side effects;
@@ -391,7 +418,7 @@ if not rec_ok then
   reaper_api.message(
     product_error.with_details(
       "The Library couldn't be repaired after an interrupted save. Nothing has been changed.", rec_err) .. "\n\n" ..
-    "Close REAPER before repairing the Library. You can rename the " ..
+    "Close Reaper before repairing the Library. You can rename the " ..
     "\".bak\" file back to \"library.json\", or email " .. feedback.ADDRESS ..
     " for help.\n\nFolder:\n" .. library_dir,
     "yb-Reference · Library Not Loaded")
@@ -466,9 +493,11 @@ if not library_remembered then reaper_api.set_library_dir(library_dir) end
 local service    = require("library_service")
 local categories = require("core.categories")
 local search     = require("core.search")
+local browser_memory = require("core.browser_memory")
 local analysis   = require("core.analysis") -- what still needs measuring
 local match      = require("core.match")    -- match-to-target trim arithmetic
 local span       = require("core.span")     -- start/end points: clamping + effective range
+local pitch      = require("core.pitch")    -- semitone limits and playback-rate conversion
 local techfacts  = require("core.techfacts") -- the armed sound's tech line for the bar
 local preview    = require("preview")  -- SWS audio-preview adapter (playback)
 local peaks      = require("peaks")    -- waveform envelope reader
@@ -496,6 +525,12 @@ reaper_api.set_drag_cursor_file(table.concat({ root, "assets", "cursors", "drag_
 -- than showing an empty column.
 local stored_unit = reaper_api.get_loud_unit()
 if not analysis.is_field(stored_unit) then stored_unit = search.DEFAULT_LOUD_FIELD end
+local saved_browser = reaper_api.get_browser_memory()
+local stored_browser = browser_memory.normalise(saved_browser, library)
+if saved_browser.sound_id and not stored_browser.sound_id then
+  reaper_api.set_browser_sound(nil)
+end
+local open_library_on_startup = reaper_api.get_open_library_on_startup()
 
 -- Where the title bar's "Dock window in Docker" sends the window, asked once:
 -- REAPER's dockers are a property of the user's layout, not ours.
@@ -538,6 +573,8 @@ feedback.state.email = reaper_api.get_feedback_email()
 
 local state = {
   deps           = deps,
+  ui_scale       = ui_scale,
+  accent_colour  = accent_colour,
   library        = library,
   library_dir    = library_dir,
   library_path   = library_path,
@@ -547,10 +584,11 @@ local state = {
   selected       = nil,                          -- the selected sound record (convenience for the UI)
   selected_tech  = nil, -- the armed sound's tech line for the bar (core.techfacts, set per selection)
   status         = nil,
-  view           = { scope = "all" },            -- which category set the list is showing
+  view           = stored_browser.view,           -- which category set the list is showing
   query          = "",                           -- search box text
-  sort           = { col = "name", asc = true }, -- matches the Name column's default sort
+  sort           = stored_browser.sort,           -- remembered header sort; safe defaults on stale data
   loud_unit      = stored_unit,                  -- which measurement the Loudness column shows
+  open_library_on_startup = open_library_on_startup,
   -- How many times the columns have been reset — carried over from the last run
   -- (2026-08-11), because it is part of the name ImGui files the table's widths
   -- under: restarting it at 0 made a reset land on a name that already had saved
@@ -575,13 +613,16 @@ local state = {
   -- it is a thing you switch on to check something and off again, and a tool
   -- that silently reopened in mono would be a bug report waiting to happen.
   mono           = false,
+  -- Temporary pitch per audition surface. Each view resets only when its own
+  -- selected sound changes, so browsing never disturbs the armed reference.
+  pitch          = { main = 0, browse = 0 },
   master_db      = math.max(-60, math.min(0, reaper_api.get_master_db())), -- preview level, clamped to -60..0 dB
 
   -- The browser's own selection (Phase 5.9 — independent browsing): a LIBRARY
   -- sound the browser table's row is on, entirely separate from `selected` (the
   -- working view's armed reference). Set only by browse_sound, below; the
-  -- browser's rows must never touch `selected_id` (DESIGN "no REF latch and no
-  -- trim here — browsing can never surprise-mute anything").
+  -- browser's rows must never touch `selected_id` (DESIGN.md "Preview controls"
+  -- and "Library browser").
   browse_id      = nil,
   browse         = nil,
   browse_ids     = {}, -- highlighted browser rows; browse_id remains the latest-click preview
@@ -620,7 +661,7 @@ local state = {
   -- in force for it. They differ because a browse audition deliberately applies no
   -- trim at all, so neither the level nor the waveform can be re-derived from the
   -- sound record alone — the same sound sounds different depending on who started it.
-  preview        = { playing = false, sound_id = nil, position = 0, length = 0,
+  preview        = { playing = false, sound_id = nil, position = 0, length = 0, channels = 0,
     slot = nil, trim_db = 0, paused = { main = nil, browse = nil } },
   -- Reference mode (Phase 4). `active` = the current preview was started BY the
   -- REAPER transport, so only transport changes may stop it (a casual audition the
@@ -637,9 +678,10 @@ local state = {
   -- of the time. One drag at a time, held here rather than per row.
   drag           = nil,
   -- The library browser popup (Phase 5.7 — two-view redesign): closed by
-  -- default, toggled by the working view's Library button / the popup's own
-  -- close button / Esc / an OS file drag passing over the working view.
-  browser_open   = false,
+  -- default unless the startup setting opens it, then toggled by the working
+  -- view's Library button / the popup's own close button / Esc / an OS file
+  -- drag passing over the working view.
+  browser_open   = open_library_on_startup,
   -- Remembered position + size (Phase 5.7 Stage 3), loaded once here; nil the
   -- first time this user ever opens it (or on an ancient ReaImGui without the
   -- geometry-reading calls) — app.lua then falls back to its default size.
@@ -842,11 +884,17 @@ local function play_sound(s, position, slot, loop)
     db       = trim_db + state.master_db,
     loop     = loop,
     position = position,
+    pitch    = state.pitch[slot] or 0,
+    channels = s.channels,
   })
+  -- Multichannel preview has no verified fold-down path, so preview.play turns
+  -- Mono off before it starts. Keep the visible session state with the engine.
+  state.mono = preview.is_mono()
   state.preview.playing  = ok
   state.preview.sound_id = ok and s.id or nil
   state.preview.slot     = ok and slot or nil
   state.preview.trim_db  = ok and trim_db or 0
+  state.preview.channels = ok and preview.channels() or 0
   -- The REAL length of what is playing, not the record's stored duration — the two
   -- disagree when a file was replaced on disk, and the playhead must scale to the
   -- audio actually sounding.
@@ -914,10 +962,15 @@ local function select_sound(id, quiet)
   -- if the user comes back to a sound they never actually paused. The working
   -- view's own slot only — the Library's park is none of this view's business.
   if not holders.paused_on(state, "main", id) then holders.clear_pause(state, "main") end
+  if state.selected_id ~= id then state.pitch.main = 0 end
   state.selected_id = id
   state.selected = find_sound(id)
   state.selected_tech = nil
   if not state.selected then return end
+  if (tonumber(state.selected.channels) or 0) > 2 and state.mono then
+    state.mono = false
+    preview.set_mono(false)
+  end
   -- The bar's tech-facts line (horizontal-layout brief, 2026-08-07), formatted
   -- ONCE per selection — the bar draws this string every frame and must never
   -- probe the file or format it itself (ui reads state; frame-allocation rule).
@@ -971,8 +1024,8 @@ local function audition_browse_sound()
 end
 
 -- Browse a LIBRARY sound in the browser popup: entirely separate from
--- select_sound above (DESIGN "browsing can never surprise-mute anything, and
--- one readout — the working view's — tells what's armed"). Never touches
+-- select_sound above (DESIGN.md "Preview controls" and "Library browser").
+-- Never touches
 -- `selected`/`selected_id`, the armed reference, the latch, or pins_service's
 -- remembered selection — only the browser's own slots.
 -- `quiet` browses without auditioning — used by "Show in library" below, where
@@ -981,6 +1034,7 @@ local function browse_sound(id, quiet, selection)
   -- Same rule select_sound follows, on this window's own slot: a park belongs to
   -- the sound it was made on, so moving the Library to a different row drops it.
   if not holders.paused_on(state, "browse", id) then holders.clear_pause(state, "browse") end
+  if state.browse_id ~= id then state.pitch.browse = 0 end
   state.browse_id = id
   if selection then
     state.browse_ids = selection.ids or {}
@@ -991,7 +1045,11 @@ local function browse_sound(id, quiet, selection)
   end
   state.browse = find_sound(id)
   state.browse_info = nil
-  if not state.browse then return end
+  if not state.browse then
+    reaper_api.set_browser_sound(nil)
+    return
+  end
+  reaper_api.set_browser_sound(id)
   -- Picking a sound clears an old status message: the info row (the status
   -- line's new home, 2026-07-29) should now describe THIS sound, not carry
   -- yesterday's news. Anything below that sets a fresh status still wins.
@@ -1002,6 +1060,15 @@ local function browse_sound(id, quiet, selection)
   holders.forget_wave("browse") -- same as select_sound: the loop fetches, a re-pick retries
   if quiet then return end
   audition_browse_sound()
+end
+
+-- Search text and raw scroll height deliberately start fresh. A remembered
+-- sound is restored silently, then the table centres it the first time the
+-- Library opens, whether that is at startup or later in the session.
+if stored_browser.sound_id then
+  browse_sound(stored_browser.sound_id, true)
+  state.reveal_id = stored_browser.sound_id
+  state.reveal_seq = state.reveal_seq + 1
 end
 
 -- "Show in library" (a pin's right-click menu, 2026-08-01): open the browser on
@@ -1031,6 +1098,7 @@ local function show_in_library(pin_id)
   else
     state.view = { scope = "uncategorised" }
   end
+  reaper_api.set_browser_view(state.view)
   -- A search still in the box would filter the very row we're revealing straight
   -- back out. Cleared ONLY when it actually would: a query the sound already
   -- matches is the user's, and wiping that would be the surprise.
@@ -1135,6 +1203,7 @@ local function drop_sound()
     entries[#entries + 1] = {
       path = sound_path(sound), name = sound.name,
       span_start = sound.span_start, span_end = sound.span_end,
+      pitch = drag.pitch,
     }
   end
   local s = find_sound(drag.sound_id)
@@ -1154,16 +1223,17 @@ local function drop_sound()
   -- moves between the frame that painted the strip and the release, and the
   -- drop must do what the mouse is over NOW.
   local new_track = dragout.newtrack_zone(target) ~= nil
-  local ok, result = dragout.insert(entries, target.track, target.position, new_track)
+  local ok, result, details = dragout.insert(entries, target.track, target.position, new_track)
   if ok then
-    if #entries > 1 then
-      state.status = new_track
-        and string.format("Added %d sounds to a new track.", #entries)
-        or string.format("Added %d sounds to the timeline.", #entries)
+    if new_track then
+      local channel_text = details and details.needed_channels > 2
+        and string.format(" %d channels were enabled on the track.", details.needed_channels)
+        or ""
+      state.status = #entries > 1
+        and string.format("Added %d sounds to a new track.%s", #entries, channel_text)
+        or string.format("Added \"%s\" to a new track.%s", s.name, channel_text)
     else
-      state.status = new_track
-        and string.format("Added \"%s\" to a new track.", s.name)
-        or dragout.landed_at(target.track, result)
+      state.status = dragout.landed_at(target.track, result, details, #entries)
     end
   else
     state.status = #entries > 1
@@ -1209,6 +1279,7 @@ local function delete_sound(id, batch)
   -- The row is gone, so neither view may still be pointing at it.
   holders.forget_selection(state, mine)
   holders.forget_browse(state, mine)
+  reaper_api.set_browser_sound(state.browse_id)
   state.browse_ids[id] = nil
   if state.browse_anchor_id == id then state.browse_anchor_id = nil end
   if not batch then refresh_view() end
@@ -1441,7 +1512,7 @@ local function toggle_reference()
       ref.latched, ref.live, ref.pending = view.latched, view.live, view.pending
       ref.owner_name, ref.queued_count = view.owner_name, view.queued_count
       state.status = "Reference mode is on for " .. (view.owner_name or "this project") ..
-        ". Its master is muted. Press Play in REAPER to hear the selected reference."
+        ". Its master is muted. Press Play in Reaper to hear the selected reference."
     else
       state.status = reason
       reaper_api.message(reason, "yb-Reference · Reference Mode")
@@ -1457,7 +1528,7 @@ end
 if loudness.available() then
   state.analysis_queue = analysis.queue(state.library)
 else
-  state.status = "Loudness measurements aren't available in this version of REAPER. Everything else works normally."
+  state.status = "Loudness measurements aren't available in this version of Reaper. Everything else works normally."
 end
 
 -- Check the folder against the records both ways round, and say what's wrong rather
@@ -1689,6 +1760,9 @@ local function switch_library(new_dir)
   -- The view could be filtering by a category id from the OLD library — in the
   -- new one that id is a different category or nothing at all. Back to All.
   state.view = { scope = "all" }
+  state.reveal_id = nil
+  reaper_api.set_browser_view(state.view)
+  reaper_api.set_browser_sound(nil)
   refresh_view()
   state.analysis_queue = loudness.available() and analysis.queue(state.library) or {}
   -- The pin markers point into the library, so they're re-derived against the new one.
@@ -1757,6 +1831,7 @@ local function handle_action(a)
   elseif a.type == "select_view" then
     state.view = a.view
     refresh_view()
+    reaper_api.set_browser_view(state.view)
   elseif a.type == "set_query" then
     state.query = a.query
     refresh_view()
@@ -1766,6 +1841,7 @@ local function handle_action(a)
     if a.col and (state.sort.col ~= a.col or state.sort.asc ~= a.asc) then
       state.sort = { col = a.col, asc = a.asc }
       refresh_view()
+      reaper_api.set_browser_sort(state.sort)
     end
   elseif a.type == "drag_sound" then
     -- The name is captured HERE, at the start of the drag, not looked up each
@@ -1780,8 +1856,20 @@ local function handle_action(a)
       local ids = a.ids or { a.id }
       local drag_name = s and s.name or nil
       if #ids > 1 then drag_name = string.format("%d sounds", #ids) end
+      local drag_channels = 1
+      for _, id in ipairs(ids) do
+        local dragged = find_sound(id)
+        local channels = dragged and tonumber(dragged.channels) or 0
+        if channels > drag_channels then drag_channels = channels end
+      end
       state.drag = { sound_id = a.id, sound_ids = ids, name = drag_name,
-        proj = state.pins and state.pins.proj }
+        channels = drag_channels,
+        proj = state.pins and state.pins.proj,
+        pitch = ((a.target == "browse" and a.id == state.browse_id)
+          and state.pitch.browse)
+          or ((a.target ~= "browse" and a.id == state.selected_id)
+            and state.pitch.main)
+          or 0 }
     end
   elseif a.type == "drop_sound" then
     drop_sound()
@@ -1876,9 +1964,9 @@ local function handle_action(a)
       end
     end
   elseif a.type == "set_browser_wave_h" then
-    -- The audition strip's dragged height, reported once on release (or with
-    -- no height at all: the seam's reset gesture, meaning "back to whatever
-    -- the default is"). Presentation-only, like the layout mode above.
+    -- The audition strip's dragged height at 100% UI Size, reported once on
+    -- release (or with no height at all: the seam's reset gesture, meaning
+    -- "back to whatever the default is"). Presentation-only.
     local h = a.h and math.floor(a.h + 0.5) or nil
     if h ~= state.browser_wave_h then
       state.browser_wave_h = h
@@ -1945,7 +2033,13 @@ local function handle_action(a)
   elseif a.type == "toggle_auto" then
     state.auto_audition = not state.auto_audition
   elseif a.type == "toggle_mono" then
-    state.mono = not state.mono
+    -- Match the control's availability exactly. While either view is playing,
+    -- Mono applies to that live sound; otherwise the working-view selection is
+    -- the sound the control describes.
+    local mono_channels = state.preview.playing and (tonumber(state.preview.channels) or 0)
+      or (state.selected and (tonumber(state.selected.channels) or 0) or 0)
+    if mono_channels > 2 then return end
+    local wanted = not state.mono
     -- Applies to whatever is sounding right now, reference mode included: it is
     -- the same preview path, and a mono check you have to restart the sound to
     -- hear would be useless for the thing it exists for — flicking between mono
@@ -1955,7 +2049,19 @@ local function handle_action(a)
     -- changes which are above silence (see the preview.lua header). Rebuilding
     -- here is what caused the click the user reported on 2026-08-07 — do not
     -- reintroduce it.
-    preview.set_mono(state.mono)
+    preview.set_mono(wanted)
+    state.mono = preview.is_mono()
+  elseif a.type == "set_pitch" then
+    local slot = (a.target == "browse") and "browse" or "main"
+    local value = pitch.clamp(a.value)
+    state.pitch[slot] = value
+    local id = (slot == "browse") and state.browse_id or state.selected_id
+    -- A quiet selection can leave the old sound finishing in this slot. Only
+    -- retune audio that belongs to the sound this control currently describes.
+    if state.preview.playing and state.preview.slot == slot
+      and state.preview.sound_id == id then
+      preview.set_pitch(value)
+    end
   elseif a.type == "toggle_reference" then
     toggle_reference()
   elseif a.type == "seek" then
@@ -2100,25 +2206,34 @@ local function handle_action(a)
       reaper_api.set_match_presets(match.encode_presets(list))
     end
   elseif a.type == "pin_sounds" or a.type == "pin_sound" then
-    -- Pin failures are all non-destructive (already pinned, project not saved yet,
-    -- a copy that didn't take) — the status line is the honest place for them.
     -- Arrives from the right-click menu or as a drop on THIS PROJECT; the drop
     -- consumed the drag (clearing a drag that isn't there is a no-op).
     state.drag = nil
-    local first_pin
-    for _, id in ipairs(a.ids or { a.id }) do
-      local s = find_sound(id)
-      if s then
-        local _, msg, pid = pins_service.pin_sound(state, s)
-        state.status = msg
-        first_pin = first_pin or pid
+    local refusal = pins_service.can_pin(state)
+    if refusal then
+      state.status = refusal
+      -- The Library info row can be showing the selected sound's facts, so a
+      -- status-only refusal is easy to miss. An unsaved project needs one clear
+      -- recovery action at the moment the user tries to pin.
+      if not state.pins.load_error and not state.pins.dir then
+        reaper_api.message(refusal, "yb-Reference · Save Project First")
       end
-    end
-    if first_pin then
-      -- Adding or pinning never starts playback. Auto-audition remains a
-      -- browser-click preference, not an import side effect.
-      select_sound(first_pin, true)
-      walkthrough.event(state.walkthrough, "sound_pinned")
+    else
+      local first_pin
+      for _, id in ipairs(a.ids or { a.id }) do
+        local s = find_sound(id)
+        if s then
+          local _, msg, pid = pins_service.pin_sound(state, s)
+          state.status = msg
+          first_pin = first_pin or pid
+        end
+      end
+      if first_pin then
+        -- Adding or pinning never starts playback. Auto-audition remains a
+        -- browser-click preference, not an import side effect.
+        select_sound(first_pin, true)
+        walkthrough.event(state.walkthrough, "sound_pinned")
+      end
     end
   elseif a.type == "unpin" then
     unpin_sound(a.id)
@@ -2179,6 +2294,9 @@ local function handle_action(a)
     local refusal = pins_service.can_pin(state)
     if refusal then
       state.status = refusal .. " Nothing was imported."
+      if not state.pins.load_error and not state.pins.dir then
+        reaper_api.message(state.status, "yb-Reference · Save Project First")
+      end
     else
       -- Dropped files the library ALREADY holds never come back from the import
       -- (dedup skips them), so resolve them up front and pin the existing
@@ -2220,6 +2338,8 @@ local function handle_action(a)
     -- the state machine walks welcome -> stops -> done through one door.
     if a.ev == "skip" then
       walkthrough.skip(state.walkthrough)
+    elseif a.ev == "back" then
+      walkthrough.previous(state.walkthrough)
     elseif a.ev == "next" then
       walkthrough.next(state.walkthrough)
     elseif a.ev == "show" then
@@ -2244,6 +2364,23 @@ local function handle_action(a)
     -- (installed version, pin state) so the modal describes now, not the
     -- last daily check.
     updater.refresh_registry()
+  elseif a.type == "set_open_library_on_startup" then
+    state.open_library_on_startup = a.enabled == true
+    reaper_api.set_open_library_on_startup(state.open_library_on_startup)
+  elseif a.type == "preview_ui_scale" then
+    -- Slider movement previews on the next complete frame. Persistence waits
+    -- for release so one drag does not write the same preference repeatedly.
+    local next_scale = theme.normalise_scale(a.scale)
+    app.request_ui_scale(state.ui_scale, next_scale)
+    state.ui_scale = theme.set_scale(next_scale)
+  elseif a.type == "set_ui_scale" then
+    local next_scale = theme.normalise_scale(a.scale)
+    app.request_ui_scale(state.ui_scale, next_scale)
+    state.ui_scale = theme.set_scale(next_scale)
+    reaper_api.set_ui_scale(state.ui_scale)
+  elseif a.type == "set_accent_colour" then
+    state.accent_colour = theme.set_accent(a.colour)
+    reaper_api.set_accent_colour(state.accent_colour)
   elseif a.type == "start_update" then
     -- Settings' Update-now button. The updater owns everything from here:
     -- the single-repo sync (ReaPack's Progress window appears), the verify,
@@ -2314,11 +2451,13 @@ local function handle_action(a)
     try(function() categories.remove(state.library, a.id) end, function()
       prune_category_view()
       refresh_view()
+      reaper_api.set_browser_view(state.view)
     end, "yb-Reference · Delete Category")
   elseif a.type == "remove_categories" then
     try(function() categories.remove_many(state.library, a.ids) end, function()
       prune_category_view()
       refresh_view()
+      reaper_api.set_browser_view(state.view)
     end, "yb-Reference · Delete Categories")
   end
 end
@@ -2338,8 +2477,9 @@ reaper.atexit(function()
   reaper_api.cancel_folder_picker()
   dragout.hide_tag() -- a drag in flight when the script is closed leaves no label behind
   -- ...and no throwaway item behind either. This runs on every way the script
-  -- ends, a Lua error included — which is the realistic way one could be
-  -- stranded (see dragout.hide_ghost on why a REAPER crash needs nothing more).
+  -- ends, including a Lua error. A REAPER hard crash cannot run this cleanup;
+  -- a rare autosave during an active drag may retain the item. There is no
+  -- startup deletion because it could remove later user work.
   dragout.hide_ghost()
   reaper_api.mark_action_running(CMD_ID, false)
 end)
@@ -2349,11 +2489,10 @@ end)
 -- state itself, because more than one action can change it (toggle, Esc, the
 -- ✕, "Show in library") — one comparison catches every door.
 local walk_browser_was = false
--- ...and the walkthrough's own POSITION edge closes the browser when the tour
--- moves on to a main-window stop (user's call, round 2): the latch stop points
--- at the working view's bar, and a Library window left open would cover the
--- very thing being ringed. nil while inactive so a replay can't inherit a
--- stale position.
+-- ...and the walkthrough's own POSITION edge keeps the correct host visible:
+-- main-window stops close the Library so it cannot cover their target, while
+-- going Back to a browser stop reopens it. nil while inactive so a replay can't
+-- inherit a stale position.
 local walk_pos_was = nil
 -- A successful self-restart should terminate this instance immediately. If
 -- REAPER accepts the command but leaves the old loop alive, turn the status
@@ -2425,6 +2564,7 @@ local function loop()
       state.preview.sound_id = nil
       state.preview.slot = nil
       state.preview.trim_db = 0
+      state.preview.channels = 0
       state.preview.position = 0
       -- NOT `preview.paused`: this is whatever the ONE shared preview was just
       -- sounding (either slot's), which is independent of the per-slot pause
@@ -2550,7 +2690,6 @@ local function loop()
   -- it here would show a drag cursor one frame past the drop.)
   if state.drag then
     local target = dragout.target()
-    state.drag.hint = dragout.hint(target)
     -- Remembered for the cursor below: the hand where a release lands the
     -- sound, the no-entry circle where it would cancel.
     state.drag.over_arrange = target.over_arrange
@@ -2572,6 +2711,7 @@ local function loop()
     -- REPLACES the ghost while it shows: a ghost sitting on the track below
     -- would be pointing at the wrong place entirely. ui/ draws it from here.
     state.drag.newtrack = gs and dragout.newtrack_zone(target) or nil
+    state.drag.hint = dragout.hint(target, state.drag.channels, state.drag.newtrack ~= nil)
     if state.drag.newtrack then gs = nil end
     -- A single REAPER item would falsely promise that only one sound will land.
     -- Until the adapter can safely own several throwaway items, multi-drags use
@@ -2579,7 +2719,7 @@ local function loop()
     if state.drag.sound_ids and #state.drag.sound_ids > 1 then gs = nil end
     if gs then
       dragout.show_ghost(target.track, target.position, sound_path(gs), gs.name,
-        gs.span_start, gs.span_end)
+        gs.span_start, gs.span_end, state.drag.pitch)
     else
       dragout.hide_ghost()
     end
@@ -2604,7 +2744,17 @@ local function loop()
     (state.pins and state.pins.data and #state.pins.data.pins or 0) > 0,
     state.selected ~= nil)
 
-  local open, action, over_target, give_focus, forward_keys, feedback_visible = app.frame(ctx, state)
+  -- ReaImGui reports a false mouse release when an OS file drag crosses between
+  -- our two native windows. js_ReaScriptAPI supplies the physical button truth;
+  -- app.frame uses it only if the normal target fails to hover. Polling cannot
+  -- be gated on ReaImGui's payload because that payload is the thing that goes
+  -- briefly blind during the handoff.
+  local file_mouse_x, file_mouse_y, file_left_down
+  if state.deps.file_drag_rescue then
+    file_mouse_x, file_mouse_y, file_left_down = reaper_api.file_drag_mouse()
+  end
+  local open, action, over_target, give_focus, forward_keys, feedback_visible = app.frame(
+    ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   if action then handle_action(action) end
 
   -- The pane's own fixed red line is enough while the user can see it. In every
@@ -2624,17 +2774,19 @@ local function loop()
     fb_failure_notice = nil
   end
 
-  -- The walkthrough left the browser stops for a main-window one: close the
-  -- Library for them (see walk_pos_was above). After handle_action, so a Next
-  -- press or a real pin has already moved the position this same frame. Only
-  -- on a REAL transition (walk_pos_was non-nil) — starting the tour never
-  -- slams a window the user had open.
+  -- Keep the current stop's host visible after a real transition (see
+  -- walk_pos_was above). After handle_action, so Next, Back, or a real deed has
+  -- already moved the position this same frame. Starting the tour never changes
+  -- a window the user already had open.
   if state.walkthrough.active then
     if walk_pos_was ~= state.walkthrough.pos then
       local cur = walkthrough.current(state.walkthrough)
-      if walk_pos_was and type(cur) == "table" and cur.window == "main"
-        and state.browser_open then
-        close_browser()
+      if walk_pos_was and type(cur) == "table" then
+        if cur.window == "main" and state.browser_open then
+          close_browser()
+        elseif cur.window == "browser" and not state.browser_open then
+          state.browser_open = true
+        end
       end
       walk_pos_was = state.walkthrough.pos
     end

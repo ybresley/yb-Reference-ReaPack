@@ -1,13 +1,13 @@
--- ruler: tick/label placement for the working view's time ruler (waveform
--- ruler brief, 2026-08-05 — the settled design; docs/RESEARCH.md's "Waveform
--- time ruler" pass is the general research it started from, not what's built
--- here). Pure Lua, zero reaper.* calls: handed a sound's duration, the pixel
+-- ruler: tick/label placement for the working view's time ruler. The general
+-- evidence lives in docs/research/ui-and-market-benchmarks.md, "Waveform time
+-- ruler"; this file and its specs define what is built. Pure Lua, zero
+-- reaper.* calls: handed a sound's duration, the pixel
 -- width it has to fill, and a text-measuring function, it answers "where do
 -- the ticks go and what do they say" — nothing about HOW to draw them
 -- (colour, font, DrawList calls) lives here; that's lib/ui/waveform.lua's job.
 --
 -- The cadence is STRICTLY EVEN (user's explicit call, overriding the more
--- common "always label the end" ruler convention from RESEARCH.md): major
+-- common "always label the end" ruler convention from the early research): major
 -- ticks land at k*step for k=0,1,2,... while k*step <= duration, full stop.
 -- The final partial interval past the last major is left unticked rather than
 -- getting a synthesised end-of-file tick.
@@ -54,13 +54,6 @@ local LABEL_PAD_PX = 12
 -- a hair over 0.3) can never drop or add a tick that should/shouldn't be there.
 local EPS = 1e-9
 
--- Every label on the ladder is built from the same handful of leading digits
--- (1/2/5, plus the odd 15/30 quarter/half-unit) with fixed-width zero-padded
--- fields, so a LARGER value never prints SHORTER than a smaller one — the
--- highest-value major at a given step (the last one, k_max) is therefore
--- always that step's widest label, with or without the suffix. That is what
--- lets choose_step() measure one candidate label per step instead of the
--- whole tick run a fine step over a long duration could otherwise imply.
 local function format_major(t, duration_sec, is_last)
   local label
   if duration_sec < 1 then
@@ -88,6 +81,31 @@ local function format_major(t, duration_sec, is_last)
   return label
 end
 
+-- Labels are centred on their ticks except at the two panel edges, where the
+-- drawing code clamps them inside. That clamp changes the spacing equation:
+-- the first label uses all of its width to the right of zero, rather than half.
+-- Testing the actual laid-out bounds also covers proportional-font surprises
+-- (for example "0:55" can be wider than the numerically later "1:00").
+local function label_left(x, label_w, width_px)
+  local furthest = math.max(0, width_px - label_w)
+  return math.max(0, math.min(x - label_w * 0.5, furthest))
+end
+
+local function labels_fit(step, duration_sec, width_px, measure)
+  local px_per_sec = width_px / duration_sec
+  local k_max = math.floor(duration_sec / step.s + EPS)
+  local previous_right
+  for k = 0, k_max do
+    local x = k * step.s * px_per_sec
+    local label = format_major(k * step.s, duration_sec, k == k_max)
+    local label_w = measure(label)
+    local left = label_left(x, label_w, width_px)
+    if previous_right and left < previous_right + LABEL_PAD_PX then return false end
+    previous_right = left + label_w
+  end
+  return true
+end
+
 -- The smallest step whose majors fit without crowding, so the ruler is as
 -- fine-grained as the panel honestly allows — chosen by measuring, never by
 -- guessing from the duration/width shape. Falls back to the ladder's coarsest
@@ -99,7 +117,11 @@ local function choose_step(duration_sec, width_px, measure)
     local spacing = step.s * px_per_sec
     local k_max = math.floor(duration_sec / step.s + EPS)
     local last_label = format_major(k_max * step.s, duration_sec, true)
-    if spacing >= measure(last_label) + LABEL_PAD_PX then
+    -- The cheap test rejects dense candidates before labels_fit walks their
+    -- majors. Any candidate that reaches that walk has at most roughly one
+    -- label per LABEL_PAD_PX of panel width, keeping ruler rebuilds bounded.
+    if spacing >= measure(last_label) + LABEL_PAD_PX
+      and labels_fit(step, duration_sec, width_px, measure) then
       return step
     end
   end
@@ -129,12 +151,24 @@ function ruler.build(duration_sec, width_px, measure)
   local minors_on = minor_gap >= 4 -- < 4px: suppress minors entirely, majors stay
 
   local ticks = {}
+  local previous_label_right
   for k = 0, k_max do
     local t = k * step.s
     local is_last = (k == k_max)
+    local label = format_major(t, duration_sec, is_last)
+    local label_w = measure(label)
+    local left = label_left(t * px_per_sec, label_w, width_px)
+    -- Normally choose_step has already proved every label fits. This final
+    -- guard covers the extreme fallback where even the coarsest ladder step
+    -- cannot fit: keep ticks, but omit only the labels that would collide.
+    if previous_label_right and left < previous_label_right + LABEL_PAD_PX then
+      label = nil
+    else
+      previous_label_right = left + label_w
+    end
     ticks[#ticks + 1] = {
       x = t * px_per_sec, t = t, major = true,
-      label = format_major(t, duration_sec, is_last),
+      label = label,
     }
     -- Minors only fill intervals between two REAL majors (k < k_max): the
     -- trailing partial interval past the last major has no major of its own

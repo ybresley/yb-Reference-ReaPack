@@ -1,7 +1,7 @@
 -- changelog: the pure half of the What's New feature. Handed CHANGELOG.md as
 -- plain text, it answers three questions — what releases exist, which ones has
--- this user not seen, and what does one of them look like flattened into the
--- one-paragraph shape the ReaPack script header can hold.
+-- this user not seen, and what does one of them look like in the plain-text
+-- shape shown by ReaPack after an update.
 --
 -- CHANGELOG.md is the single source of truth (decided 2026-08-08,
 -- `.brief/_done/changelog/`): the script's @changelog block and the GitHub
@@ -175,27 +175,9 @@ function changelog.find(releases, version)
   return nil
 end
 
--- One release flattened into a single paragraph — what the ReaPack script
--- header can hold. The header is a Lua comment block: indented lines only, no
--- headings, no blank lines, so the group names become inline labels and the
--- detail lines are dropped (they are the part a small ReaPack box has least room
--- for, and the full text is one click away in the tool).
-function changelog.flatten(release)
-  if not release then return "" end
-  local parts = {}
-  for _, g in ipairs(release.groups or {}) do
-    local bits = {}
-    for _, e in ipairs(g.entries) do
-      bits[#bits + 1] = e.area and (e.area .. ": " .. e.text) or e.text
-    end
-    if #bits > 0 then parts[#parts + 1] = g.name .. " \u{00B7} " .. table.concat(bits, " ") end
-  end
-  return table.concat(parts, "  ")
-end
-
--- Greedy word wrap. Used by the header generator so a flattened release sits
--- inside the comment block's width; pure and here rather than in the script so
--- the wrapping is pinned by a test like everything else.
+-- Greedy word wrap. Used by the header generator so release notes sit inside
+-- the comment block's width; pure and here rather than in the script so the
+-- wrapping is pinned by a test like everything else.
 function changelog.wrap(text, width)
   local lines, line = {}, ""
   for word in tostring(text):gmatch("%S+") do
@@ -210,6 +192,38 @@ function changelog.wrap(text, width)
   end
   if line ~= "" then lines[#lines + 1] = line end
   return lines
+end
+
+-- One release as structured plain text for ReaPack's transaction report.
+-- ReaPack adds the version, author and date itself, so this contains only group
+-- headings and entries. Detail lines stay in the tool's full release notes; the
+-- compact native report gets the short first line of each entry.
+function changelog.reapack_lines(release, width)
+  if not release then return {} end
+
+  local out = {}
+  local content_width = tonumber(width) or 74
+  local entry_width = math.max(1, content_width - 4) -- room for "  • "
+  -- ReaPack trims ordinary spaces before it displays the transaction report.
+  -- Non-breaking spaces survive the header parser and that trim, so they preserve
+  -- both the visual spacer above each group and the nesting beneath it.
+  local spacer = "\u{00A0}"
+  local indent = spacer .. spacer
+
+  for _, g in ipairs(release.groups or {}) do
+    if #(g.entries or {}) > 0 then
+      out[#out + 1] = spacer
+      out[#out + 1] = tostring(g.name or "")
+      for _, e in ipairs(g.entries) do
+        local text = e.area and (e.area .. ": " .. e.text) or e.text
+        for i, line in ipairs(changelog.wrap(text, entry_width)) do
+          out[#out + 1] = (i == 1 and (indent .. "• ") or (indent .. indent)) .. line
+        end
+      end
+    end
+  end
+
+  return out
 end
 
 return changelog

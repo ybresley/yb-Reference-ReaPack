@@ -18,7 +18,7 @@
 -- check is. The &1024 bit is a REAL sum, not a channel pick — proved in REAPER
 -- with a generated two-tone file (300 Hz left, 900 Hz right): played together,
 -- both pitches came out of both speakers, which a channel pick cannot do. See
--- docs/RESEARCH.md, "Rate / pitch / mono on the preview path".
+-- docs/research/reaper-host-facts.md, "Pitch, rate, and mono".
 --
 -- Everything below therefore works on a LIST of parts rather than a single
 -- handle. Every operation fans out; every part is released. That is the whole
@@ -34,18 +34,26 @@
 -- this", because a plugin never restarts anything; it changes what it does to
 -- the signal already flowing.
 --
--- So all three routes are created and played TOGETHER, and the mono button is a
--- volume change on parts that never stop. Nothing restarts, so there is no gap
--- to hear, and because every part started on the same call they stay locked to
--- each other — which also means switching can't jump the playhead.
+-- For mono and stereo files all three routes are created and played TOGETHER,
+-- and the mono button is a volume change on parts that never stop. Nothing
+-- restarts, so there is no gap to hear, and because every part started on the
+-- same call they stay locked to each other — which also means switching can't
+-- jump the playhead.
 --
 -- The cost is honest and small: three preview objects and three PCM sources for
 -- one sound instead of one of each. This tool plays a single reference at a
 -- time, and a streaming decoder is cheap next to a click every time the user
 -- checks mono. It also REMOVED code — no rebuild, no remembering the path and
 -- loop state to restart from.
+--
+-- Files with more than two channels use the direct Monitor-FX route only. The
+-- SWS mono flag is proven for stereo but not for arbitrary channel layouts, so
+-- applying it there would claim a fold-down whose channel treatment we have not
+-- verified. Starting no silent mono routes also avoids opening three decoders
+-- for a mode the UI does not offer.
 
 local preview = {}
+local pitch = require("core.pitch")
 
 -- The fixed routes. `mono` says which monitoring mode a route belongs to; the
 -- other routes are held at silence rather than stopped.
@@ -56,6 +64,7 @@ local ROUTES = {
   { outchan = 1024, mono = true  },
   { outchan = 1025, mono = true  },
 }
+local DIRECT_ROUTES = { ROUTES[1] }
 
 -- The live preview: one part per route while anything is playing. Module-local
 -- so there is exactly one place that starts, stops and releases handles —
@@ -66,7 +75,9 @@ local live = {
                 -- file, not the library record, so a file replaced on disk still
                 -- gets a truthful playhead
   mono   = false, -- the monitoring MODE: survives stop/start, like a user setting
+  channels = 0,   -- source channels while playing; >2 makes mono unavailable
   db     = 0,     -- the level the AUDIBLE parts play at; silent parts sit at 0
+  pitch  = 0,     -- semitones; natural rate-style pitch, shared by every route
 }
 
 -- dB -> linear gain for D_VOLUME (0 dB = 1.0). Volume only ever needs a real
@@ -108,6 +119,7 @@ local function release()
     live.parts[i] = nil
   end
   live.length = 0
+  live.channels = 0
 end
 
 -- What a route should be playing at right now: the real level if it belongs to
@@ -134,19 +146,34 @@ local function discard(built)
     if built[i].handle then reaper.CF_Preview_Stop(built[i].handle) end
     if built[i].src then reaper.PCM_Source_Destroy(built[i].src) end
   end
+  live.channels = 0
 end
 
 -- Build every part fully, THEN start them back to back. Anything done between
 -- the Play calls widens the gap between players of the same file, and the two
 -- mono parts carry the same signal to opposite speakers — an offset there combs
 -- when they meet in the room.
-local function start(path, db, loop, position)
+local function start(path, db, loop, position, semitones, channels)
   release()
+  channels = math.max(1, math.floor(tonumber(channels) or 2))
   live.db = db or 0
+  live.pitch = pitch.clamp(semitones)
+  local rate = pitch.rate(live.pitch)
   local built = {}
-  for i = 1, #ROUTES do
-    local route = ROUTES[i]
-    local src = reaper.PCM_Source_CreateFromFile(path)
+
+  -- The file itself is authoritative. A managed file can be replaced outside
+  -- the tool after import, so its stored count is only a fallback. Open the
+  -- first route, read the live source, then decide whether mono routes are safe.
+  local first_src = reaper.PCM_Source_CreateFromFile(path)
+  if not first_src then return false end
+  local actual = reaper.GetMediaSourceNumChannels(first_src)
+  if actual and actual >= 1 then channels = math.floor(actual) end
+  live.channels = channels
+  if channels > 2 then live.mono = false end
+  local routes = channels > 2 and DIRECT_ROUTES or ROUTES
+  for i = 1, #routes do
+    local route = routes[i]
+    local src = i == 1 and first_src or reaper.PCM_Source_CreateFromFile(path)
     if not src then discard(built) return false end
     local h = reaper.CF_CreatePreview(src)
     if not h then
@@ -157,6 +184,10 @@ local function start(path, db, loop, position)
     reaper.CF_Preview_SetValue(h, "I_OUTCHAN", route.outchan)
     reaper.CF_Preview_SetValue(h, "B_LOOP", loop and 1 or 0)
     reaper.CF_Preview_SetValue(h, "D_VOLUME", gain_for(route))
+    -- Natural pitch: rate and pitch move together. Preserve-pitch must remain
+    -- off, or this would become a time-stretch control instead.
+    reaper.CF_Preview_SetValue(h, "B_PPITCH", 0)
+    reaper.CF_Preview_SetValue(h, "D_PLAYRATE", rate)
     if position and position > 0 then
       reaper.CF_Preview_SetValue(h, "D_POSITION", position)
     end
@@ -170,11 +201,12 @@ local function start(path, db, loop, position)
 end
 
 -- Start previewing a file. Stops and releases any current preview FIRST, so there
--- is never more than one sound playing. opts: { db, loop, position }.
+-- is never more than one sound playing. opts: { db, loop, position, pitch,
+-- channels }. Unknown channel counts retain the established stereo behaviour.
 -- Returns true on success, false if the file couldn't be opened as audio.
 function preview.play(path, opts)
   opts = opts or {}
-  return start(path, opts.db, opts.loop, opts.position)
+  return start(path, opts.db, opts.loop, opts.position, opts.pitch, opts.channels)
 end
 
 function preview.stop()
@@ -190,12 +222,15 @@ end
 -- the whole reason the parts are built the way they are (see the module header).
 function preview.set_mono(on)
   on = on and true or false
+  if on and live.channels > 2 then return false end
   if on == live.mono then return end
   live.mono = on
   apply_gains()
+  return true
 end
 
 function preview.is_mono() return live.mono end
+function preview.channels() return live.channels end
 
 -- Live-adjust the playing preview's volume (dB). No-op when nothing plays.
 -- Goes through the same gain rule as the mono switch, so the silent routes stay
@@ -204,6 +239,23 @@ function preview.set_volume_db(db)
   live.db = db or 0
   apply_gains()
 end
+
+-- Change natural pitch without rebuilding or restarting any route. The same
+-- write reaches the audible and silent routes so switching mono later never
+-- reveals a route left at an older pitch.
+function preview.set_pitch(semitones)
+  live.pitch = pitch.clamp(semitones)
+  local rate = pitch.rate(live.pitch)
+  for i = 1, #live.parts do
+    local h = handle_of(live.parts[i])
+    if h then
+      reaper.CF_Preview_SetValue(h, "B_PPITCH", 0)
+      reaper.CF_Preview_SetValue(h, "D_PLAYRATE", rate)
+    end
+  end
+end
+
+function preview.pitch() return live.pitch end
 
 function preview.set_loop(on)
   local v = on and 1 or 0

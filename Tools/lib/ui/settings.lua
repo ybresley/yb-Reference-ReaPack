@@ -38,6 +38,8 @@ local settings = {}
 -- button — cosmetic, so the row still draws rather than being dropped.
 local HAS_ALIGN_TEXT = reaper.ImGui_AlignTextToFramePadding ~= nil
 local HAS_CHILD_PAD  = reaper.ImGui_ChildFlags_AlwaysUseWindowPadding ~= nil
+local HAS_GROUP_CHILD = reaper.ImGui_ChildFlags_AutoResizeY ~= nil
+  and reaper.ImGui_Col_Border ~= nil
 local HAS_WRAP_POS   = reaper.ImGui_PushTextWrapPos ~= nil and reaper.ImGui_PopTextWrapPos ~= nil
 local HAS_ESCAPE     = reaper.ImGui_IsKeyPressed ~= nil and reaper.ImGui_Key_Escape ~= nil
 -- The Help composer's conveniences, each optional: without multiline the box
@@ -60,6 +62,8 @@ local HAS_VIEWPORT   = reaper.ImGui_GetMainViewport ~= nil and reaper.ImGui_View
 -- lands where the user left off.
 local ui = { open = false, section = "library", libdir = "" }
 
+function settings.is_open() return ui.open end
+
 -- The browser's gear calls this. A real window, not a modal (2026-08-08, user's
 -- call): the rest of the tool stays live and clickable behind it — "just make it
 -- open like a normal popup basically" — so opening is a plain flag, not an
@@ -78,79 +82,92 @@ end
 
 --------------------------------------------------------------- the row grammar
 
--- ONE setting = a NAME line, then a VALUE line (2026-08-10,
--- `.brief/settings-row-shape` — supersedes the 08-08 one-line grammar: its
--- fixed `SET_LABEL_W` name column measured nothing, so "Project References"
--- overprinted its own path the day it arrived. Two runs of text must never
--- compete for pixels — the name now owns a line, so no name can ever reach a
--- value again):
+-- A setting label uses Title Case inside a panel. Its value or control sits on
+-- the next line when it needs the panel width; compact boolean rows may keep the
+-- control on the label line. Hairlines separate settings within one category.
 --
---   NAME
---   value                                        [ button ][icon]
---   one line of explanation, only where it's needed
---   ────────────────────────────────── hairline, then the next row
---
---   * The NAME has its own line, in THE HEADING VOICE — the bold cut at
---     GROUP_FS, ALL CAPS, TEXT_PRIMARY (`theme.push_heading_font`; 2026-08-10,
---     `.brief/settings-headings`): a stacked setting is a small section, and
---     the tool has ONE voice that leads sections (the Loudness panel's, What's
---     New's). It wore the dim body label voice for a few hours and the user
---     called it out — the white path under it outranked its own name. Callers
---     still pass Title Case; this file uppercases at draw.
---   * The VALUE takes the control line's full width up to the controls —
---     at the window's 620px most real paths show uncut. The controls ride
---     the VALUE's line, not the name's (the user's own amendment on the
---     brief's answer), the value centred to their height.
---   * A row with NO value keeps its controls on the name line — a one-line
---     row, never an empty second line — and they sit BESIDE the name, not at
---     the far edge (2026-08-10, user-reported: flush right put Show ~400px
---     from "Walkthrough", the exact name-to-control gulf this grammar exists
---     to prevent; proximity wins, as it did for values on 08-08).
---   * The CONTROL has exactly TWO sizes: a button with a word on it is always
---     `SET_ACTION_W`, and a bare "…" is a control-height square (`opts.compact`).
---     Sizing each button by its own text meant no two ever matched.
---   * A HAIRLINE opens every row but the first — never a trailing one.
---   * FACTS ARE NOT ROWS. Things you read go on one line at the section's end
---     (`draw_facts`), so a count never has to pretend to be a setting.
---   * EVERY WORD IS AT THE BODY SIZE. Hierarchy is colour only — the explanation
---     lines were `GROUP_FS` until the user reported them unreadable (the third
---     time 11px has drawn that complaint; see the UI skill).
---
--- opts.button   a label; the row returns true on the frame it is clicked
--- opts.beside   the button rides right beside the value instead of at the far
---               edge — for a row whose "value" is a sentence about what the
---               button does, where the far edge would put the control a pane's
---               width from the words that explain it (2026-08-11, the
---               Walkthrough row; same proximity rule as a value-less row)
--- opts.compact  that button is a control-height square, not a full-width action
--- opts.dead     draw the button pressed-out and ignore clicks (same footprint —
---               a control must never change size with state)
--- opts.input    take a typed value instead of showing one; returns nil, text
--- opts.box      show a read-only, selectable text box instead of painted text
--- opts.cut      where the value's ellipsis goes: "middle" for a path, "front"
---               to keep only its tail; omitted = the normal cut at the end
--- opts.tip      hover text for the whole row
--- opts.warn     a full-sentence message under the row, TEXT_SECONDARY, wrapped
--- opts.note     the one dim line of explanation, TEXT_TERTIARY, wrapped
--- opts.icon     { id, name, tip, fallback, dead } — a compact ICON square at
---               the row's FAR EDGE, the control (when there is one) stepping
---               one slot in beside it (icon outermost: the user's swap,
---               2026-08-10, same day the square arrived). The row's third
---               return is true the frame it is clicked. Added 2026-08-10
---               (`.brief/settings-move`, the user's pick): the Folder row
---               wears open-in-Explorer beside its "…", so a row may carry ONE
---               worded/compact control plus ONE icon square — never a third,
---               and never two worded buttons.
+-- opts.button     fixed-width action label; the row returns true when clicked
+-- opts.beside     keep the action immediately after the value
+-- opts.compact    control-height square action
+-- opts.dead       retain the action footprint but disable interaction
+-- opts.input      editable value; the second return is the typed text
+-- opts.box        read-only selectable value box
+-- opts.cut        ellipsis position: "middle", "front", or the default end
+-- opts.next_value draw `value → next_value` with separate colours
+-- opts.tip        hover text for the value
+-- opts.warn       wrapped status text in the secondary colour
+-- opts.note       wrapped description in the tertiary colour
+-- opts.icon       optional compact icon action at the far edge
+-- opts.switch     persistent boolean control
+-- opts.far_right  place a value-less switch at the panel's right edge
+-- opts.hide_name  omit the internal label when the category already suffices
 
--- Whether the next row opens the pane. Reset by settings.draw before the
--- section draws, so the first row never gets a rule above it and the last never
--- gets one below.
+-- Whether the next row opens a filled subject group. Reset by the group helper,
+-- so unrelated groups never share dividers and the first row gets no rule.
 local first_row = true
+local first_group = true
 
 -- The Lucide font, handed in once per frame by settings.draw (the icon squares
 -- need it; text rows never touch it). nil is fine — icons.button falls back to
 -- its drawn shape.
 local icon_font = nil
+
+local function settings_separator(ctx)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Separator(), T.STROKE_SECONDARY)
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_PopStyleColor(ctx)
+end
+
+local function begin_setting(ctx)
+  if not first_row then settings_separator(ctx) end
+  first_row = false
+end
+
+-- A category heading sits outside its filled subject panel. This keeps the
+-- navigation name, category and individual setting labels in three distinct
+-- places without needing a third text size.
+local function begin_settings_group(ctx, id, title, fill_height)
+  if not first_group then
+    reaper.ImGui_SetCursorPosY(ctx,
+      reaper.ImGui_GetCursorPosY(ctx) + M.ITEM_SPACING_Y)
+  end
+  first_group = false
+
+  local bold = theme.push_bold_font(ctx)
+  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, title:upper())
+  if bold then reaper.ImGui_PopFont(ctx) end
+
+  if not HAS_GROUP_CHILD then
+    first_row = true
+    return true, false
+  end
+
+  local child_flags = fill_height and 0 or reaper.ImGui_ChildFlags_AutoResizeY()
+  if reaper.ImGui_ChildFlags_Borders then
+    child_flags = child_flags | reaper.ImGui_ChildFlags_Borders()
+  elseif HAS_CHILD_PAD then
+    child_flags = child_flags | reaper.ImGui_ChildFlags_AlwaysUseWindowPadding()
+  end
+
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), T.SET_GROUP_BG)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.STROKE_SECONDARY)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), M.WINDOW_PAD, M.WINDOW_PAD)
+  local win_flags = reaper.ImGui_WindowFlags_NoScrollbar()
+    | reaper.ImGui_WindowFlags_NoScrollWithMouse()
+  local opened = reaper.ImGui_BeginChild(ctx, "settings_group_" .. id, 0, 0,
+    child_flags, win_flags)
+  reaper.ImGui_PopStyleVar(ctx)
+  reaper.ImGui_PopStyleColor(ctx, 2)
+
+  if opened then
+    first_row = true
+  end
+  return opened, true
+end
+
+local function end_settings_group(ctx, child)
+  if child then reaper.ImGui_EndChild(ctx) end
+end
 
 local function row(ctx, label, value, opts)
   opts = opts or {}
@@ -166,12 +183,7 @@ local function row(ctx, label, value, opts)
   -- Pushed HERE rather than raising the token, because STROKE_TERTIARY also
   -- draws the nav seam and the sound table's header underline, which sit on
   -- different backgrounds and nobody has complained about.
-  if not first_row then
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Separator(), T.STROKE_SECONDARY)
-    reaper.ImGui_Separator(ctx)
-    reaper.ImGui_PopStyleColor(ctx)
-  end
-  first_row = false
+  begin_setting(ctx)
 
   local x0 = reaper.ImGui_GetCursorPosX(ctx)
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
@@ -185,6 +197,7 @@ local function row(ctx, label, value, opts)
     btn_w = opts.compact and reaper.ImGui_GetFrameHeight(ctx) or M.SET_ACTION_W
   end
   local right_w = btn_w
+  if opts.switch ~= nil then right_w = M.SET_SWITCH_W end
   if opts.icon then
     right_w = right_w + (right_w > 0 and gap or 0) + reaper.ImGui_GetFrameHeight(ctx)
   end
@@ -196,12 +209,14 @@ local function row(ctx, label, value, opts)
   -- has nothing on its line to crash into. Only a value-less row keeps its
   -- controls up here, so it doesn't pay for an empty second line.
   local has_value_line = (value ~= nil) or (opts.input ~= nil)
-  if HAS_ALIGN_TEXT and not has_value_line then
-    reaper.ImGui_AlignTextToFramePadding(ctx)
+  if not opts.hide_name then
+    if HAS_ALIGN_TEXT and not has_value_line then
+      reaper.ImGui_AlignTextToFramePadding(ctx)
+    end
+    local bold = theme.push_bold_font(ctx)
+    reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, label)
+    if bold then reaper.ImGui_PopFont(ctx) end
   end
-  local hd = theme.push_heading_font(ctx)
-  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, label:upper())
-  if hd then reaper.ImGui_PopFont(ctx) end
 
   if opts.input or opts.box then
     -- `input_w` caps the field instead of letting it run to the control edge —
@@ -232,13 +247,36 @@ local function row(ctx, label, value, opts)
     -- FramePadding, so without this the value sits a couple of pixels above
     -- the buttons sharing its line.
     if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
-    local shown = widgets.ellipsize(ctx, value, val_x1 - x0, opts.cut)
-    reaper.ImGui_TextColored(ctx, opts.value_color or T.TEXT_PRIMARY, shown)
-    -- Only spell it out when it was actually cut, or when the caller asked for a
-    -- hover — a tooltip repeating what is already readable is noise.
-    local was_cut = shown ~= value
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
-      was_cut and (value .. (opts.tip and ("\n\n" .. opts.tip) or "")) or opts.tip)
+    if opts.next_value then
+      local arrow = "\u{2192}"
+      local next_w = select(1, reaper.ImGui_CalcTextSize(ctx, opts.next_value))
+      local arrow_w = select(1, reaper.ImGui_CalcTextSize(ctx, arrow))
+      local current_w = math.max(0, (val_x1 - x0) - next_w - arrow_w - gap * 2)
+      local shown = widgets.ellipsize(ctx, value, current_w, opts.cut)
+      local hovered = false
+
+      reaper.ImGui_TextColored(ctx, opts.value_color or T.TEXT_PRIMARY, shown)
+      hovered = reaper.ImGui_IsItemHovered(ctx)
+      reaper.ImGui_SameLine(ctx, 0, gap)
+      reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, arrow)
+      hovered = hovered or reaper.ImGui_IsItemHovered(ctx)
+      reaper.ImGui_SameLine(ctx, 0, gap)
+      reaper.ImGui_TextColored(ctx, opts.next_value_color or T.ACCENT, opts.next_value)
+      hovered = hovered or reaper.ImGui_IsItemHovered(ctx)
+
+      local was_cut = shown ~= value
+      local full_value = value .. " " .. arrow .. " " .. opts.next_value
+      tips.show(ctx, hovered,
+        was_cut and (full_value .. (opts.tip and ("\n\n" .. opts.tip) or "")) or opts.tip)
+    else
+      local shown = widgets.ellipsize(ctx, value, val_x1 - x0, opts.cut)
+      reaper.ImGui_TextColored(ctx, opts.value_color or T.TEXT_PRIMARY, shown)
+      -- Only spell it out when it was actually cut, or when the caller asked for a
+      -- hover — a tooltip repeating what is already readable is noise.
+      local was_cut = shown ~= value
+      tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+        was_cut and (value .. (opts.tip and ("\n\n" .. opts.tip) or "")) or opts.tip)
+    end
   end
 
   if opts.button then
@@ -287,6 +325,15 @@ local function row(ctx, label, value, opts)
       icon_clicked = icons.button(ctx, icon_font, ic.id, ic.name,
         { tip = ic.tip, fallback = ic.fallback })
     end
+  end
+
+  if opts.switch ~= nil then
+    if has_value_line or opts.far_right then
+      reaper.ImGui_SameLine(ctx, x0 + avail - M.SET_SWITCH_W)
+    else
+      reaper.ImGui_SameLine(ctx)
+    end
+    clicked = widgets.switch(ctx, "settings_" .. label, opts.switch, opts.switch_tip) or clicked
   end
 
   -- The lines under the row sit at the NAME's own left edge, taking the full
@@ -412,8 +459,7 @@ end
 -- (2026-08-08): "opens the library in another folder" sounds like it PUTS the
 -- library somewhere else, which is the exact fear the sentence exists to calm.
 -- "Switches which library" names the action; the reassurance follows it.
-local NOTE_FOLDER =
-  "Switches which library you're using. Your sounds are never moved or copied."
+local NOTE_FOLDER = "Switching libraries never moves or copies sounds."
 
 -- The reveal square the Folder row wears (2026-08-10, `.brief/settings-move`,
 -- the user's pick over an "Open in Explorer" row and a Folders section): the
@@ -424,68 +470,185 @@ local ICON_REVEAL_LIB = {
   tip = "Open this folder and its trash in File Explorer.",
 }
 
--- The References row's two faces, hoisted for the same reason.
-local ICON_REFS = {
-  id = "set_refsfolder", name = "folder", fallback = icons.draw_folder,
-  tip = "Open this project's References folder",
-}
-local ICON_REFS_DEAD = {
-  id = "set_refsfolder", name = "folder", fallback = icons.draw_folder,
-  dead = true,
-  tip = "Save your project first. It has no References folder yet",
-}
+local function setting_label(ctx, text)
+  local bold = theme.push_bold_font(ctx)
+  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, text)
+  if bold then reaper.ImGui_PopFont(ctx) end
+end
+
+local function setting_note(ctx, text)
+  if HAS_WRAP_POS then
+    local x, avail = reaper.ImGui_GetCursorPosX(ctx), select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+    reaper.ImGui_PushTextWrapPos(ctx, x + avail)
+  end
+  reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, text)
+  if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
+end
+
+local function appearance_readout(ctx, text)
+  local h = reaper.ImGui_GetFrameHeight(ctx)
+  reaper.ImGui_Dummy(ctx, M.SET_APPEAR_VALUE_W, h)
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, T.FILL_TERTIARY, 4)
+  reaper.ImGui_DrawList_AddRect(dl, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5,
+    T.STROKE_SECONDARY, 4, 0, 1)
+  local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
+  reaper.ImGui_DrawList_AddText(dl,
+    math.floor((x0 + x1 - tw) * 0.5 + 0.5),
+    math.floor((y0 + y1 - th) * 0.5 + 0.5), T.TEXT_PRIMARY, text)
+end
+
+-- One fixed-width Settings button with a colour chip and hand-painted label.
+-- The whole face is clickable; the chip is not a second tiny target.
+local function accent_button(ctx, option, selected, width)
+  if selected then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.ACCENT) end
+  local clicked = reaper.ImGui_Button(ctx, "##accent_" .. option.id, width or M.SET_ACTION_W)
+  if selected then reaper.ImGui_PopStyleColor(ctx) end
+
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local chip = M.ICON_SM_FS
+  local gap = M.ITEM_SPACING_X
+  local tw, th = reaper.ImGui_CalcTextSize(ctx, option.label)
+  local content_w = chip + gap + tw
+  local sx = math.floor((x0 + x1 - content_w) * 0.5 + 0.5)
+  local sy = math.floor((y0 + y1 - chip) * 0.5 + 0.5)
+  local ty = math.floor((y0 + y1 - th) * 0.5 + 0.5)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  reaper.ImGui_DrawList_AddRectFilled(dl, sx, sy, sx + chip, sy + chip, option.color, 3)
+  reaper.ImGui_DrawList_AddText(dl, sx + chip + gap, ty,
+    selected and T.TEXT_PRIMARY or T.TEXT_SECONDARY, option.label)
+  return clicked
+end
+
+local function draw_appearance(ctx, state)
+  local action
+
+  local opened, child = begin_settings_group(ctx, "appearance", "Interface")
+  if opened then
+    begin_setting(ctx)
+    local x0 = reaper.ImGui_GetCursorPosX(ctx)
+    local y0 = reaper.ImGui_GetCursorPosY(ctx)
+    local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+    local gap = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
+    local controls_w = M.SET_APPEAR_SLIDER_W + gap + M.SET_APPEAR_VALUE_W
+
+    setting_label(ctx, "UI Size")
+    setting_note(ctx, "Scale every window.")
+    local end_y = reaper.ImGui_GetCursorPosY(ctx)
+    local control_h = reaper.ImGui_GetFrameHeight(ctx)
+    local content_h = math.max(0, end_y - y0 - M.ITEM_SPACING_Y)
+    reaper.ImGui_SetCursorPos(ctx, x0 + avail - controls_w,
+      y0 + math.max(0, (content_h - control_h) * 0.5))
+
+    local percent = theme.scale_percent(state.ui_scale)
+    local changed, commit = widgets.step_slider(ctx, "ui_size", percent, {
+      min = theme.scale_percent(theme.MIN_SCALE),
+      max = theme.scale_percent(theme.MAX_SCALE),
+      step = math.floor(theme.SCALE_STEP * 100 + 0.5),
+      width = M.SET_APPEAR_SLIDER_W,
+    })
+    if changed then
+      percent = changed
+      action = {
+        type = commit and "set_ui_scale" or "preview_ui_scale",
+        scale = changed / 100,
+      }
+    end
+    reaper.ImGui_SameLine(ctx)
+    appearance_readout(ctx, string.format("%d%%", percent))
+    reaper.ImGui_SetCursorPos(ctx, x0, end_y)
+
+    begin_setting(ctx)
+    setting_label(ctx, "Accent Colour")
+    setting_note(ctx, "Changes active controls, sort arrows and selection accents.")
+    local button_gap = select(1,
+      reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
+    local button_avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+    local button_w = (button_avail - button_gap * (#theme.accent_options - 1))
+      / #theme.accent_options
+    for i, option in ipairs(theme.accent_options) do
+      if i > 1 then reaper.ImGui_SameLine(ctx) end
+      if accent_button(ctx, option, state.accent_colour == option.id, button_w) then
+        action = action or { type = "set_accent_colour", colour = option.id }
+      end
+    end
+    end_settings_group(ctx, child)
+  end
+
+  return action
+end
 
 local function draw_library(ctx, state)
   local action
 
-  if state.deps.folder_picker then
-    -- A bare "…" means pick a new location (2026-08-08, user's call — it read
-    -- "Change…"). The folder square beside it opens the current folder.
-    local hit, _, reveal = row(ctx, "Library Folder", state.library_dir, {
-      button = "\u{2026}", compact = true, box = true,
-      note = NOTE_FOLDER,
-      icon = ICON_REVEAL_LIB,
-      tip = "Switches which library you're using. The library you're using now stays on disk.",
-      button_tip = "Choose a different library folder",
+  local opened, child = begin_settings_group(ctx, "library", "Reference Library")
+  if opened then
+    if state.deps.folder_picker then
+      -- A bare "…" means pick a new location (2026-08-08, user's call — it read
+      -- "Change…"). The folder square beside it opens the current folder.
+      local hit, _, reveal = row(ctx, "Folder Path", state.library_dir, {
+        button = "\u{2026}", compact = true, box = true,
+        note = NOTE_FOLDER,
+        icon = ICON_REVEAL_LIB,
+        tip = "Switches which library you're using. The library you're using now stays on disk.",
+        button_tip = "Choose a different library folder",
+      })
+      if hit then action = { type = "change_library_dir" } end
+      if reveal then action = action or { type = "reveal_library" } end
+    else
+      -- No OS folder picker on this install (js_ReaScriptAPI missing) — take a
+      -- typed path rather than hiding the setting. The reveal square still
+      -- draws: opening Explorer doesn't need the picker dialog.
+      local hit, typed, reveal = row(ctx, "Folder Path", ui.libdir, {
+        input = true, button = "Use This",
+        icon = ICON_REVEAL_LIB,
+        note = NOTE_FOLDER,
+      })
+      if typed then ui.libdir = typed end
+      if hit and ui.libdir ~= "" then action = { type = "change_library_dir", dir = ui.libdir } end
+      if reveal then action = action or { type = "reveal_library" } end
+    end
+
+    local startup = row(ctx, "Open Library on Startup", nil, {
+      switch = state.open_library_on_startup,
+      far_right = true,
     })
-    if hit then action = { type = "change_library_dir" } end
-    if reveal then action = action or { type = "reveal_library" } end
-  else
-    -- No OS folder picker on this install (js_ReaScriptAPI missing) — take a
-    -- typed path rather than hiding the setting. The reveal square still
-    -- draws: opening Explorer doesn't need the picker dialog.
-    local hit, typed, reveal = row(ctx, "Library Folder", ui.libdir, {
-      input = true, button = "Use This",
-      icon = ICON_REVEAL_LIB,
-      note = NOTE_FOLDER,
-    })
-    if typed then ui.libdir = typed end
-    if hit and ui.libdir ~= "" then action = { type = "change_library_dir", dir = ui.libdir } end
-    if reveal then action = action or { type = "reveal_library" } end
+    if startup then
+      action = action or {
+        type = "set_open_library_on_startup",
+        enabled = not state.open_library_on_startup,
+      }
+    end
+
+    -- Library facts belong to the Library subject, not to the project-owned
+    -- References folder below it.
+    settings_separator(ctx)
+    draw_facts(ctx, library_facts(state))
+    end_settings_group(ctx, child)
   end
 
-  -- This project's References folder — the working view's folder square until
-  -- 2026-08-10 (`.brief/settings-move`): the bar keeps working controls; the
-  -- folders live where their paths do. Dead with the reason while the project
-  -- has never been saved (the old button dimmed for the same case) — the row
-  -- itself never comes or goes.
-  local refs_dir = state.pins and state.pins.dir
-  local _, _, open_refs = row(ctx, "Project References", refs_dir or "\u{2014}", {
-    box = true,
-    value_color = refs_dir and T.TEXT_PRIMARY or T.TEXT_QUATERNARY,
-    icon = refs_dir and ICON_REFS or ICON_REFS_DEAD,
-    note = refs_dir and "Pinned reference audio is stored here, beside your project file." or nil,
-    warn = (not refs_dir) and "Save your project first. It has no References folder yet." or nil,
-  })
-  if open_refs then action = action or { type = "open_refs_folder" } end
-
-  -- What's in the library, as one line under a rule (see library_facts). The
-  -- rule is drawn by hand rather than by starting another row: nothing follows
-  -- it, so `row`'s own opens-every-row-but-the-first bookkeeping doesn't apply.
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Separator(), T.STROKE_SECONDARY)
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_PopStyleColor(ctx)
-  draw_facts(ctx, library_facts(state))
+  opened, child = begin_settings_group(ctx, "project_references", "Current Project")
+  if opened then
+    -- This path belongs to the open REAPER project, not to the global Library.
+    -- Keep the action visible but disabled until the project has been saved.
+    local refs_dir = state.pins and state.pins.dir
+    local open_refs = row(ctx, "References Folder", refs_dir or "\u{2014}", {
+      box = true,
+      value_color = refs_dir and T.TEXT_PRIMARY or T.TEXT_QUATERNARY,
+      button = "Open Folder",
+      button_tip = refs_dir and "Open the current project's References folder"
+        or "Save your project first. It has no References folder yet",
+      dead = not refs_dir,
+      note = refs_dir and
+        "Pinned references for the current Reaper project are stored in this folder." or nil,
+      warn = (not refs_dir) and "Save your project first. It has no References folder yet." or nil,
+    })
+    if open_refs then action = action or { type = "open_refs_folder" } end
+    end_settings_group(ctx, child)
+  end
 
   return action
 end
@@ -516,7 +679,7 @@ local function notes_row(ctx, state)
   if newest.date then
     vline = vline .. "  \u{00B7}  " .. whatsnew.human_date(newest.date)
   end
-  if row(ctx, "Release notes", vline, {
+  if row(ctx, "Latest Release", vline, {
     value_color = T.TEXT_SECONDARY,
     button = "View",
     button_tip = "Every release, newest first. The same notes the update popup shows.",
@@ -525,109 +688,123 @@ local function notes_row(ctx, state)
   end
 end
 
-local function draw_updates(ctx, state)
-  local action
-  local u = state.update
+local function version_route(ctx, installed, available, button, button_tip)
+  local x0 = reaper.ImGui_GetCursorPosX(ctx)
+  local y0 = reaper.ImGui_GetCursorPosY(ctx)
+  local avail_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+  local gap_x, gap_y = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing())
+  local frame_h = reaper.ImGui_GetFrameHeight(ctx)
 
-  -- Standing down. Only "repo_off" is a state an end user can reach (they
-  -- disabled our repo inside ReaPack — respected, with the way back shown); the
-  -- rest are dev copies and missing-ReaPack installs.
+  if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
+  reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Installed")
+  reaper.ImGui_SameLine(ctx, x0 + M.SET_VERSION_LABEL_W + gap_x)
+  local bold = theme.push_bold_font(ctx)
+  reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, "v" .. (installed or "?"))
+  if bold then reaper.ImGui_PopFont(ctx) end
+
+  if available then
+    reaper.ImGui_SameLine(ctx, 0, gap_x)
+    reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, "\u{2192}")
+    reaper.ImGui_SameLine(ctx, 0, gap_x)
+    local available_x = reaper.ImGui_GetCursorPosX(ctx)
+    reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Available")
+    reaper.ImGui_SameLine(ctx, available_x + M.SET_VERSION_LABEL_W + gap_x)
+    bold = theme.push_bold_font(ctx)
+    reaper.ImGui_TextColored(ctx, T.ACCENT, "v" .. available)
+    if bold then reaper.ImGui_PopFont(ctx) end
+  end
+
+  local clicked = false
+  if button then
+    reaper.ImGui_SameLine(ctx, x0 + avail_w - M.SET_ACTION_W)
+    clicked = reaper.ImGui_Button(ctx, button, M.SET_ACTION_W)
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), button_tip)
+  end
+
+  -- The route always reserves one control-height line. Installed-only states
+  -- therefore keep exactly the same spacing as states with an action button.
+  reaper.ImGui_SetCursorPos(ctx, x0, y0 + frame_h + gap_y)
+  return clicked
+end
+
+local function version_message(ctx, text, color)
+  if not text then return end
+  local x0 = reaper.ImGui_GetCursorPosX(ctx)
+  local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+  if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, x0 + avail) end
+  reaper.ImGui_TextColored(ctx, color, text)
+  if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
+end
+
+local function draw_version(ctx, state)
+  local u = state.update
+  local installed = (u and u.installed) or "?"
+  local detected = u and u.available or nil
+  local available
+  local status, note, button, button_tip
+
   if not u or not u.enabled then
     local reason = u and u.disabled_reason
-    local warn, note
     if reason == "repo_off" then
-      warn = "Paused. yb-Reference's repository is disabled in ReaPack."
+      status = "Paused. yb-Reference's repository is disabled in ReaPack."
       note = "Re-enable the repository under Extensions \u{2192} ReaPack \u{2192} Manage repositories, then reopen the tool."
     elseif reason == "noapi" then
-      warn = "Updates are unavailable because ReaPack isn't installed."
-    else -- "dev" / "norepo": not a ReaPack-owned copy, or its repo record is unreadable
-      warn = "Updates are unavailable because this copy wasn't installed through ReaPack."
+      status = "Updates are unavailable because ReaPack isn't installed."
+    else
+      status = "Updates are unavailable because this copy wasn't installed through ReaPack."
     end
-    row(ctx, "Version", "v" .. ((u and u.installed) or "?"),
-      { value_color = T.ACCENT, warn = warn, note = note })
-    -- The history still draws. Release notes are worth reading on a dev copy or
-    -- a hand-installed one — they describe the code that is running, which has
-    -- nothing to do with whether ReaPack can update it.
-    notes_row(ctx, state)
-    return nil
-  end
-
-  -- The transaction-launched face appears immediately. It makes no claim that
-  -- the files landed; ReaPack's report is the authority. SWS watches that
-  -- native window, so closing it is also the deliberate restart gesture.
-  if u.phase == "reopen" then
-    row(ctx, "Version", "v" .. (u.installed or "?"),
-      { value_color = T.ACCENT,
-        warn = "Update started. Close the ReaPack report when it appears. yb-Reference will reopen automatically." })
-    notes_row(ctx, state)
-    return nil
-  end
-
-  if u.phase == "restarting" then
-    row(ctx, "Version", "v" .. (u.installed or "?"),
-      { value_color = T.ACCENT,
-        warn = "Update finished. Reopening yb-Reference…" })
-    notes_row(ctx, state)
-    return nil
-  end
-
-  if u.phase == "reopen_manual" then
-    row(ctx, "Version", "v" .. (u.installed or "?"),
-      { value_color = T.ACCENT,
-        warn = "Close the ReaPack report if it's still open, then close and reopen yb-Reference." })
-    notes_row(ctx, state)
-    return nil
-  end
-
-  if u.phase == "report_busy" then
-    if row(ctx, "Version", "v" .. (u.installed or "?"),
-      { value_color = T.ACCENT,
-        warn = "Close the open ReaPack report before starting this update.",
-        button = "Try Again",
-        button_tip = "Close the ReaPack report first, then try the update again." }) then
-      action = { type = "start_update" }
+  elseif u.phase == "reopen" then
+    status = "Update started."
+    note = "Close the ReaPack report when it appears. yb-Reference will reopen automatically."
+  elseif u.phase == "restarting" then
+    status = "Update finished."
+    note = "Reopening yb-Reference…"
+  elseif u.phase == "reopen_manual" then
+    status = "Close the ReaPack report if it's still open, then close and reopen yb-Reference."
+  elseif u.phase == "report_busy" then
+    available = detected
+    status = "Close the open ReaPack report before starting this update."
+    button = "Try Again"
+    button_tip = "Close the ReaPack report first, then try the update again."
+  elseif u.phase == "done" then
+    status = "Updated. Close and reopen yb-Reference."
+  else
+    available = detected
+    note = "Checks once a day for a new version. It doesn't send project data."
+    if u.pinned then
+      status = "Paused. This tool is pinned in ReaPack."
+      note = "Right-click it in Extensions \u{2192} ReaPack \u{2192} Browse packages and untick \"Pin to current version\"."
+    elseif available then
+      button = "Update Now"
+      button_tip = "ReaPack installs the update. Close its report when it appears; yb-Reference will then reopen automatically."
     end
-    notes_row(ctx, state)
-    return action
+    if u.phase == "failed_manual" then
+      status = "The update couldn't be completed from here."
+      note = "Run Extensions \u{2192} ReaPack \u{2192} Synchronize packages instead."
+    end
   end
 
-  -- A manual ReaPack update landed before this button was pressed.
-  if u.phase == "done" then
-    row(ctx, "Version", "v" .. (u.installed or "?"),
-      { value_color = T.ACCENT, warn = "Updated. Close and reopen yb-Reference." })
-    notes_row(ctx, state)
-    return nil
+  local clicked = version_route(ctx, installed, available, button, button_tip)
+  version_message(ctx, status, T.TEXT_SECONDARY)
+  version_message(ctx, note, T.TEXT_TERTIARY)
+  return clicked and { type = "start_update" } or nil
+end
+
+local function draw_updates(ctx, state)
+  local action
+  local opened, child = begin_settings_group(ctx, "updates_version", "Version")
+  if opened then
+    action = draw_version(ctx, state)
+    end_settings_group(ctx, child)
   end
 
-  local vline = "v" .. (u.installed or "?")
-  if u.available then vline = vline .. "  \u{00B7}  v" .. u.available .. " available" end
-
-  -- A version number is ACCENT wherever the tool prints one (2026-08-11, the
-  -- user's ask — it matches the release headings in the What's New card and the
-  -- history pane). It no longer shifts PRIMARY/SECONDARY with whether an update
-  -- is waiting: "v… available" on the same line and the Update button below it
-  -- carry that, and one colour per kind of thing beats a second, quieter signal
-  -- saying what those already say.
-  local opts = {
-    value_color = T.ACCENT,
-    note = "Checks once a day for a new version. It doesn't send project data.",
-  }
-  if u.pinned then
-    -- Say WHY one click won't install it (U8: ReaPack's syncs silently skip a
-    -- pinned package) instead of offering a button that fails mysteriously.
-    opts.warn = "Paused. This tool is pinned in ReaPack."
-    opts.note = "Right-click it in Extensions \u{2192} ReaPack \u{2192} Browse packages and untick \"Pin to current version\"."
-  elseif u.available then
-    opts.button = "Update Now"
-    opts.button_tip = "ReaPack installs the update. Close its report when it appears; yb-Reference will then reopen automatically."
+  if state.changelog and #state.changelog > 0 then
+    opened, child = begin_settings_group(ctx, "updates_notes", "Release Notes")
+    if opened then
+      notes_row(ctx, state)
+      end_settings_group(ctx, child)
+    end
   end
-  if u.phase == "failed_manual" then
-    opts.warn = "The update couldn't be completed from here. Run Extensions \u{2192} ReaPack \u{2192} Synchronize packages instead."
-  end
-
-  if row(ctx, "Version", vline, opts) then action = { type = "start_update" } end
-
-  notes_row(ctx, state)
   return action
 end
 
@@ -669,7 +846,8 @@ local fbui = { draft = "", email = nil, last_phase = nil, recovery_loaded = fals
 
 -- SOFT WRAP for the message box (2026-08-10, "the textbox must wrap" — the
 -- user's call after the probe). ImGui's box has no wrap and REFUSES a value
--- rewritten from outside while active (RESEARCH.md), so this rides the ONE
+-- rewritten from outside while active (docs/research/reaper-host-facts.md,
+-- "Scroll tables and editable text"), so this rides the ONE
 -- sanctioned mid-typing edit path: an InputText CALLBACK. The callback can't
 -- replace the buffer either (Buf is read-only in every event), but it may call
 -- ImGui's own InputTextCallback_DeleteChars/InsertChars — so the wrap is a
@@ -740,17 +918,22 @@ local function draw_help(ctx, state)
   -- control read as belonging to the heading rather than to the thing it plays
   -- (user, 2026-08-11). It doesn't list the stops: naming them dates the line
   -- every time the tour changes, and the tour introduces itself.
-  if row(ctx, "Walkthrough", "A short walkthrough of how to use the tool.",
-      { button = "Replay", button_tip = "Replay the walkthrough",
-        beside = true, value_color = T.TEXT_TERTIARY }) then
-    return { type = "walkthrough", ev = "show" }
+  local action
+  local opened, child = begin_settings_group(ctx, "help_walkthrough", "Walkthrough")
+  if opened then
+    if row(ctx, "Walkthrough", "A short walkthrough of how to use the tool.",
+        { hide_name = true, button = "Replay", button_tip = "Replay the walkthrough",
+          value_color = T.TEXT_SECONDARY }) then
+      action = { type = "walkthrough", ev = "show" }
+    end
+    end_settings_group(ctx, child)
   end
-  return nil
+  return action
 end
 
 local function feedback_heading(ctx, text)
-  local pushed = theme.push_heading_font(ctx)
-  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, text:upper())
+  local pushed = theme.push_bold_font(ctx)
+  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, text)
   if pushed then reaper.ImGui_PopFont(ctx) end
 end
 
@@ -801,7 +984,7 @@ local function draw_feedback(ctx, state)
   -- EMAIL ADDRESS: its own block, first in the reading order. A wider field
   -- than the general popup-name token gives a real address room to breathe;
   -- the measured hint remains the floor so future wording cannot be clipped.
-  feedback_heading(ctx, "Email address")
+  feedback_heading(ctx, "Email Address")
   reaper.ImGui_SetCursorPosY(ctx, reaper.ImGui_GetCursorPosY(ctx) - (gap_y - label_gap))
   local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
   local hint_w = select(1, reaper.ImGui_CalcTextSize(ctx, FB_EMAIL_HINT)) + 2 * pad_x
@@ -973,15 +1156,26 @@ local function draw_feedback(ctx, state)
   return action
 end
 
+local function draw_feedback_panel(ctx, state)
+  local action
+  local opened, child = begin_settings_group(ctx, "feedback", "Send Feedback", true)
+  if opened then
+    action = draw_feedback(ctx, state)
+    end_settings_group(ctx, child)
+  end
+  return action
+end
+
 -- The list, in the user's chosen order. Five sections were decided
 -- (Library · Appearance · Updates · Help · About); the two not yet built have
 -- nothing to draw, and an empty section is never shown — they arrive here with
 -- the features, one line each.
 local SECTIONS = {
   { id = "library", name = "Library", draw = draw_library },
+  { id = "appearance", name = "Appearance", draw = draw_appearance },
   { id = "updates", name = "Updates", draw = draw_updates },
   { id = "help", name = "Help", draw = draw_help },
-  { id = "feedback", name = "Feedback", draw = draw_feedback },
+  { id = "feedback", name = "Feedback", draw = draw_feedback_panel },
 }
 
 --------------------------------------------------------------- the window
@@ -1025,8 +1219,9 @@ local function nav_row(ctx, id, name, selected, first)
   end
 
   -- THE TOP TAB'S FIRST PIXEL (2026-08-10, user-reported sliver; mechanism
-  -- verified against Dear ImGui 1.92.1 source — docs/RESEARCH.md "The 1px
-  -- content clip inset under a title bar"): with FrameBorderSize 1, ImGui's
+  -- verified against Dear ImGui 1.92.1 source —
+  -- docs/research/reaper-host-facts.md, "Text measurement and clipping"):
+  -- with FrameBorderSize 1, ImGui's
   -- content clip starts one pixel BELOW the title bar, and every child
   -- inherits it — this row is POSITIONED flush, but its fill's top pixel is
   -- clipped away and the window background shows through as a sliver. No
@@ -1193,24 +1388,18 @@ function settings.draw(ctx, state, res)
 
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), M.WINDOW_PAD, M.WINDOW_PAD)
   local pane_flags = HAS_CHILD_PAD and reaper.ImGui_ChildFlags_AlwaysUseWindowPadding() or 0
-  -- The pane never scrolls — the window's own rule, extended to the child that
-  -- fills it (2026-08-09, user-reported: the Help composer's exact-fit stack
-  -- could still wheel-scroll by a rounding hair). Every section reserves its
-  -- height exactly; anything that scrolls does so in a child of its OWN (the
-  -- release notes, the message box), never as "the page".
-  local pane_win_flags = reaper.ImGui_WindowFlags_NoScrollbar()
-    | reaper.ImGui_WindowFlags_NoScrollWithMouse()
+  -- Filled groups can exceed the available height at smaller window sizes.
+  -- Let this outer pane own that overflow so the whole tab remains reachable;
+  -- specialised inner children still keep their own local scrolling.
+  local pane_win_flags = 0
   local pane_open = reaper.ImGui_BeginChild(ctx, "settingspane", 0, panes_h,
     pane_flags, pane_win_flags)
   reaper.ImGui_PopStyleVar(ctx)
-  -- The pane draws its section's rows and NOTHING ELSE — no heading, no rule.
-  -- It used to repeat the section's name over a Separator, which the lit tab
-  -- two inches to the left already says (flagged as redundant when it shipped,
-  -- removed 2026-08-08 on the user's call). The section headings that DO earn
-  -- their place are the ones in the Loudness panel, where several sections stack
-  -- in one pane and the names are the only thing telling them apart.
+  -- The lit tab names the destination. Inside it, filled groups name the distinct
+  -- subjects that share that destination; related rows stay inside one group and
+  -- unrelated groups never share a divider.
   if pane_open then
-    first_row = true -- the section's first row opens the pane, so it gets no rule
+    first_group = true
     for _, s in ipairs(SECTIONS) do
       if ui.section == s.id then
         local sec_action = s.draw(ctx, state)

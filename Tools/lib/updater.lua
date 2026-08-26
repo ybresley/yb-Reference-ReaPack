@@ -1,11 +1,10 @@
--- updater: the REAPER-facing half of the in-app update feature (DESIGN
--- "Distribution, updates & versioning"; mechanics in RESEARCH "In-app update
--- check + one-button update via ReaPack" — every call below was live-proven by
--- the U0–U9 prototype, 2026-08-02, except GetRepositoryInfo, which 05b probes).
+-- updater: the REAPER-facing half of the in-app update feature (DESIGN.md
+-- "Settings, help, feedback, and releases"; mechanics and evidence in
+-- docs/research/updates-and-distribution.md).
 --
 -- What it does, from the user's side: once a day (and at tool startup) it
 -- quietly downloads the tool's own ReaPack catalog and, if a newer version is
--- listed, lights the accent dot on the browser's gear; Settings' UPDATES
+-- listed, lights the accent dot on the working view's Settings gear; UPDATES
 -- section then offers "Update now", which makes ReaPack update JUST this tool
 -- (its own Progress window shows). SWS watches that transaction's report
 -- window without touching ReaPack; once the report closes and ReaPack has had

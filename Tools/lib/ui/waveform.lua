@@ -34,27 +34,26 @@ local sdrag = { which = nil, id = nil, hold = false }
 --------------------------------------------------------------- time ruler
 
 -- The ruler tick caches (waveform ruler brief, 2026-08-05): rebuilt only when
--- a sound's duration or the floored pixel width changes, never per frame
+-- a sound's duration, floored pixel width or actual label-font size changes,
+-- never per frame
 -- (frame-loop rule). One slot per RULER-CARRYING view, keyed by opts.slot
 -- — "main" (working view) and, since 2026-08-06, "browse" (the audition strip)
 -- — because a single shared slot would rebuild every frame while both windows
 -- are open, each stamping over the other's entry. Bounded at exactly those two.
 local ruler_cache = {}
 
-local function ruler_ticks(ctx, key, duration, width_px)
+local function ruler_ticks(ctx, key, duration, width_px, font_size)
   local width_floor = math.floor(width_px)
   local c = ruler_cache[key]
-  if c and c.duration == duration and c.width == width_floor then
+  if c and c.duration == duration and c.width == width_floor and c.font_size == font_size then
     return c.ticks
   end
-  -- Measured under the SAME small font the labels are drawn in below — a
-  -- width measured at the base font would pick the wrong step entirely.
-  local small = theme.push_small_font(ctx)
   local ticks = core_ruler.build(duration, width_px, function(text)
     return select(1, reaper.ImGui_CalcTextSize(ctx, text))
   end)
-  if small then reaper.ImGui_PopFont(ctx) end
-  ruler_cache[key] = { duration = duration, width = width_floor, ticks = ticks }
+  ruler_cache[key] = {
+    duration = duration, width = width_floor, font_size = font_size, ticks = ticks,
+  }
   return ticks
 end
 
@@ -70,10 +69,12 @@ end
 -- never changes with state (see ui/window.lua's layout arithmetic).
 local function draw_ruler(ctx, dl, key, x, y_top, avail_w, duration)
   if not duration or duration <= 0 then return end
-  local ticks = ruler_ticks(ctx, key, duration, avail_w)
-  if #ticks == 0 then return end
-
+  -- Measure, cache and draw under one exact font push. The actual current size
+  -- is part of the cache key so changing UI Size can never reuse a cadence that
+  -- was chosen for smaller labels.
   local small = theme.push_small_font(ctx)
+  local font_size = reaper.ImGui_GetFontSize(ctx)
+  local ticks = ruler_ticks(ctx, key, duration, avail_w, font_size)
   for _, tk in ipairs(ticks) do
     local tx = x + tk.x
     if tk.major then
@@ -83,9 +84,7 @@ local function draw_ruler(ctx, dl, key, x, y_top, avail_w, duration)
         -- Edge labels clamp inside the panel (the brief's mock behaviour): a
         -- centred "0" would straddle the panel's left edge, and a major landing
         -- exactly at the full width would hang its label half outside.
-        local lx = tx - lw * 0.5
-        if lx < x then lx = x end
-        if lx + lw > x + avail_w then lx = x + avail_w - lw end
+        local lx = x + math.max(0, math.min(tk.x - lw * 0.5, math.max(0, avail_w - lw)))
         reaper.ImGui_DrawList_AddText(dl, lx, y_top + M.RULER_TICK_MAJOR + 2, T.TEXT_TERTIARY, tk.label)
       end
     else
@@ -104,7 +103,6 @@ end
 -- `gain` is the trim expressed as a multiplier, so louder draws taller.
 local function draw_lane(dl, x, lane_y, lane_h, avail_w, ch, show_head, play_px, cols, gain)
   local midy = lane_y + lane_h * 0.5
-  reaper.ImGui_DrawList_AddLine(dl, x, midy, x + avail_w, midy, T.STROKE_TERTIARY) -- lane centre
   local maxs, mins = ch.maxs, ch.mins
   local n = #maxs
   -- A fixed inset off the lane edge, capped so a squashed panel (many channels in a
@@ -239,15 +237,13 @@ function waveform.draw(ctx, state, height, opts)
   if have_wave then
     local nch = #chans
     local lane_h = h / nch
-    local cols = math.floor(avail_w)
+    local cols = math.max(1, math.floor(avail_w))
     local play_px = play_frac * cols
     for ci = 1, nch do
       local lane_y = y + (ci - 1) * lane_h
+      local midy = lane_y + lane_h * 0.5
+      reaper.ImGui_DrawList_AddLine(dl, x, midy, x + avail_w, midy, T.WAVE_CENTER)
       draw_lane(dl, x, lane_y, lane_h, avail_w, chans[ci], show_head, play_px, cols, gain)
-      if ci < nch then -- hairline between lanes
-        local by = y + ci * lane_h
-        reaper.ImGui_DrawList_AddLine(dl, x, by, x + avail_w, by, T.STROKE_TERTIARY)
-      end
     end
   else
     -- Nothing to show yet: a single centre baseline, plus one line of text over
@@ -260,7 +256,7 @@ function waveform.draw(ctx, state, height, opts)
     -- project, a drop on the browser's strip adds to the library. Only the
     -- working view passes one.
     local midy = y + h * 0.5
-    reaper.ImGui_DrawList_AddLine(dl, x, midy, x + avail_w, midy, T.STROKE_TERTIARY)
+    reaper.ImGui_DrawList_AddLine(dl, x, midy, x + avail_w, midy, T.WAVE_CENTER)
     local label, col
     if state.wave_loading and state.wave_loading == target_id then
       label, col = "Reading waveform\u{2026}", T.TEXT_QUATERNARY

@@ -1,29 +1,45 @@
 # Changelog
 
 <!--
-The single source of truth for release notes. Everything else is generated
-from this file — the script header's @changelog block, the GitHub release
-notes — and the tool reads it straight to draw the What's New card and the
-Settings > Updates history. Never write release notes anywhere else.
+This is the single source of truth for release notes. The script header,
+GitHub release notes, What's New card, and Settings > Updates history are
+generated from it. Do not write release notes elsewhere.
 
-THIS FILE STARTS EMPTY, ON PURPOSE (decided 2026-08-09). The beta ships with
-no history: 0.1.0 and 0.2.0 were never published to anyone, so notes for them
-would describe versions no tester ever had. The first entry below is written
-for the first UPDATE after the beta opens, not for the beta itself.
+It intentionally starts empty: 0.3.0 was the beta release, not an update for
+existing testers. The first entry is the first post-beta update. Until then,
+the app shows no What's New card or Release notes row, and
+scripts/gen_header.lua emits no @changelog tag.
 
-While there are no releases here the tool simply shows nothing — no What's New
-card, and no Release notes row in Settings > Updates. `scripts/gen_header.lua`
-likewise leaves the script header with no @changelog tag, and adds one with the
-first release.
+lib/core/changelog.lua parses this exact grammar:
 
-The grammar is fixed, because lib/core/changelog.lua parses it:
+  ## <version> — <YYYY-MM-DD>
+  ### New | Improved | Fixed
+  - **Area** — What changed.
+    Optional indented second line.
 
-  ## <version> — <YYYY-MM-DD>     one release
-  ### New | Improved | Fixed      a group; those three names, in that order
-  - **Area** — What changed.      one entry, area word from the fixed list
-    An extra fact worth knowing.  optional dim second line, indented
-
-The full house style and the fixed list of area words live in the
-`changelog-release` skill. Curated highlights only: if a user would not
-notice it, it does not belong here.
+Groups use those names and that order. `changelog-release` owns the detailed
+workflow, area vocabulary, and curation rules. Include only user-noticeable
+changes.
 -->
+
+## 0.3.1 — 2026-08-26
+
+### New
+
+- **Preview** — References can now be pitch-shifted.
+- **Library** — References with up to eight channels are now supported.
+- **UI** — UI size and accent colour can now be changed.
+
+### Improved
+
+- **Library** — Category, sound, sorting and column choices are now remembered.
+- **UI** — The Settings panel now has a cleaner layout.
+- **Settings** — Settings now include new quality-of-life options.
+- **Setup** — The walkthrough now includes a Back button.
+
+### Fixed
+
+- **Latch mode** — The Latch button now works on more Reaper setups.
+- **Projects** — Unsaved projects now show a warning when pinning is unavailable.
+- **Library** — File drops no longer stall between yb-Reference windows.
+- **Library** — The sound table no longer moves when switching categories.

@@ -5,7 +5,7 @@
 --
 -- WHY WE PAINT THIS ONE, having refused to paint the waveform ghost. REAPER
 -- draws its own version of this band, and there is no API to ask for it — the
--- full export lists were read (docs/RESEARCH.md). Every route where REAPER
+-- full export lists were read (docs/research/reaper-host-facts.md). Every route where REAPER
 -- would draw something instead takes up LAYOUT and therefore shoves the
 -- timeline down as it appears, moving the target out from under the pointer: a
 -- real temporary track was prototyped and failed on exactly that, and a track

@@ -11,8 +11,10 @@ local dropzone = require("ui.dropzone")
 local newtrack_strip = require("ui.newtrack_strip")
 local settings = require("ui.settings")
 local whatsnew = require("ui.whatsnew")
+local matchwin = require("ui.matchwin")
 local focus    = require("ui.focus")
 local walkthrough_ui = require("ui.walkthrough")
+local pitchwin = require("ui.pitchwin")
 
 local app = {}
 
@@ -34,6 +36,7 @@ local HAS_DOCK_MENU = reaper.ImGui_SetNextWindowDockID ~= nil
   and reaper.ImGui_OpenPopup ~= nil and reaper.ImGui_BeginPopup ~= nil
 local HAS_DOCK_ID = reaper.ImGui_GetWindowDockID ~= nil
   and reaper.ImGui_SetNextWindowDockID ~= nil
+local HAS_DOCKED = reaper.ImGui_IsWindowDocked ~= nil
 local HAS_NO_COLLAPSE = reaper.ImGui_WindowFlags_NoCollapse ~= nil
 
 -- Dock change to apply before the next Begin. Two ImGui rules force the one-frame
@@ -47,6 +50,24 @@ local pending_dock
 -- counts as a change and gets checked — a session that opens already docked has
 -- to be judged too, not just docks made while running.
 local last_dock_id = false
+local main_docked_last = false
+
+-- UI Size changes the outer dimensions of floating windows as well as their
+-- contents. Ratios accumulate until each window can consume them: the Library
+-- may be closed while the setting changes, while a docked working view drops
+-- the request because REAPER owns its dimensions.
+local pending_main_scale = 1
+local pending_browser_scale = 1
+
+function app.request_ui_scale(previous, current)
+  previous, current = tonumber(previous), tonumber(current)
+  if not previous or not current or previous <= 0 or current <= 0 then return end
+  local ratio = current / previous
+  if math.abs(ratio - 1) < 0.000001 then return end
+  pending_main_scale = pending_main_scale * ratio
+  pending_browser_scale = pending_browser_scale * ratio
+  browser.request_ui_scale(previous, current)
+end
 
 -- Where each window sat last frame (screen rect), so an in-flight OS files
 -- drag can be matched to the window it hovers BEFORE that window's Begin runs.
@@ -64,13 +85,16 @@ local last_rect = {}
 -- accepted side effect. GetDragDropPayloadFile is the ONE call that truly
 -- peeks an OS files payload from anywhere (see dropzone.lua on why
 -- GetDragDropPayload can never see it).
-local HAS_DRAG_FOCUS = reaper.ImGui_GetDragDropPayloadFile ~= nil
-  and reaper.ImGui_SetNextWindowFocus ~= nil
-local function files_drag_window(ctx, state)
-  if not state.deps.imgui_drop or not HAS_DRAG_FOCUS then return nil end
+local HAS_FILES_PEEK = reaper.ImGui_GetDragDropPayloadFile ~= nil
+local HAS_DRAG_FOCUS = HAS_FILES_PEEK and reaper.ImGui_SetNextWindowFocus ~= nil
+local function files_drag_window(ctx, state, files_active, mouse_x, mouse_y)
+  if not state.deps.imgui_drop or not files_active then return nil end
   if state.drag then return nil end
-  if not reaper.ImGui_GetDragDropPayloadFile(ctx, 0) then return nil end
-  local mx, my = reaper.ImGui_GetMousePos(ctx)
+  local mx, my = mouse_x, mouse_y
+  if type(mx) ~= "number" or type(my) ~= "number" then
+    if not HAS_FILES_PEEK then return nil end
+    mx, my = reaper.ImGui_GetMousePos(ctx)
+  end
   local function inside(r)
     return r and mx >= r.x and mx < r.x + r.w and my >= r.y and my < r.y + r.h
   end
@@ -185,11 +209,9 @@ function app.create_context(font_path)
   return ctx
 end
 
--- Reference mode's red WINDOW OUTLINE is gone (2026-08-06, user's call): the
--- latch button is the only thing that goes red now. Colouring the window chrome
--- for a mode was the part of the old grammar the user disliked, and dropping it
--- also retires the "REF_RED is reserved, nothing else may be red" rule that
--- forced every other red decision through an exception.
+-- Reference mode's coloured WINDOW OUTLINE is gone (2026-08-06, user's call).
+-- The latch button alone signals the mode, now using the chosen accent; colouring
+-- the whole window chrome was the part of the old grammar the user disliked.
 --
 -- Draw one frame. Returns whether the window is still open (false once the user
 -- closes it) so the entry script's defer loop knows when to stop.
@@ -204,12 +226,25 @@ end
 -- `over_target` reports that a drop target inside one of
 -- our windows lit up this frame, which the entry script needs before it asserts
 -- REAPER's own drag cursor (see ui/dropzone.take_hand_shown).
-function app.frame(ctx, state)
+function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- Focus bookkeeping first (ui/focus.lua): which mouse presses landed on one
   -- of our windows is read at the top of the frame, before any window draws;
   -- the give-focus-back decision is read at the very end.
   focus.frame_begin(ctx)
   local nc, nv, nf = theme.apply(ctx)
+
+  -- The rescue path must never see through another app window or popup to a
+  -- drop target underneath it. Normal ReaImGui drops remain available here;
+  -- only the screen-position fallback stands down until the obstruction closes.
+  local popup_open = false
+  if HAS_POPUP_GUARD then
+    popup_open = reaper.ImGui_IsPopupOpen(ctx, "",
+      reaper.ImGui_PopupFlags_AnyPopupId() | reaper.ImGui_PopupFlags_AnyPopupLevel())
+  end
+  local rescue_blocked = popup_open or settings.is_open() or whatsnew.is_open()
+    or matchwin.is_open() or (state.walkthrough and state.walkthrough.active)
+  local files_active, rescue_active = dropzone.begin_file_drag_frame(ctx, state,
+    file_mouse_x, file_mouse_y, file_left_down, rescue_blocked)
 
   -- A drag out to the arrange view ends wherever the mouse is let go — usually well
   -- outside this window. Watched here, before Begin, so a collapsed or docked
@@ -242,10 +277,23 @@ function app.frame(ctx, state)
 
   -- The files-drag focus grab (see files_drag_window above): decided once per
   -- frame, applied to whichever window the drag is over.
-  local drag_focus = files_drag_window(ctx, state)
-  if drag_focus == "main" then reaper.ImGui_SetNextWindowFocus(ctx) end
+  local drag_focus = files_drag_window(ctx, state, files_active or rescue_active,
+    file_mouse_x, file_mouse_y)
+  dropzone.set_file_drag_window(rescue_active and drag_focus or nil)
+  if HAS_DRAG_FOCUS and drag_focus == "main" then reaper.ImGui_SetNextWindowFocus(ctx) end
 
-  reaper.ImGui_SetNextWindowSize(ctx, 900, 600, reaper.ImGui_Cond_FirstUseEver())
+  reaper.ImGui_SetNextWindowSize(ctx, theme.metrics.MAIN_WIN_W,
+    theme.metrics.MAIN_WIN_H, reaper.ImGui_Cond_FirstUseEver())
+  if math.abs(pending_main_scale - 1) >= 0.000001 then
+    if not main_docked_last then
+      local base = last_rect.main
+      local w = base and base.w * pending_main_scale or theme.metrics.MAIN_WIN_W
+      local h = base and base.h * pending_main_scale or theme.metrics.MAIN_WIN_H
+      reaper.ImGui_SetNextWindowSize(ctx,
+        math.floor(w + 0.5), math.floor(h + 0.5), reaper.ImGui_Cond_Always())
+    end
+    pending_main_scale = 1
+  end
   -- Floor the floating size (tokens.md "Floating window minimum"): the window
   -- can't be dragged down to nothing, and a squashed size persisted by ImGui's
   -- ini is clamped back to usable on the next open instead of reopening broken.
@@ -270,6 +318,7 @@ function app.frame(ctx, state)
   local visible, open = theme.begin_window(ctx, state.win_title, true, main_flags, true)
   local dock_id   -- read inside the window; GetWindowDockID only works there
   if visible then
+    main_docked_last = HAS_DOCKED and reaper.ImGui_IsWindowDocked(ctx) or false
     -- This frame's rect, for next frame's files-drag focus grab.
     local mwx, mwy = reaper.ImGui_GetWindowPos(ctx)
     last_rect.main = { x = mwx, y = mwy,
@@ -281,7 +330,9 @@ function app.frame(ctx, state)
     -- reports an in-window drop target caught that same release (`wins_release`)
     -- — then the drop on the row is the user's intent, not the generic "drag
     -- ended" this pre-Begin watcher turned into.
+    dropzone.set_current_window("main")
     local frame_action = window.draw(ctx, state, res)
+    dropzone.set_current_window(nil)
     if frame_action and frame_action.wins_release then
       action = frame_action
     else
@@ -367,7 +418,16 @@ function app.frame(ctx, state)
       reaper.ImGui_SetNextWindowPos(ctx, g.x, g.y, reaper.ImGui_Cond_FirstUseEver())
       reaper.ImGui_SetNextWindowSize(ctx, g.w, g.h, reaper.ImGui_Cond_FirstUseEver())
     else
-      reaper.ImGui_SetNextWindowSize(ctx, 720, 520, reaper.ImGui_Cond_FirstUseEver())
+      reaper.ImGui_SetNextWindowSize(ctx, theme.metrics.BROWSER_WIN_W,
+        theme.metrics.BROWSER_WIN_H, reaper.ImGui_Cond_FirstUseEver())
+    end
+    if math.abs(pending_browser_scale - 1) >= 0.000001 then
+      local base = last_rect.browser or state.browser_geom
+      local w = base and base.w * pending_browser_scale or theme.metrics.BROWSER_WIN_W
+      local h = base and base.h * pending_browser_scale or theme.metrics.BROWSER_WIN_H
+      reaper.ImGui_SetNextWindowSize(ctx,
+        math.floor(w + 0.5), math.floor(h + 0.5), reaper.ImGui_Cond_Always())
+      pending_browser_scale = 1
     end
     -- The same floating floor the working view gets (SetNextWindowSizeConstraints
     -- applies only to the very next Begin, so the browser needs its own call —
@@ -391,7 +451,7 @@ function app.frame(ctx, state)
     -- arrow and one without would read as a bug, not a choice.
     local win_flags = HAS_NO_DOCK and reaper.ImGui_WindowFlags_NoDocking() or 0
     if HAS_NO_COLLAPSE then win_flags = win_flags | reaper.ImGui_WindowFlags_NoCollapse() end
-    if drag_focus == "browser" then reaper.ImGui_SetNextWindowFocus(ctx) end
+    if HAS_DRAG_FOCUS and drag_focus == "browser" then reaper.ImGui_SetNextWindowFocus(ctx) end
     -- Centred title, like every other panel (2026-08-08 — see the working
     -- view's Begin above).
     local visible2, open2 = theme.begin_window(ctx, "LIBRARY###yb-Reference_Library", true, win_flags, true)
@@ -409,7 +469,9 @@ function app.frame(ctx, state)
           reaper.ImGui_PopupFlags_AnyPopupId() | reaper.ImGui_PopupFlags_AnyPopupLevel())
       end
 
+      dropzone.set_current_window("browser")
       local browser_action = browser.draw(ctx, state, res)
+      dropzone.set_current_window(nil)
       -- Same precedence rule as the working view above: a release the browser's
       -- own drop target consumed must survive to the end of the frame.
       if browser_action and browser_action.wins_release then
@@ -477,12 +539,26 @@ function app.frame(ctx, state)
     end
   end
 
+  -- Pitch: a real top-level panel so it stays open while the transport in
+  -- either host is used. Drawn outside both hosts for the same reason as the
+  -- Loudness window; draws nothing until its musical-note button opens it.
+  local pitch_action = pitchwin.draw(ctx, state)
+  action = action or pitch_action
+
   -- Settings: a real top-level window since 2026-08-08 (it was a modal inside
   -- the browser panel), so it is drawn OUT here beside the other two rather than
   -- inside the one whose gear opens it — closing the browser must not take an
   -- open Settings with it. Draws nothing unless it is open.
   local settings_action = settings.draw(ctx, state, res)
-  action = action or settings_action
+  -- A live UI-size gesture outranks the Library's automatic geometry report.
+  -- The geometry action returns on the first frame the slider is still, while
+  -- losing the slider action would make live resizing skip a step.
+  if settings_action and (settings_action.type == "preview_ui_scale"
+      or settings_action.type == "set_ui_scale") then
+    action = settings_action
+  else
+    action = action or settings_action
+  end
 
   -- What's New: its own top-level window too, opened by the entry script when
   -- the running version is newer than the one whose notes were last read. Drawn
@@ -510,6 +586,7 @@ function app.frame(ctx, state)
   -- a text field active" describe the frame as it ends. The entry script
   -- performs the actual handoff (reaper_api.focus_arrange).
   local give_focus, forward_keys = focus.frame_end(ctx)
+  dropzone.end_file_drag_frame()
   -- Taken (and cleared) at the very end, so it covers the drop targets in BOTH
   -- windows and can never carry over into the next frame.
   return open, action, dropzone.take_hand_shown(), give_focus, forward_keys,

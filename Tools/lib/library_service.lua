@@ -38,16 +38,19 @@ function service.import_files(state, paths, category)
     local source_name = importer.basename(src)
     local size = reaper_api.file_size(src)
 
-    if importer.find_duplicate(lib, source_name, size) then
+    if not reaper_api.is_audio_file(source_name) then
+      summary.skipped[#summary.skipped + 1] = source_name ..
+        ": isn't one of the supported audio formats."
+    elseif importer.find_duplicate(lib, source_name, size) then
       summary.duplicates[#summary.duplicates + 1] = source_name
     else
       local info = reaper_api.probe_audio(src)
       if not info or info.channels < 1 then
         summary.errors[#summary.errors + 1] = source_name .. ": couldn't be read as audio."
-      elseif info.channels > 2 then
-        -- v1 is mono/stereo only; refuse loudly rather than mangle (DESIGN scope).
+      elseif info.channels > reaper_api.MAX_AUDIO_CHANNELS then
         summary.skipped[#summary.skipped + 1] = source_name ..
-          ": has more than two channels. yb-Reference supports mono and stereo files."
+          string.format(": has %d channels. yb-Reference supports up to %d.",
+            info.channels, reaper_api.MAX_AUDIO_CHANNELS)
       else
         local dest_name = importer.unique_filename(source_name, taken)
         local dest_path = reaper_api.join(state.library_dir, dest_name)

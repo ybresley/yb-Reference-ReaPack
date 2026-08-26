@@ -1,5 +1,5 @@
 -- Walkthrough: the first-open guided tour's state machine. Six fixed stops
--- (data below) plus a welcome card, walked forward one action at a time.
+-- (data below) plus a welcome card, walked one action at a time.
 -- Replayable from Settings, which is why the browser-open exception exists:
 -- a replay can start with the Library already sitting open.
 --
@@ -65,7 +65,7 @@ walkthrough.STOPS = {
     title = "REFERENCE MODE",
     -- "L" alone read as a KEYBOARD key (user, live 2026-08-10) — it is the
     -- ringed BUTTON, so both mentions name it as one.
-    body  = "The Latch button turns on Reference mode and mutes your project, then pressing play in REAPER triggers your selected reference instead. Click the Latch button again to get your project back.",
+    body  = "The Latch button turns on Reference mode and mutes your project, then pressing play in Reaper triggers your selected reference instead. Click the Latch button again to get your project back.",
     note  = "Reference mode is optional. You can also play a reference directly in yb-Reference." },
   -- The FINALE, and one stop where there were two (2026-08-10,
   -- `.brief/walkthrough-footer/`): a stop to open the panel plus a stop to
@@ -135,6 +135,14 @@ function walkthrough.next(s)
   else
     s.pos = s.pos + 1
   end
+end
+
+-- Return one stop without leaving the tour. The welcome card and first stop are
+-- the lower bound; the UI keeps Back visible-but-disabled on stop 1 so the
+-- footer's geometry never shifts.
+function walkthrough.previous(s)
+  if not s.active or not s.pos or s.pos <= 1 then return end
+  s.pos = s.pos - 1
 end
 
 -- Which event advances which stop, keyed by stop id rather than position —

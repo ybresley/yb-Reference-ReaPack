@@ -2,7 +2,7 @@
 -- `.brief/_done/walkthrough/` — every answer the user's own). Spotlight look:
 -- each tool window gets a dark wash with the current stop's target left bright
 -- inside an accent ring, and one titled card sits beside the target carrying
--- progress dots, Skip and one button. The wash is PAINT, not glass —
+-- progress dots, Back, Skip and one button. The wash is PAINT, not glass —
 -- nothing is blocked, real actions advance the stops (core/walkthrough.lua owns
 -- that state machine; this file only draws it and reports button presses).
 --
@@ -257,21 +257,23 @@ local function place_in(ring, cw, ch, bx, by, bw, bh)
   return nil
 end
 
--- A text-styled control (the Skip link): an InvisibleButton with the words
+-- A text-styled control (the Back and Skip links): an InvisibleButton with the words
 -- painted over it, dim at rest and bright under the cursor. `h` makes the hit
 -- area a full control height with the words centred in it — that is what
 -- keeps the footer on ONE line with no cursor nudging (SameLine would undo
 -- any nudge when the next control joins the line).
-local function text_button(ctx, label, h)
+local function text_button(ctx, label, h, disabled)
   local tw, th = reaper.ImGui_CalcTextSize(ctx, label)
   h = h or th
   local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
   local clicked = reaper.ImGui_InvisibleButton(ctx, "##" .. label, tw, h)
-  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local hovered = not disabled and reaper.ImGui_IsItemHovered(ctx)
+  local colour = disabled and T.TEXT_QUATERNARY
+    or (hovered and T.TEXT_SECONDARY or T.TEXT_TERTIARY)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
   reaper.ImGui_DrawList_AddText(dl, x, y + (h - th) / 2,
-    hovered and T.TEXT_SECONDARY or T.TEXT_TERTIARY, label)
-  return clicked
+    colour, label)
+  return not disabled and clicked
 end
 
 -- The card's height, worked out BEFORE the window is submitted.
@@ -285,9 +287,9 @@ end
 -- remembering makes the first frame correct and deletes the settle entirely.
 --
 -- Every line below mirrors one submitted by the drawing code, in the same font
--- and the same order, so the two can't drift: title, body, optional note, the
--- 2px spacer, the footer's control-height line, plus ItemSpacing between each
--- and the window's own padding around the lot.
+-- and the same order, so the two can't drift: the title/progress row, body,
+-- optional note, the 2px spacer, the footer's control-height line, plus
+-- ItemSpacing between each and the window's own padding around the lot.
 local function measure_card(ctx, title, body, note)
   local pad = M.WALK_CARD_PAD
   local wrap = M.WALK_CARD_W - pad * 2
@@ -459,10 +461,27 @@ function walkthrough.card(ctx, ws)
 
   local action
 
-  -- Title: the section-heading grammar (caps, small size, bold, full white).
+  -- Title and progress share the header row. The dots stay passive: they report
+  -- position at a glance while the labelled Back control owns navigation.
+  local title_x, title_y = reaper.ImGui_GetCursorScreenPos(ctx)
+  local title_avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local hd = theme.push_heading_font(ctx)
+  local title_h = select(2, reaper.ImGui_CalcTextSize(ctx, title))
   reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, title)
   if hd then reaper.ImGui_PopFont(ctx) end
+  if cur ~= "welcome" then
+    local n = #wt.STOPS
+    local step = M.WALK_DOT_R * 2 + M.WALK_DOT_GAP
+    local dots_w = n * step - M.WALK_DOT_GAP
+    local dx = title_x + title_avail - dots_w
+    local dl = reaper.ImGui_GetWindowDrawList(ctx)
+    for i = 1, n do
+      reaper.ImGui_DrawList_AddCircleFilled(dl,
+        dx + M.WALK_DOT_R + (i - 1) * step,
+        title_y + title_h / 2, M.WALK_DOT_R,
+        i == ws.pos and T.ACCENT or T.WALK_DOT)
+    end
+  end
 
   -- Body, wrapped to the card. Frozen replaces the stop's own lesson with the
   -- one thing that matters right now: how to get it back.
@@ -480,11 +499,9 @@ function walkthrough.card(ctx, ws)
 
   reaper.ImGui_Dummy(ctx, 0, 2)
 
-  -- Footer (rebuilt 2026-08-10, `.brief/walkthrough-footer/`): DOTS on the left
-  -- — one per stop, the current one accent — then Skip and one button hugging
-  -- the right edge. The dots replaced "3 of 7" (progress read at a glance, not
-  -- arithmetic) and the two footer texts came up to body size; the old
-  -- smallest-size counter and "Skip walkthrough" both read as fine print.
+  -- Footer: Back on the left, then Skip and one button hugging the right edge.
+  -- Back remains in place on stop 1 but disables there, so moving between stops
+  -- changes state without changing geometry.
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local x0 = reaper.ImGui_GetCursorPosX(ctx)
   local frame_h = reaper.ImGui_GetFrameHeight(ctx)
@@ -501,30 +518,19 @@ function walkthrough.card(ctx, ws)
   local skip_label = cur == "welcome" and "Not Now" or "Skip"
   local skip_w = select(1, reaper.ImGui_CalcTextSize(ctx, skip_label))
 
-  -- The dots, painted over a reserved block so the footer stays one normal
-  -- line of layout. Never for the welcome card: no stop has been reached yet.
   if cur ~= "welcome" then
-    local n = #wt.STOPS
-    local step = M.WALK_DOT_R * 2 + M.WALK_DOT_GAP
-    local dx, dy = reaper.ImGui_GetCursorScreenPos(ctx)
-    reaper.ImGui_Dummy(ctx, n * step - M.WALK_DOT_GAP, frame_h)
-    local dl = reaper.ImGui_GetWindowDrawList(ctx)
-    for i = 1, n do
-      reaper.ImGui_DrawList_AddCircleFilled(dl,
-        dx + M.WALK_DOT_R + (i - 1) * step, dy + frame_h / 2, M.WALK_DOT_R,
-        i == ws.pos and T.ACCENT or T.WALK_DOT)
+    if text_button(ctx, "Back", frame_h, ws.pos <= 1) then
+      -- The finale opened Loudness as part of arriving. Leaving it backwards
+      -- takes that temporary panel too, matching Skip and Done cleanup.
+      if cur.panel == "match" then matchwin.close() end
+      action = { type = "walkthrough", ev = "back" }
     end
   end
 
-  -- Skip sits just left of the button; both hug the card's right edge — but
-  -- never left of the dots' own end (the 230px round-1 card ran the counter
-  -- into the link; the clamp makes crowding degrade into touching, never into
-  -- overprinting).
+  -- Skip sits just left of the button; both hug the card's right edge.
   local skip_x = x0 + avail - M.POPUP_BTN_W - M.ITEM_SPACING_X * 2 - skip_w
   if cur ~= "welcome" then
     reaper.ImGui_SameLine(ctx)
-    local after_dots = reaper.ImGui_GetCursorPosX(ctx)
-    if skip_x < after_dots then skip_x = after_dots end
   end
   reaper.ImGui_SameLine(ctx, skip_x)
   if text_button(ctx, skip_label, frame_h) then

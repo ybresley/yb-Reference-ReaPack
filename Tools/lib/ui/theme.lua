@@ -1,7 +1,7 @@
 -- theme: the one fixed dark theme (Cursor-IDE look), as a token table plus a
 -- push/pop pair applied once per frame. Nothing in the UI hard-codes a colour or
--- size — it comes from here. Mirror of skills/reaimgui-ui/tokens.md; if a token is
--- missing, add it here first.
+-- size — it comes from here. This table is authoritative;
+-- .claude/skills/reaimgui-ui/tokens.md documents its current values.
 --
 -- Colours are 0xRRGGBBAA (the alpha is part of the token — keep it).
 
@@ -12,6 +12,7 @@ local T = {
   BG_CHROME       = 0x141414FF, -- title bar, sidebar, docked chrome
   BG_WINDOW       = 0x181818FF, -- main content background
   BG_POPUP        = 0x1F1F1FFF, -- popups, menus, tooltips
+  SET_GROUP_BG    = 0x1F1F1FFF, -- filled subject groups inside Settings
   -- Fills (white overlays for hover/selection/inputs)
   FILL_PRIMARY    = 0xE4E4E430, -- active/pressed
   FILL_SECONDARY  = 0xE4E4E41E, -- selected rows, button hover (active toggles use ACCENT faces)
@@ -35,20 +36,10 @@ local T = {
   ACCENT       = 0x599CE7FF, -- play, selection edge, active sort, drop highlight
   ACCENT_HOVER = 0x6AABE9FF,
   ACCENT_WASH  = 0x599CE714, -- drop-target fill while a file drag hovers it
-  -- Red is no longer RESERVED (2026-08-06, user's call). It used to mean "and
-  -- nothing else in the UI may be red", which forced the whole window outline
-  -- and the picker slot red while reference mode was latched, and pushed every
-  -- other red decision through a documented exception. Both of those are gone:
-  -- the LATCH BUTTON is the only thing that reddens for reference mode now, and
-  -- red is free to mean "destructive" elsewhere.
-  REF_RED      = 0xFC6B83FF, -- the latch button's fill while reference mode is on
-  TEXT_ON_REF  = 0x1A1414FF, -- the "R" on that red fill
-  -- A destructive control's GLYPH while the cursor is on it (today only the
-  -- picker's unpin cross). Same hue as REF_RED on purpose: two nearly-identical
-  -- reds would be harder to tell apart than one red doing two jobs, and the two
-  -- can't be confused anyway — the latch is a filled square that persists while
-  -- your project is muted, this is a glyph that reddens only under the cursor.
-  DANGER_RED   = 0xFC6B83FF, -- = REF_RED
+  -- Red is reserved for destructive controls. The active latch follows ACCENT,
+  -- so changing the user's palette changes that state along with the other
+  -- active controls without weakening the danger meaning here.
+  DANGER_RED   = 0xFC6B83FF,
   -- The title bar's ✕ under the cursor. The same red, THINNED over the dark
   -- title bar rather than laid on at full strength: at full strength the cross
   -- on top of it all but disappeared (user-reported 2026-08-08). What these two
@@ -65,14 +56,11 @@ local T = {
   WAVE_BARS     = 0xE4E4E45E, -- unplayed part of the waveform
   WAVE_PLAYED   = 0x599CE7FF, -- = ACCENT: part left of the playhead while playing
   WAVE_PLAYHEAD = 0xE4E4E4EB, -- = TEXT_PRIMARY: the playhead line
+  WAVE_CENTER   = 0xE4E4E414, -- = STROKE_TERTIARY: quiet zero-amplitude line
   -- Outside the start/end span the picture DIMS (loudness tools, 2026-08-06):
   -- a window-coloured wash, dark enough that the framed stretch clearly reads
   -- as "what plays", light enough that the excluded picture is still there.
   SPAN_DIM      = 0x181818A6,
-  -- The REF_TAB_* pair retired with the reference row itself (2026-08-06, the
-  -- reference-picker redesign): the pins are no longer tabs, so red's third
-  -- home moved to the picker slot in the control bar, where it is REF_RED +
-  -- TEXT_ON_REF directly rather than an alias of its own.
   -- Faders (aliases, same intent-naming as the waveform group). The track uses the
   -- strongest white fill because a 4px bar needs more contrast than a full-height
   -- frame to stay visible on the window background.
@@ -80,7 +68,7 @@ local T = {
   FADER_FILL  = 0x599CE7FF, -- = ACCENT: filled part (ACCENT_HOVER while hovered)
   FADER_KNOB  = 0xE4E4E4EB, -- = TEXT_PRIMARY: the pill grab knob
   FADER_TICK  = 0xE4E4E433, -- = STROKE_PRIMARY: the 0 dB detent mark on trim
-  -- The slim scrollbar thumb (widgets.scrollbar — the browser table's rail and
+  -- The slim scrollbar thumb (widgets.scrollbar_thumb — the browser table's rail and
   -- the sidebar's, brief `table-scrollbar` 2026-08-09). It replaced ImGui's own
   -- bar there: that one carved its width out of the columns and ran up into the
   -- frozen header. No track colour on purpose — the empty strip IS the track.
@@ -91,13 +79,41 @@ local T = {
   -- look was too heavy ("less greyed out", round 2) — 0x78 keeps the dimmed
   -- controls readable while the ringed target still clearly leads.
   WALK_DIM = 0x14141478,
-  -- Its footer's progress dots (2026-08-10, `.brief/walkthrough-footer/`): the
+  -- Its header's progress dots: the
   -- stop you are on wears ACCENT, the rest this dim white. Same value as
   -- FILL_PRIMARY, named for its role like the waveform's aliases — a 5px disc
   -- is a mark, not a control fill.
   WALK_DOT = 0xE4E4E430,
 }
 theme.tokens = T
+
+-- Appearance choices. Blue is the shipped default; the other hues reuse the
+-- established category colours so they already belong to the product's visual
+-- language. The list follows the colour wheel from green through purple rather
+-- than jumping back and forth between hues. Hover colours are a small lift.
+local ACCENT_OPTIONS = {
+  { id = "green",  label = "Green",  color = 0x77B779FF, hover = 0x87C489FF },
+  { id = "teal",   label = "Teal",   color = 0x35B9C0FF, hover = 0x49C5CBFF },
+  { id = "blue",   label = "Blue",   color = 0x599CE7FF, hover = 0x6AABE9FF },
+  { id = "purple", label = "Purple", color = 0xAF95DFFF, hover = 0xBCA5E5FF },
+}
+local ACCENTS_BY_ID = {}
+for _, option in ipairs(ACCENT_OPTIONS) do ACCENTS_BY_ID[option.id] = option end
+
+theme.accent_options = ACCENT_OPTIONS
+theme.accent = "blue"
+
+function theme.set_accent(id)
+  local option = ACCENTS_BY_ID[id] or ACCENTS_BY_ID.blue
+  theme.accent = option.id
+  T.ACCENT = option.color
+  T.ACCENT_HOVER = option.hover
+  T.ACCENT_WASH = (option.color & ~0xFF) | 0x14
+  T.WAVE_PLAYED = option.color
+  T.FADER_FILL = option.color
+  theme.invalidate_colours()
+  return option.id
+end
 
 -- DrawList colours ignore the style Alpha that BeginDisabled lowers — anything
 -- hand-painted onto a draw list (widgets.lua's faders/scrollbar, icons.lua's
@@ -328,6 +344,12 @@ local BASE = {
   SEARCH_W  = 176, -- the search box (fits "Search name of sounds" + the embedded magnifier at BASE_FS 13)
   SEARCH_ICON_PAD = 24, -- left FramePadding.x for the search field, clearing the drawn magnifier glyph
   POPUP_BTN_W = 72, -- popup action buttons (OK / Cancel / Delete / Close)
+  -- The untitled Pitch panel is exactly as wide as its joined field. Width is
+  -- inner content; window padding adds the outer 16px.
+  PITCH_CONTENT_W = 165,
+  PITCH_LABEL_W = 92,
+  PITCH_VALUE_W = 73,
+  PITCH_ANCHOR_GAP = 2,
   -- Fixed outer width for the multi-category delete confirmation. Long warning
   -- lines wrap inside it instead of stretching the modal into a wide empty box.
   CATEGORY_DELETE_W = 320,
@@ -339,7 +361,7 @@ local BASE = {
   WALK_CARD_W   = 260,
   WALK_CARD_PAD = 12, -- its inner padding (spacing scale)
   WALK_RING_PAD = 4,  -- accent ring's inflation around the target (spacing scale)
-  -- The footer's progress dots. A RADIUS, so it stays whole through set_scale's
+  -- The header's progress dots. A RADIUS, so it stays whole through set_scale's
   -- rounding — 3 draws the 6px disc that reads cleanly beside 13px text.
   WALK_DOT_R    = 3,
   WALK_DOT_GAP  = 4,  -- gap between two dots (spacing scale)
@@ -359,6 +381,10 @@ local BASE = {
   -- and scrolls inside this once a big one (or several missed ones) passes it.
   WN_WIN_W    = 440,
   WN_MAX_H    = 420,
+  -- Release notes are a reading surface, so their body sits one step above the
+  -- app's compact 13px control text. The version, group and area labels use the
+  -- bold cut at this same size; only the date remains subordinate small text.
+  WN_TEXT_FS  = 14,
   -- A remembered library that disappears opens a compact recovery surface.
   -- One reserved status line keeps the actions still when a message appears
   -- without leaving the old three-line blank block during the normal state.
@@ -374,12 +400,9 @@ local BASE = {
   -- token, which is why it may sit off the spacing scale.
   WN_IND      = 14,
   SET_WIN_W   = 620,
-  -- 380 until 2026-08-08: that number was picked before there was any content to
-  -- size it against, and left Library's rows ending ~200px short of the bottom
-  -- ("lots of empty space"). 320 fits the richest section known — Help, with four
-  -- add-on rows plus walkthrough and feedback — without a scrollbar. The height
-  -- must fit the TALLEST section, not the one on screen: they share one window.
-  SET_WIN_H   = 320,
+  -- A taller fixed surface keeps the grouped Settings layout comfortable while
+  -- overflowing tabs remain reachable through the content-pane scrollbar.
+  SET_WIN_H   = 480,
   SET_NAV_W   = 140, -- the section list (narrower than SIDEBAR_W: five short words, no counts)
   -- A nav row's height. Deliberately taller than a control (21) and than the
   -- sidebar's text rows: these read as TABS, and they sit flush (no row gap, no
@@ -407,6 +430,20 @@ local BASE = {
   -- bare "…" is a control-height square instead — the same two classes the
   -- browser toolbar already runs ("+ Add sounds" plus its square icon buttons).
   SET_ACTION_W = 96,
+  -- Compact pill used for persistent on/off choices in Settings. The knob has
+  -- the same 2px inset at either end, so changing state moves colour and fill
+  -- without changing the row's geometry.
+  SET_SWITCH_W = 30,
+  SET_SWITCH_H = 16,
+  SET_SWITCH_KNOB = 12,
+  -- Appearance uses one discrete slider plus a fixed readout. The slider stays
+  -- long enough for eleven 5% stops to be deliberate; the readout holds "150%"
+  -- without changing width as the value moves.
+  SET_APPEAR_SLIDER_W = 220,
+  SET_APPEAR_VALUE_W  = 54,
+  -- Version pairs share one label column so the installed value never moves
+  -- when an available version or action appears.
+  SET_VERSION_LABEL_W = 54,
   FB_EMAIL_W   = 240, -- ordered Feedback form: room for a useful address slice
   -- (SET_INPUT_W, the old email-only field width, retired 2026-08-10.
   -- Feedback now owns FB_EMAIL_W because its field has a dedicated line.)
@@ -442,8 +479,9 @@ local BASE = {
   -- The browser's subordinate text: the info row's tech details and the
   -- PREVIEW fader label. Sidebar category names and counts use BASE_FS; caps and
   -- colour distinguish those grouping rows from mixed-case sound names.
-  -- 11 until 2026-08-08. THE TOOL HAS EXACTLY TWO TEXT SIZES — this and BASE_FS
-  -- — and 11 had drawn the same complaint four times (sidebar category rows,
+  -- 11 until 2026-08-08. Compact app chrome has two text sizes — this and
+  -- BASE_FS; the separate release-note reading size does not size controls —
+  -- and 11 had drawn the same complaint four times (sidebar category rows,
   -- Settings' explanation lines, Settings' facts line, then the Loudness panel's
   -- readout labels). The first three were each answered by moving that one
   -- element up to BASE_FS, which is how the smallest size ends up meaning
@@ -459,11 +497,17 @@ local BASE = {
   -- clips rather than shedding controls.
   MIN_WIN_W = 340,
   MIN_WIN_H = 210,
+  -- First-open floating sizes. Unlike a minimum, these are multiplied by UI
+  -- Size so a fresh window starts with the same usable room at every zoom.
+  MAIN_WIN_W = 900,
+  MAIN_WIN_H = 600,
+  BROWSER_WIN_W = 720,
+  BROWSER_WIN_H = 520,
   -- The Library popup's OWN width floor (2026-08-12). MIN_WIN_W above is sized
   -- for the WORKING VIEW's transport bar; the browser just reused it, which was
-  -- already tight with two toggles on the info row and went stale the moment
-  -- play/pause and stop landed beside them (four squares now — see the info
-  -- row's own comment in ui/browser.lua). Applied at the browser's own
+  -- already tight with two toggles on the info row and went stale as transport
+  -- controls joined them (five squares now — see the info row's own comment in
+  -- ui/browser.lua). Applied at the browser's own
   -- SetNextWindowSizeConstraints call IN PLACE OF MIN_WIN_W (mirrors how
   -- MIN_WIN_H already gets RULER_H added for that same call — width needs a
   -- full replacement rather than an addition, since the row's shape has
@@ -476,27 +520,26 @@ local BASE = {
   -- both sides (16) + a readable slice of the tech line (80 — enough to read
   -- the sample rate and bit depth before the rest clips, not the whole line;
   -- the one judgement call here, tune by eye) + the row's own 8px text-to-
-  -- controls gap (browser.lua) + four control-height squares with their
-  -- trailing gaps — play/pause, stop, loop, auto-audition: 4×(BASE_FS +
-  -- FRAME_PAD_Y×2) + 4×ITEM_SPACING_X = 108 + the "Preview" fader caption
+  -- controls gap (browser.lua) + five control-height squares with their
+  -- trailing gaps — play/pause, stop, loop, Pitch, auto-audition: 5×(BASE_FS +
+  -- FRAME_PAD_Y×2) + 5×ITEM_SPACING_X = 135 + the "Preview" fader caption
   -- (~46 at GROUP_FS — CalcTextSize only knows the real width at runtime, so
   -- this is a hand measurement, the same way SEARCH_W's text allowance was)
   -- + its 6px gap to the track (transport.lua's own `spacing`) + the whole
   -- master fader (SLIDER_W, 132, already track + gap + FADER_VAL_W). Total:
-  -- 120+16+80+8+108+46+6+132 = 516.
-  BROWSER_MIN_W = 516,
+  -- 120+16+80+8+135+46+6+132 = 543.
+  BROWSER_MIN_W = 543,
   -- The update notice: an ACCENT dot drawn over the gear button's top-right
-  -- corner while a newer version is published (DESIGN "Distribution, updates &
-  -- versioning" — the gear is the notice's ONLY home; nothing moves or resizes).
+  -- corner while a newer version is published (DESIGN.md "Settings, help,
+  -- feedback, and releases" — the gear is the notice's only home).
   UPDATE_DOT_R = 3,
 }
 
 -- ---- UI scale ---------------------------------------------------------------
 --
--- One number multiplies every size above. Today it is fixed at 1.0 and the base
--- values ARE the shipped sizes; it exists so the planned "UI size" setting is a
--- call to set_scale rather than a second re-tuning of forty hand-measured
--- numbers (2026-08-07).
+-- One number multiplies every size above. The authored values are the 100%
+-- setting; Settings lets the user raise them to 150% in 5% steps through this
+-- one call rather than re-tuning individual screens.
 --
 -- `theme.metrics` is filled IN PLACE and never replaced — every UI module holds
 -- `local M = theme.metrics` from require time, so a new table would leave them
@@ -509,11 +552,25 @@ local UNSCALED = {
   BROWSER_LIST_MIN_ROWS = true,
 }
 
+theme.MIN_SCALE = 1.0
+theme.MAX_SCALE = 1.5
+theme.SCALE_STEP = 0.05
 theme.metrics = {}
 theme.scale = 1.0
 
+function theme.normalise_scale(s)
+  s = tonumber(s) or theme.MIN_SCALE
+  s = math.max(theme.MIN_SCALE, math.min(theme.MAX_SCALE, s))
+  local steps = math.floor((s - theme.MIN_SCALE) / theme.SCALE_STEP + 0.5)
+  return math.floor((theme.MIN_SCALE + steps * theme.SCALE_STEP) * 100 + 0.5) / 100
+end
+
+function theme.scale_percent(s)
+  return math.floor(theme.normalise_scale(s) * 100 + 0.5)
+end
+
 function theme.set_scale(s)
-  if not (s and s > 0) then s = 1.0 end
+  s = theme.normalise_scale(s)
   theme.scale = s
   for k, v in pairs(BASE) do
     if UNSCALED[k] then
@@ -526,6 +583,7 @@ function theme.set_scale(s)
   -- The ImGui style vars are built from these same numbers, so they have to be
   -- rebuilt too (see `resolve` below). Harmless before the first frame.
   theme.invalidate_style()
+  return s
 end
 
 -- The control bar's own widths are NOT metrics: every square is one frame
@@ -590,6 +648,10 @@ end
 -- allocations are exactly what the frame rules forbid. A slot an older ReaImGui
 -- doesn't define is skipped here, so the push and pop counts still match.
 local resolved_colors, resolved_vars
+
+function theme.invalidate_colours()
+  resolved_colors = nil
+end
 
 -- Drop the cached style vars so the next frame rebuilds them from the current
 -- metrics. Called by set_scale; a no-op before the first frame has resolved.
@@ -690,6 +752,37 @@ function theme.push_bold_font(ctx)
     return true
   end
   return false
+end
+
+-- Release-note reading text: slightly larger than compact app chrome without
+-- changing the size of controls or every other window.
+local release_font_ok
+function theme.push_release_font(ctx)
+  if release_font_ok == nil then
+    release_font_ok = pcall(reaper.ImGui_PushFont, ctx, nil, theme.metrics.WN_TEXT_FS)
+    return release_font_ok
+  end
+  if release_font_ok then
+    reaper.ImGui_PushFont(ctx, nil, theme.metrics.WN_TEXT_FS)
+    return true
+  end
+  return false
+end
+
+local release_bold_font_ok
+function theme.push_release_bold_font(ctx)
+  if not ui_font_bold then return theme.push_release_font(ctx) end
+  if release_bold_font_ok == nil then
+    release_bold_font_ok = pcall(
+      reaper.ImGui_PushFont, ctx, ui_font_bold, theme.metrics.WN_TEXT_FS)
+    if release_bold_font_ok then return true end
+    return theme.push_release_font(ctx)
+  end
+  if release_bold_font_ok then
+    reaper.ImGui_PushFont(ctx, ui_font_bold, theme.metrics.WN_TEXT_FS)
+    return true
+  end
+  return theme.push_release_font(ctx)
 end
 
 -- Push the whole theme. Returns how many colours, vars and fonts were pushed so
@@ -878,6 +971,7 @@ end
 
 -- Fill theme.metrics before anything requires this module. The settings-driven
 -- size option will call set_scale again with the user's own number.
+theme.set_accent("blue")
 theme.set_scale(1.0)
 
 return theme

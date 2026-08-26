@@ -95,13 +95,14 @@ local WRAP_TO_EDGE = 0
 -- be collected) and recut only when the text width changes (the scrollbar
 -- appearing is the one real cause) — measuring word-by-word every frame would
 -- be the repeated frame-loop work this project forbids.
-local DASH = ": "
+local DASH = " \u{2014} "
 local split_cache = setmetatable({}, { __mode = "k" })
 
-local function split_entry(ctx, e, text_w)
+local function split_entry(ctx, e, text_w, area_w)
   local c = split_cache[e]
-  if c and c.w == text_w then return c end
-  local room = text_w - select(1, reaper.ImGui_CalcTextSize(ctx, e.area .. DASH))
+  local font_size = reaper.ImGui_GetFontSize(ctx)
+  if c and c.w == text_w and c.font_size == font_size and c.area_w == area_w then return c end
+  local room = text_w - area_w - select(1, reaper.ImGui_CalcTextSize(ctx, DASH))
   local head, rest_from = "", 1
   local words = {}
   for word in e.text:gmatch("%S+") do words[#words + 1] = word end
@@ -110,30 +111,42 @@ local function split_entry(ctx, e, text_w)
     if select(1, reaper.ImGui_CalcTextSize(ctx, try)) > room and i > 1 then break end
     head, rest_from = try, i + 1
   end
-  c = { w = text_w, head = DASH .. head, rest = table.concat(words, " ", rest_from) }
+  c = {
+    w = text_w, font_size = font_size, area_w = area_w,
+    head = DASH .. head, rest = table.concat(words, " ", rest_from),
+  }
   split_cache[e] = c
   return c
 end
 
 local function entry_line(ctx, e, x0, text_w)
+  local reading = theme.push_release_font(ctx)
   local col = x0 + M.WN_IND
   reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "\u{2022}")
   reaper.ImGui_SameLine(ctx, col)
 
   if e.area then
-    local s = split_entry(ctx, e, text_w)
+    local bold = theme.push_release_bold_font(ctx)
+    local area_w = select(1, reaper.ImGui_CalcTextSize(ctx, e.area))
     reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, e.area)
+    if bold then reaper.ImGui_PopFont(ctx) end
     reaper.ImGui_SameLine(ctx, 0, 0)
+    local s = split_entry(ctx, e, text_w, area_w)
+    local wrapped = s.rest ~= ""
+    -- ItemSpacing is consumed while each line is drawn. Tighten only the first
+    -- line so its continuation follows naturally, then restore normal spacing
+    -- before drawing the final line so the next entry keeps its full gap.
+    if wrapped then
+      reaper.ImGui_PushStyleVar(
+        ctx, reaper.ImGui_StyleVar_ItemSpacing(), M.ITEM_SPACING_X, 0)
+    end
     reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, s.head)
-    if s.rest ~= "" then
-      -- Spacing y pushed to 0 so the remainder sits at the natural line
-      -- advance — with the theme's 6px it would read as a gap mid-paragraph.
-      reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), M.ITEM_SPACING_X, 0)
+    if wrapped then
+      reaper.ImGui_PopStyleVar(ctx)
       reaper.ImGui_SetCursorPosX(ctx, col)
       if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, WRAP_TO_EDGE) end
       reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, s.rest)
       if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
-      reaper.ImGui_PopStyleVar(ctx)
     end
   else
     -- No area word (parser-legal, style-illegal): one colour means one item,
@@ -155,6 +168,7 @@ local function entry_line(ctx, e, x0, text_w)
     reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, e.detail)
     if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
   end
+  if reading then reaper.ImGui_PopFont(ctx) end
 end
 
 -- One release, headed by its version and date. Shared with Settings' history
@@ -170,10 +184,10 @@ function whatsnew.draw_release(ctx, release, opts)
 
   if opts.head ~= false then
     -- The version wears the app ACCENT (2026-08-09, user's ask — "the colour of
-    -- the pin icons", which IS the accent) and the BOLD cut at the body size
+    -- the pin icons", which IS the accent) and the BOLD release-note cut
     -- (same day): the one landmark you scan a long history by, in the colour
     -- the tool already uses for marks worth finding.
-    local bold = theme.push_bold_font(ctx)
+    local bold = theme.push_release_bold_font(ctx)
     reaper.ImGui_TextColored(ctx, T.ACCENT, "v" .. (release.version or "?"))
     if bold then reaper.ImGui_PopFont(ctx) end
     if release.date then
@@ -185,14 +199,12 @@ function whatsnew.draw_release(ctx, release, opts)
   end
 
   for gi, g in ipairs(release.groups or {}) do
-    -- A group heading is a LABEL, not a sentence — BOLD small caps, the exact
-    -- grammar the Loudness panel's section headings use. Weight is what makes it
-    -- lead, so it stays TEXT_PRIMARY like the lines under it rather than
-    -- reaching for a size or colour step.
+    -- Group headings use the same larger bold reading cut as the version and
+    -- area names, while caps and spacing keep the hierarchy distinct.
     if gi > 1 or opts.head ~= false then reaper.ImGui_Dummy(ctx, 0, 2) end
-    local small = theme.push_heading_font(ctx)
+    local bold = theme.push_release_bold_font(ctx)
     reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, tostring(g.name):upper())
-    if small then reaper.ImGui_PopFont(ctx) end
+    if bold then reaper.ImGui_PopFont(ctx) end
     for _, e in ipairs(g.entries or {}) do
       entry_line(ctx, e, x0, text_w)
     end

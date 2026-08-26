@@ -1,7 +1,7 @@
 -- feedback (core): the pure half of the Send-feedback panel — building the
 -- report payload and describing what rides along. Decided end to end in
--- `.brief/_done/send-feedback/` (DESIGN "Send feedback"); the REAPER-facing
--- sender lives in lib/feedback.lua.
+-- DESIGN.md "Settings, help, feedback, and releases"; delivery evidence lives
+-- in docs/research/feedback-delivery.md. The REAPER-facing sender is lib/feedback.lua.
 --
 -- Pure Lua: no reaper.*, no ImGui. Everything REAPER knows (versions, install
 -- state) arrives here as plain values.

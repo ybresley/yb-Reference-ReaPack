@@ -32,6 +32,7 @@ icons.NAMES = {
   ["square"]      = 0xE167, -- stop (Lucide has no "stop"; its square is the convention)
   ["repeat"]      = 0xE146, -- loop
   ["ear"]         = 0xE382, -- auto-audition (hear a sound the moment you select it)
+  ["music-2"]     = 0xE34A, -- natural pitch audition
   ["library"]     = 0xE100, -- the working view's Library button (opens the browser popup)
   ["pin"]         = 0xE259, -- the sound table's pinned-to-project column (2026-07-29 redesign)
   -- The reference picker in the working view's control bar (2026-08-06).

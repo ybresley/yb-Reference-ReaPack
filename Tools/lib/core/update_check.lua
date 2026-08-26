@@ -1,5 +1,5 @@
--- update_check: the pure half of the in-app update feature (RESEARCH.md "In-app
--- update check + one-button update via ReaPack"). Handed a ReaPack catalog
+-- update_check: the pure half of the in-app update feature
+-- (docs/research/updates-and-distribution.md, "Update badge fetch"). Handed a ReaPack catalog
 -- (index.xml) as plain text, it answers the badge's one question: what is the
 -- newest version published for this package, and is it newer than what's
 -- installed? The fetch, the registry reads and the actual update live in

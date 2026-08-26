@@ -34,6 +34,7 @@ local browser = {}
 local HAS_CHILD_PAD    = reaper.ImGui_ChildFlags_AlwaysUseWindowPadding ~= nil
 local HAS_CHILD_RESIZE = reaper.ImGui_ChildFlags_ResizeX ~= nil
 local HAS_SIZE_CONSTRAINTS = reaper.ImGui_SetNextWindowSizeConstraints ~= nil
+local HAS_SET_NEXT_SIZE = reaper.ImGui_SetNextWindowSize ~= nil
 local HAS_TABLE_HEADER = reaper.ImGui_TableHeader ~= nil and reaper.ImGui_TableRowFlags_Headers ~= nil
 local HAS_SB_CTX       = reaper.ImGui_BeginPopupContextWindow ~= nil
   and reaper.ImGui_PopupFlags_MouseButtonRight ~= nil and reaper.ImGui_PopupFlags_NoOpenOverItems ~= nil
@@ -43,6 +44,7 @@ local HAS_TEXT_EX      = reaper.ImGui_DrawList_AddTextEx ~= nil
 -- it just doesn't change the pointer.
 local RESIZE_CURSOR    = reaper.ImGui_MouseCursor_ResizeNS and reaper.ImGui_MouseCursor_ResizeNS() or nil
 local HAS_NEXT_SCROLL  = reaper.ImGui_SetNextWindowScroll ~= nil
+local HAS_NEXT_CONTENT_SIZE = reaper.ImGui_SetNextWindowContentSize ~= nil
 local HAS_KEY_MODS     = reaper.ImGui_GetKeyMods ~= nil
 local HAS_CTRL_SELECT  = HAS_KEY_MODS and reaper.ImGui_Mod_Ctrl ~= nil
 local HAS_SHIFT_SELECT = HAS_KEY_MODS and reaper.ImGui_Mod_Shift ~= nil
@@ -356,6 +358,18 @@ end
 -- sixty a second; `hold` = a reset fired mid-grab, so the release that follows
 -- must not commit the drag value over it (the faders' reset_hold idiom).
 local split = { start_h = nil, start_my = nil, live = nil, hold = false }
+
+-- ImGui remembers a drag-resized child in raw pixels. Keep the user's sidebar
+-- proportion through UI Size changes, including changes made while the Library
+-- is closed (the accumulated ratio is consumed when it next draws).
+local sidebar_last_w
+local pending_sidebar_scale = 1
+
+function browser.request_ui_scale(previous, current)
+  previous, current = tonumber(previous), tonumber(current)
+  if not previous or not current or previous <= 0 or current <= 0 then return end
+  pending_sidebar_scale = pending_sidebar_scale * (current / previous)
+end
 
 --------------------------------------------------------------- small helpers
 
@@ -1115,7 +1129,7 @@ end
 -- DIFFERENT id from plain "confirm_delete". The 2026-08-08 recasing changed
 -- only the Begin side, so OpenPopup fired at an id no popup owned and Delete
 -- silently stopped working (caught by the 2026-08-09 Fable review; the same
--- misconception is corrected in the UI skill's Window titles section).
+-- misconception is recorded in the UI skill's ReaImGui gotchas reference).
 local function delete_modal(count)
   return count > 1
     and string.format("DELETE %d SOUNDS###confirm_delete", count)
@@ -1181,7 +1195,7 @@ end
 -- starts at the widths TableSetupColumn asks for (there is no call that sets a
 -- column's width directly).
 --
--- Two parts, and BOTH are needed for a reset to mean the same thing every time
+-- Three parts, all needed for remembered widths to stay honest:
 -- (2026-08-11, user-reported: "it gives a different effect based on which header
 -- you right click"; it was really a different effect on each PRESS):
 --
@@ -1193,8 +1207,11 @@ end
 --    stepped back onto names this REAPER had already saved widths under and
 --    restored those instead of the defaults — a different set each press, until
 --    it walked past the last one.
+--  * UI Size — each scale level gets its own saved widths. Otherwise ImGui
+--    restores raw pixel widths chosen for smaller text and cramps every fixed
+--    column after scaling up.
 --
--- The name is rebuilt only when the count changes, never per frame.
+-- The name is rebuilt only when the count or UI Size changes, never per frame.
 -- 1 = the original widths; 2 = the 2026-08-11 shorter Ch/Loudness; 3 = the same
 -- widths again, bumped 2026-08-12 at the user's ask to drop the widths that got
 -- dragged around while the resize-also-sorts bug above was being found (one set
@@ -1202,11 +1219,13 @@ end
 -- no "set this width" call — so the stamp means "the defaults this build asks
 -- for", and re-landing everyone on them is the same operation as changing them.
 local COL_LAYOUT = 3
-local table_id, table_id_gen = nil, nil
+local table_id, table_id_gen, table_id_scale = nil, nil, nil
 local function sounds_table_id(state)
   local gen = state.col_gen or 0
-  if gen ~= table_id_gen then
-    table_id, table_id_gen = "sounds##" .. COL_LAYOUT .. "." .. gen, gen
+  local scale = theme.scale_percent(theme.scale)
+  if gen ~= table_id_gen or scale ~= table_id_scale then
+    table_id = "sounds##" .. COL_LAYOUT .. "." .. gen .. ".s" .. scale
+    table_id_gen, table_id_scale = gen, scale
   end
   return table_id
 end
@@ -1305,54 +1324,55 @@ local function draw_sound_list(ctx, state, res)
   -- the highlight — now covers all of it instead of just the text band.
   local row_h = reaper.ImGui_GetTextLineHeight(ctx) + cellpad_y * 2
 
-  -- THE RAIL (brief `table-scrollbar`, 2026-08-09 — supersedes the width
-  -- prediction that briefly lived here): the scrollbar's strip is reserved
-  -- ALWAYS. The table is drawn SCROLL_RAIL_W narrower and widgets.scrollbar
-  -- puts a slim thumb in the strip, starting under the frozen header — so the
-  -- columns never hear about scrolling at all: they sit identically in every
-  -- category, and nothing jumps on the changeover (the reported glitch: ImGui's
-  -- own bar took its width out of the Name column, one frame out of step with
-  -- the prediction). The thumb is submitted BEFORE the table so its drag can
-  -- steer this frame's scroll; it draws from last frame's numbers — one frame
-  -- of thumb lag, imperceptible.
+  -- The scrollbar strip is always reserved, so columns keep the same width
+  -- whether this view scrolls or not. Its input is submitted before the table;
+  -- its thumb is painted after EndTable from this frame's scroll range. Keeping
+  -- cursor-moving input here is required by ReaImGui's parent-boundary rules.
   local table_x, table_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local avail_w, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
+  local natural_content_h = row_h * (#sounds + 1) -- body plus header
+  local content_scrolls = natural_content_h > avail_h
+  local stable_content_h
+  if HAS_NEXT_CONTENT_SIZE then
+    -- Dear ImGui decides a table child's scrollbar from its content height. A
+    -- fixed minimum overflow keeps the hidden native bar present in every view,
+    -- while the exact natural height preserves the real range for long lists.
+    stable_content_h = math.max(natural_content_h, avail_h + 1)
+  end
   -- outer width/height 0 = fill the wrapping child region (see draw_main); a
   -- window squashed too thin skips the rail rather than starving the columns.
   local outer_w = 0
   if avail_w > M.SCROLL_RAIL_W * 3 then outer_w = avail_w - M.SCROLL_RAIL_W end
+  local rail_top, rail_h, rail_new, rail_hot
   if outer_w > 0 then
-    -- Rail top sits below the header row and the hairline drawn under it.
-    local rail_top = table_y + row_h + 3
-    local new = widgets.scrollbar(ctx, "soundscroll", table_x + outer_w, rail_top,
-      M.SCROLL_RAIL_W, avail_h - row_h - 3, list_scroll.y, list_scroll.max)
-    if new then list_scroll.pending = new end
+    rail_top = table_y + row_h + 3
+    rail_h = avail_h - row_h - 3
+    rail_new, rail_hot = widgets.scrollbar_input(ctx, "soundscroll",
+      table_x + outer_w, rail_top, M.SCROLL_RAIL_W, rail_h,
+      list_scroll.y, list_scroll.max)
+    if rail_new then list_scroll.pending = rail_new end
   end
 
+  -- Short views use one pixel of artificial overflow solely to hold the native
+  -- scrollbar geometry steady. Keep their real scroll position at the top.
+  if stable_content_h and not content_scrolls then list_scroll.pending = 0 end
+
   -- The parked scroll is handed to the table's own Begin, which applies it
-  -- THIS frame (Codex 2026-08-10 — the in-table SetScrollY it replaces landed
-  -- a frame late, so the fallback view reset above still flashed one stale
-  -- frame, and a thumb drag steered with a round trip). SetNextWindowScroll
-  -- reaches the ScrollY table's inner child — verified against imgui v1.90.9:
-  -- BeginTable only ADDS a content-size hint to the same next-window data
-  -- before BeginChildEx consumes it all. -1 leaves the x axis untouched.
-  -- (Rare leak, accepted: a table culled before creating its child leaves the
-  -- hint for the next window Begun — which here doesn't scroll, so a stray
-  -- scroll-to-top target clamps to where it already is.)
+  -- THIS frame; the in-table SetScrollY fallback below lands a frame late.
+  -- Dear ImGui 1.92.1 passes both next-window values to the ScrollY table's
+  -- inner child. A culled table clears them, and -1 leaves x untouched.
   if list_scroll.pending and HAS_NEXT_SCROLL then
     reaper.ImGui_SetNextWindowScroll(ctx, -1, list_scroll.pending)
     list_scroll.pending = nil
   end
+  if stable_content_h then
+    reaper.ImGui_SetNextWindowContentSize(ctx, 0, stable_content_h)
+  end
 
-  -- ImGui's own bar can't be told to hold its space open or start below the
-  -- header, and ScrollbarSize 0 trips an assert upstream (verified against
-  -- imgui v1.90.9: Begin calls Scrollbar() whenever content overflows, and
-  -- GetWindowScrollbarRect asserts the size is positive — ReaImGui arms those
-  -- asserts as script errors). So the bar is reduced to an invisible sliver —
-  -- SUB-pixel (0.02, the smallest that safely clears the assert; it was 1px
-  -- until 2026-08-10, and the user could SEE the columns lose that pixel when
-  -- a category started scrolling) — with every scrollbar colour transparent.
-  -- Popped the moment BeginTable has taken them (the Begin-time-push idiom).
+  -- The native bar cannot start below the header, and a zero width asserts in
+  -- Dear ImGui. Keep it as a transparent 0.02 sliver; the content-size hint
+  -- above keeps that same sliver present so the table never relayouts when the
+  -- custom bar appears or disappears. Pop these Begin-time styles immediately.
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ScrollbarSize(), 0.02)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ScrollbarBg(), 0)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ScrollbarGrab(), 0)
@@ -1574,7 +1594,7 @@ local function draw_sound_list(ctx, state, res)
       -- lands is worked out when the mouse is let go.
       if state.deps.drag_out and not state.drag
         and reaper.ImGui_IsItemActive(ctx) and reaper.ImGui_IsMouseDragging(ctx, 0) then
-        action = { type = "drag_sound", id = s.id,
+        action = { type = "drag_sound", id = s.id, target = "browse",
           ids = sound_action_ids(state, s.id) }
       end
       -- Right-click the row: pin it to (or unpin it from) the current project, or
@@ -1641,15 +1661,25 @@ local function draw_sound_list(ctx, state, res)
   local hdr_action = draw_header_menu(ctx, state)
   action = action or hdr_action
 
-  -- What the rail thumb reads next frame — taken here because this is the
+  -- What the rail thumb below reads this frame — taken here because this is the
   -- scrolling window (BeginTable leaves its inner child current through row
   -- submission; verified upstream 2026-08-09).
   list_scroll.y = reaper.ImGui_GetScrollY(ctx)
   list_scroll.max = reaper.ImGui_GetScrollMaxY(ctx)
+  if stable_content_h and not content_scrolls then
+    -- Do not expose the one-pixel native layout guard as a real scrollbar.
+    list_scroll.y, list_scroll.max = 0, 0
+  end
 
   reaper.ImGui_EndTable(ctx)
   reaper.ImGui_PopStyleVar(ctx, 1) -- the CellPadding pushed before BeginTable
   reaper.ImGui_PopStyleColor(ctx, 3)
+
+  if outer_w > 0 then
+    widgets.scrollbar_thumb(ctx, table_x + outer_w, rail_top,
+      M.SCROLL_RAIL_W, rail_h, rail_new or list_scroll.y,
+      list_scroll.max, rail_hot)
+  end
 
   local confirmed = draw_delete_confirm(ctx)
   action = action or confirmed
@@ -1779,7 +1809,11 @@ local function draw_main(ctx, state, res)
   local row_block = reaper.ImGui_GetTextLineHeight(ctx) + cellpad_y * 2
   local min_list_h = row_block * (M.BROWSER_LIST_MIN_ROWS + 1) -- +1 = the header row
   local wave_max = avail_h - min_list_h - gap_y - M.RULER_H - (info_h + gap_y)
-  local wave_h = split.live or state.browser_wave_h or M.BROWSER_WAVE_H
+  -- Stored custom heights are 100%-scale authoring values. This makes a
+  -- remembered strip grow with the rest of the Library instead of becoming a
+  -- smaller-looking slot around larger labels and controls.
+  local remembered_wave_h = state.browser_wave_h and state.browser_wave_h * theme.scale
+  local wave_h = split.live or remembered_wave_h or M.BROWSER_WAVE_H
   if wave_h > wave_max then wave_h = wave_max end
   if wave_h < M.BROWSER_WAVE_MIN_H then wave_h = M.BROWSER_WAVE_MIN_H end
 
@@ -1870,7 +1904,7 @@ local function draw_main(ctx, state, res)
         split.live = live
       elseif reaper.ImGui_IsItemDeactivated(ctx) then
         if split.live and not split.hold and split.live ~= split.start_h then
-          action = action or { type = "set_browser_wave_h", h = split.live }
+          action = action or { type = "set_browser_wave_h", h = split.live / theme.scale }
         end
         split.start_h, split.start_my, split.live, split.hold = nil, nil, nil, false
       end
@@ -1960,7 +1994,7 @@ local function draw_main(ctx, state, res)
   if small then reaper.ImGui_PopFont(ctx) end
   local btn = reaper.ImGui_GetFrameHeight(ctx)
   local gap_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
-  -- The right block is play/pause + stop + loop + the ear + the PREVIEW fader.
+  -- The right block is play/pause + stop + loop + pitch + the ear + the PREVIEW fader.
   -- (The ear joined 2026-08-07, moved out of the working view's bar:
   -- auto-audition only ever governed THIS window's click-to-hear, so it sits
   -- beside the audition strip it controls; loop joined it 2026-08-11 so
@@ -1968,12 +2002,12 @@ local function draw_main(ctx, state, res)
   -- pair joined 2026-08-12 — until then the Library could start a sound but
   -- had no way to stop one.)
   --
-  -- Four squares now, and the block is what the tech line on the left is sized
-  -- AGAINST (left_w, below), so those ~54px come out of the text's share: it
+  -- Five squares now, and the block is what the tech line on the left is sized
+  -- AGAINST (left_w, below), so the extra square comes out of the text's share: it
   -- truncates a little sooner on a narrow window, and the two never share a
   -- pixel. The row's HEIGHT is a control either way, so the pane budget above
   -- is untouched.
-  local squares = btn * 4 + gap_x * 4
+  local squares = btn * 5 + gap_x * 5
   local fader_block = squares + label_w + 6 + M.SLIDER_W
   local row_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local left_w = row_w - fader_block - 8
@@ -1996,7 +2030,7 @@ local function draw_main(ctx, state, res)
   -- so once an earlier widget has an action the draw call is SKIPPED and its
   -- widget vanishes for that frame. Always draw, then merge.
   if left_w > 0 then reaper.ImGui_SameLine(ctx) end
-  -- The four squares, pushed right so they sit against the fader (which
+  -- The five squares, pushed right so they sit against the fader (which
   -- right-aligns itself in whatever remains — the measure-then-push idiom).
   local cx = reaper.ImGui_GetCursorPosX(ctx)
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
@@ -2025,6 +2059,9 @@ local function draw_main(ctx, state, res)
       res.icon_font, "repeat") then
     action = action or { type = "toggle_loop" }
   end
+  reaper.ImGui_SameLine(ctx)
+  local pitch_action = transport.draw_pitch(ctx, state, res.icon_font, "browse")
+  action = action or pitch_action
   reaper.ImGui_SameLine(ctx)
   if widgets.toggle(ctx, "auto", "A", state.auto_audition,
       "Auto-audition: play a sound the moment you click it in this browser",
@@ -2144,8 +2181,20 @@ function browser.draw(ctx, state, res)
   if HAS_SIZE_CONSTRAINTS then
     reaper.ImGui_SetNextWindowSizeConstraints(ctx, M.SIDEBAR_MIN_W, 0, 10000, 10000)
   end
+  if math.abs(pending_sidebar_scale - 1) >= 0.000001 then
+    if sidebar_last_w and HAS_SET_NEXT_SIZE then
+      reaper.ImGui_SetNextWindowSize(ctx,
+        math.floor(sidebar_last_w * pending_sidebar_scale + 0.5), 0,
+        reaper.ImGui_Cond_Always())
+    end
+    pending_sidebar_scale = 1
+  end
   -- Style var popped the instant the child has taken it (a Begin-time read).
-  local sb_open = reaper.ImGui_BeginChild(ctx, "sidebar", M.SIDEBAR_W, 0, sb_flags)
+  -- Scale is part of the child identity too. On a fresh launch, ImGui can then
+  -- restore the width last used at this UI Size rather than applying a raw-pixel
+  -- width saved at another size.
+  local sidebar_id = "sidebar##s" .. theme.scale_percent(theme.scale)
+  local sb_open = reaper.ImGui_BeginChild(ctx, sidebar_id, M.SIDEBAR_W, 0, sb_flags)
   reaper.ImGui_PopStyleVar(ctx, 1)
   if sb_open then
     action = merge_action(action, draw_sidebar(ctx, state))
@@ -2159,7 +2208,8 @@ function browser.draw(ctx, state, res)
   -- One hairline on the seam (the only separation the two surfaces need), then
   -- the main panel flush against it.
   local sx1, sy1 = reaper.ImGui_GetItemRectMax(ctx)
-  local _, sy0 = reaper.ImGui_GetItemRectMin(ctx)
+  local sx0, sy0 = reaper.ImGui_GetItemRectMin(ctx)
+  sidebar_last_w = sx1 - sx0
   -- The sidebar is a browsing pane too: clicks inside keep OS focus so the
   -- arrows can step the side column afterwards (ui/focus.lua).
   if sb_open then

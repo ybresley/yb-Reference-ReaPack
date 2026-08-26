@@ -11,6 +11,7 @@
 local theme = require("ui.theme")
 local icons = require("ui.icons")
 local tips = require("ui.tips")
+local pitch = require("core.pitch")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -98,13 +99,18 @@ function widgets.ellipsize(ctx, text, max_w, cut)
   return out
 end
 
--- The one standard "reset to default" gesture for ANY adjustable control (faders,
--- and later knobs/xy-pads): right-click OR double-click. Defined once so every such
--- control resets identically — right-click has no value jump, double-click matches
--- DAW muscle memory. Call right after submitting the control (it reads "last item").
-function widgets.wants_reset(ctx)
+-- Pitch keeps double-click available for exact text entry, but still shares the
+-- standard control's no-jump right-click path. Call after submitting the item.
+function widgets.wants_right_reset(ctx)
   return reaper.ImGui_IsItemHovered(ctx)
-    and (reaper.ImGui_IsMouseClicked(ctx, 1) or reaper.ImGui_IsMouseDoubleClicked(ctx, 0))
+    and reaper.ImGui_IsMouseClicked(ctx, 1)
+end
+
+-- The standard reset gesture for adjustable controls is right-click or
+-- double-click. Pitch is the deliberate exception above.
+function widgets.wants_reset(ctx)
+  return widgets.wants_right_reset(ctx)
+    or (reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseDoubleClicked(ctx, 0))
 end
 
 -- A BARE glyph button: no frame and no fill until the cursor is on it. Born as
@@ -178,6 +184,102 @@ end
 -- would yank the value straight back to the mouse position, undoing the reset.
 -- Cleared when that hold ends. Bounded: one entry per fader id, only while held.
 local reset_hold = {}
+
+-- Discrete horizontal slider with visible stop marks. The pointer movement is
+-- anchored to the track that existed when the drag began, so a value that
+-- resizes the UI cannot change its own mouse-to-value mapping on the next frame.
+-- This is the Appearance pane's size control, but the gesture is reusable for
+-- any stepped numeric setting. Reports live values with commit=false, then the
+-- final value with commit=true on release so callers can preview continuously
+-- and persist once. opts = { min, max, step, width }.
+local step_slider_drag = {}
+
+local function step_slider_value(min, max, step, t)
+  if t < 0 then t = 0 elseif t > 1 then t = 1 end
+  local raw = min + t * (max - min)
+  local snapped = min + math.floor((raw - min) / step + 0.5) * step
+  if snapped < min then return min end
+  if snapped > max then return max end
+  return snapped
+end
+
+function widgets.step_slider(ctx, id, value, opts)
+  opts = opts or {}
+  local min, max, step = opts.min or 0, opts.max or 100, opts.step or 1
+  local w, h = opts.width or M.SLIDER_W, reaper.ImGui_GetFrameHeight(ctx)
+  local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
+
+  reaper.ImGui_InvisibleButton(ctx, "##" .. id, w, h)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local active = reaper.ImGui_IsItemActive(ctx)
+  local activated = reaper.ImGui_IsItemActivated(ctx)
+  local deactivated = reaper.ImGui_IsItemDeactivated(ctx)
+
+  -- Keep the thumb inside the control while letting the full frame remain the
+  -- hit target. The captured width is the gesture's stable scale even while the
+  -- live UI size changes this frame's drawn width.
+  local half_knob = M.FADER_KNOB_W * 0.5
+  local track_x0, track_x1 = x0 + half_knob, x0 + w - half_knob
+  local track_w = math.max(1, track_x1 - track_x0)
+  local mx = select(1, reaper.ImGui_GetMousePos(ctx))
+  local result, commit
+
+  if activated then
+    local t = (mx - track_x0) / track_w
+    local clicked = step_slider_value(min, max, step, t)
+    step_slider_drag[id] = {
+      t = (clicked - min) / (max - min),
+      mx = mx,
+      width = track_w,
+    }
+    if clicked ~= value then result, commit = clicked, false end
+  elseif active and step_slider_drag[id] then
+    local drag = step_slider_drag[id]
+    local t = drag.t + (mx - drag.mx) / drag.width
+    local dragged = step_slider_value(min, max, step, t)
+    if dragged ~= value then result, commit = dragged, false end
+  elseif deactivated then
+    local drag = step_slider_drag[id]
+    step_slider_drag[id] = nil
+    if drag then
+      local t = drag.t + (mx - drag.mx) / drag.width
+      result, commit = step_slider_value(min, max, step, t), true
+    end
+  end
+
+  local shown = result or value
+  local shown_t = (shown - min) / (max - min)
+  if shown_t < 0 then shown_t = 0 elseif shown_t > 1 then shown_t = 1 end
+  local knob_x = track_x0 + shown_t * track_w
+  local cy = y0 + h * 0.5
+  local half_track = M.FADER_TRACK_H * 0.5
+  local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+
+  reaper.ImGui_DrawList_AddRectFilled(dl, track_x0, cy - half_track,
+    track_x1, cy + half_track, fade(T.FADER_TRACK, alpha), half_track)
+  if knob_x > track_x0 then
+    reaper.ImGui_DrawList_AddRectFilled(dl, track_x0, cy - half_track,
+      knob_x, cy + half_track,
+      fade((hovered or active) and T.ACCENT_HOVER or T.FADER_FILL, alpha), half_track)
+  end
+
+  -- Option B: one quiet mark per valid value, beneath the track. These are
+  -- drawn after the fill so every 5% stop stays visible across the whole range.
+  local stops = math.floor((max - min) / step + 0.5)
+  for i = 0, stops do
+    local tx = math.floor(track_x0 + (i / stops) * track_w + 0.5)
+    reaper.ImGui_DrawList_AddLine(dl, tx, cy + half_track,
+      tx, cy + half_track + M.FADER_TRACK_H, fade(T.FADER_TICK, alpha), 1)
+  end
+
+  local half_kw, half_kh = M.FADER_KNOB_W * 0.5, M.FADER_KNOB_H * 0.5
+  reaper.ImGui_DrawList_AddRectFilled(dl, knob_x - half_kw, cy - half_kh,
+    knob_x + half_kw, cy + half_kh, fade(T.FADER_KNOB, alpha), half_kw)
+
+  if result ~= nil then return result, commit end
+  return nil
+end
 
 -- A dB fader, custom-drawn: slim track, accent fill, slim pill knob, and the value
 -- as a fixed readout to the RIGHT of the track — never under the knob, so it stays
@@ -326,6 +428,11 @@ end
 -- the tooltip carries the affordance alone.
 local DRAG_NS_CURSOR = (reaper.ImGui_MouseCursor_ResizeNS and reaper.ImGui_MouseCursor_ResizeNS())
   or nil
+-- Pitch accepts either drag direction, so an axis-specific resize cursor would
+-- promise the wrong gesture half the time. The hand says "adjustable" without
+-- choosing an axis; the tooltip carries the exact behaviour.
+local DRAG_FREE_CURSOR = (reaper.ImGui_MouseCursor_Hand and reaper.ImGui_MouseCursor_Hand())
+  or nil
 
 -- Where each in-flight vertical drag started: id -> { t, my }. One entry per
 -- control, only while its mouse button is held (cleared on release), so this
@@ -414,8 +521,138 @@ function widgets.db_drag(ctx, id, value, opts)
   return nil
 end
 
+-- A semitone value that accepts horizontal or vertical dragging. The first
+-- intentional movement locks one axis for the rest of that hold, so a diagonal
+-- gesture never changes Pitch faster by accidentally counting both directions.
+-- Right/up raise Pitch; left/down lower it. Normal movement snaps to whole
+-- semitones; Alt slows the movement and exposes tenths. A click without a drag
+-- asks the caller to replace the readout with an exact-entry field immediately.
+-- Pitch deliberately resets only on right-click, leaving a double-click free to
+-- behave like an ordinary text-field interaction once exact entry is active.
+local pitch_drag = {}
+local HAS_ALT = reaper.ImGui_GetKeyMods ~= nil and reaper.ImGui_Mod_Alt ~= nil
+local AXIS_LOCK_PX = 2
+local ROUND_RIGHT = reaper.ImGui_DrawFlags_RoundCornersRight
+  and reaper.ImGui_DrawFlags_RoundCornersRight() or 0
+
+-- Returns (value, commit, edit_requested). Live drag frames use commit=false;
+-- release and reset use commit=true. Pitch is temporary, but the distinction
+-- keeps the control's contract consistent with every other adjustable widget.
+function widgets.semitone_drag(ctx, id, value, opts)
+  opts = opts or {}
+  value = pitch.clamp(value)
+  local h = reaper.ImGui_GetFrameHeight(ctx)
+  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+  local w = opts.width or (select(1, reaper.ImGui_CalcTextSize(ctx, "+24.0 st")) + pad_x * 2)
+  local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
+  reaper.ImGui_InvisibleButton(ctx, "##" .. id, w, h)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local active = reaper.ImGui_IsItemActive(ctx)
+  local edit_requested = false
+  if (hovered or active) and DRAG_FREE_CURSOR then
+    reaper.ImGui_SetMouseCursor(ctx, DRAG_FREE_CURSOR)
+  end
+
+  local result, commit
+  if widgets.wants_right_reset(ctx) then
+    pitch_drag[id] = nil
+    if active then reset_hold[id] = true end
+    result, commit = pitch.clamp(opts.default or 0), true
+  elseif reaper.ImGui_IsItemActivated(ctx) then
+    local mx, my = reaper.ImGui_GetMousePos(ctx)
+    pitch_drag[id] = {
+      raw = value,
+      first_mx = mx, first_my = my,
+      last_mx = mx, last_my = my,
+      axis = nil,
+      moved = false,
+    }
+  elseif active and not reset_hold[id] and pitch_drag[id] then
+    local a = pitch_drag[id]
+    local mx, my = reaper.ImGui_GetMousePos(ctx)
+    if not a.axis then
+      local dx, dy = mx - a.first_mx, my - a.first_my
+      if math.max(math.abs(dx), math.abs(dy)) >= AXIS_LOCK_PX then
+        a.axis = math.abs(dx) >= math.abs(dy) and "x" or "y"
+        a.moved = true
+      end
+    end
+    if a.axis then
+      local pixels = a.axis == "x" and (mx - a.last_mx) or (a.last_my - my)
+      local fine = HAS_ALT and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Alt()) ~= 0
+      a.raw = pitch.clamp(a.raw + pixels / (fine and 40 or 8))
+      a.last_mx, a.last_my = mx, my
+      local v = fine and (math.floor(a.raw * 10 + 0.5) / 10)
+        or math.floor(a.raw + 0.5)
+      v = pitch.clamp(v)
+      if v ~= value then result, commit = v, false end
+    end
+  elseif reaper.ImGui_IsItemDeactivated(ctx) then
+    local a = pitch_drag[id]
+    pitch_drag[id] = nil
+    if reset_hold[id] then
+      reset_hold[id] = nil
+    elseif a and a.moved then
+      result, commit = value, true
+    else
+      edit_requested = true
+    end
+  end
+
+  local shown = result ~= nil and result or value
+  local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local text = pitch.format(shown)
+  local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
+  local rounding = select(1,
+    reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding()))
+  local fill = active and T.FILL_PRIMARY or (hovered and T.FILL_SECONDARY or T.FILL_TERTIARY)
+  local prefix_w = opts.prefix and (opts.prefix_width or 0) or 0
+  local outer_x0 = x0 - prefix_w
+  if prefix_w > 0 then
+    -- One joined field: the label owns the quiet base fill, while the value's
+    -- half carries the normal hover/active feedback. The colour change is the
+    -- join; a divider would turn that boundary back into two adjacent boxes.
+    reaper.ImGui_DrawList_AddRectFilled(dl, outer_x0, y0, x0 + w, y0 + h,
+      fade(T.FILL_TERTIARY, alpha), rounding)
+    local value_fill = (hovered or active) and fill or T.FILL_QUATERNARY
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h,
+      fade(value_fill, alpha), rounding, ROUND_RIGHT)
+    -- Keep the shared seam square even when this ReaImGui build lacks the
+    -- right-corners-only drawing flag and rounds all four corners instead.
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0,
+      math.min(x0 + rounding, x0 + w), y0 + h, fade(value_fill, alpha))
+    reaper.ImGui_DrawList_AddRect(dl, outer_x0, y0, x0 + w, y0 + h,
+      fade((hovered or active) and T.STROKE_PRIMARY or T.STROKE_SECONDARY, alpha),
+      rounding, 0, 1)
+    local lw, lh = reaper.ImGui_CalcTextSize(ctx, opts.prefix)
+    reaper.ImGui_DrawList_AddText(dl, outer_x0 + (prefix_w - lw) * 0.5,
+      y0 + (h - lh) * 0.5, fade(T.TEXT_SECONDARY, alpha), opts.prefix)
+  else
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h,
+      fade(fill, alpha), rounding)
+    reaper.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h,
+      fade((hovered or active) and T.STROKE_PRIMARY or T.STROKE_SECONDARY, alpha),
+      rounding, 0, 1)
+  end
+  reaper.ImGui_DrawList_AddText(dl, x0 + (w - tw) * 0.5, y0 + (h - th) * 0.5,
+    fade(T.ACCENT, alpha), text)
+
+  -- Tooltip last: SetTooltip replaces ImGui's last item, while every gesture
+  -- above must keep reading the semitone field itself.
+  tips.show(ctx, opts.tip and hovered, opts.tip)
+  return result, commit, edit_requested or nil
+end
+
+-- Forget a drag or reset hold when its panel closes.
+function widgets.cancel_semitone_drag(id)
+  pitch_drag[id], reset_hold[id] = nil, nil
+end
+
 -- Hoisted so the frame loop never rebuilds it (frame-allocation rule).
 local ACCENT_FACE = { color = T.ACCENT }
+local HOVER_DISABLED = reaper.ImGui_HoveredFlags_AllowWhenDisabled
+  and reaper.ImGui_HoveredFlags_AllowWhenDisabled() or 0
 
 -- A square toggle, the same square as every icon button — never a size change
 -- (UI-stability rule). ON is signalled by the FACE turning accent (accent = active
@@ -425,9 +662,13 @@ local ACCENT_FACE = { color = T.ACCENT }
 -- keeps its one meaning — hover/press feedback — in every state.
 -- With `font` (the Lucide font) and `icon` (an icons.NAMES key) the face is that
 -- glyph; `label` stays as the fallback face when the icon font isn't available.
-function widgets.toggle(ctx, id, label, on, tip, font, icon)
+-- The stable `id` also owns the tooltip delay, so a state-dependent explanation
+-- can change under the pointer without looking like a different control.
+function widgets.toggle(ctx, id, label, on, tip, font, icon, enabled)
   local size = reaper.ImGui_GetFrameHeight(ctx)
   local use_icon = font and icon and icons.NAMES[icon]
+  local disabled = enabled == false
+  if disabled then reaper.ImGui_BeginDisabled(ctx) end
   if on and not use_icon then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT) end
   local clicked = reaper.ImGui_Button(ctx, (use_icon and "" or label) .. "##" .. id, size, size)
   if on and not use_icon then reaper.ImGui_PopStyleColor(ctx) end
@@ -438,9 +679,43 @@ function widgets.toggle(ctx, id, label, on, tip, font, icon)
     -- of one frame late.
     local shown = on
     if clicked then shown = not shown end
+    -- The Appearance setting can change ACCENT while the tool is running. Keep
+    -- this hoisted face table, but refresh its one value before it is painted.
+    ACCENT_FACE.color = T.ACCENT
     icons.paint_over_item(ctx, font, icon, shown and ACCENT_FACE or nil)
   end
-  tips.show(ctx, tip and reaper.ImGui_IsItemHovered(ctx), tip)
+  if disabled then reaper.ImGui_EndDisabled(ctx) end
+  local hovered = disabled and HOVER_DISABLED ~= 0
+    and reaper.ImGui_IsItemHovered(ctx, HOVER_DISABLED)
+    or reaper.ImGui_IsItemHovered(ctx)
+  tips.show(ctx, tip and hovered, tip, id)
+  return not disabled and clicked
+end
+
+-- A Settings switch: one compact pill centred inside a full control-height hit
+-- target. The active state uses the same accent meaning as every other toggle;
+-- the knob moves inside the reserved pill, so neighbouring controls never shift.
+function widgets.switch(ctx, id, on, tip)
+  local w, h, knob = M.SET_SWITCH_W, M.SET_SWITCH_H, M.SET_SWITCH_KNOB
+  local frame_h = reaper.ImGui_GetFrameHeight(ctx)
+  local clicked = reaper.ImGui_InvisibleButton(ctx, "##" .. id, w, frame_h)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local x0, item_y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, item_y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local y0 = math.floor((item_y0 + item_y1 - h) * 0.5 + 0.5)
+  local y1 = y0 + h
+  local pad = (h - knob) * 0.5
+  local shown = on
+  if clicked then shown = not shown end
+  local knob_x = shown and (x1 - pad - knob) or (x0 + pad)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local fill = shown and (hovered and T.ACCENT_HOVER or T.ACCENT)
+    or (hovered and T.FILL_PRIMARY or T.FILL_SECONDARY)
+
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, h * 0.5)
+  reaper.ImGui_DrawList_AddCircleFilled(dl, knob_x + knob * 0.5,
+    y0 + h * 0.5, knob * 0.5, shown and T.TEXT_ON_ACCENT or T.TEXT_SECONDARY)
+  tips.show(ctx, tip and hovered, tip)
   return clicked
 end
 
@@ -451,11 +726,10 @@ end
 -- made the table's columns jump whenever it appeared — and runs the full
 -- window height, frozen headers included.
 --
--- Geometry in, intent out: the caller says where the strip is (x, y, w, h) and
--- what the scrolled window reports (scroll_y, scroll_max — LAST frame's
--- numbers are fine; one frame of thumb lag is imperceptible), and gets back
--- the scroll position the user asked for, or nil. Applying it stays with the
--- caller — only the caller knows which window scrolls and when it is current.
+-- The table rail splits input from paint. Input is submitted before the table,
+-- using its previous scroll values, and returns the requested position. Paint
+-- happens after the table reports the current view's values. Applying a scroll
+-- request stays with the caller because only it owns the scrolled window.
 -- The sidebar uses overlay_scrollbar instead: its rail sits over category rows,
 -- so interaction and paint both happen inside that child after the rows.
 --
@@ -486,7 +760,10 @@ local function paint_scrollbar_thumb(ctx, x, w, thumb_y, thumb_h, hot, align_rig
     M.SCROLL_THUMB_W * 0.5)
 end
 
-function widgets.scrollbar(ctx, id, x, y, w, h, scroll_y, scroll_max)
+-- Submit the rail's input before the caller's table/child. The caller can then
+-- paint the thumb after reading that window's current scroll values without
+-- moving the layout cursor at the end of the parent window.
+function widgets.scrollbar_input(ctx, id, x, y, w, h, scroll_y, scroll_max)
   local thumb_y, thumb_h, travel = scrollbar_thumb_geometry(y, h, scroll_y, scroll_max)
   if not thumb_y then grab_off[id] = nil; return nil, false end
 
@@ -515,9 +792,13 @@ function widgets.scrollbar(ctx, id, x, y, w, h, scroll_y, scroll_max)
     grab_off[id] = nil
   end
 
-  local hot = hovered or active
+  return result, hovered or active
+end
+
+function widgets.scrollbar_thumb(ctx, x, y, w, h, scroll_y, scroll_max, hot)
+  local thumb_y, thumb_h = scrollbar_thumb_geometry(y, h, scroll_y, scroll_max)
+  if not thumb_y then return end
   paint_scrollbar_thumb(ctx, x, w, thumb_y, thumb_h, hot, false)
-  return result, hot
 end
 
 -- An overlay rail cannot use an ImGui item: the category rows underneath would

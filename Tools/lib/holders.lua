@@ -126,6 +126,7 @@ function holders.stop_audio(state)
   state.preview.sound_id = nil
   state.preview.slot     = nil
   state.preview.trim_db  = 0
+  state.preview.channels = 0
   state.preview.position = 0
 end
 

@@ -10,6 +10,7 @@ local match = require("core.match")
 local icons = require("ui.icons")
 local refpicker = require("ui.refpicker")
 local matchwin = require("ui.matchwin")
+local pitchwin = require("ui.pitchwin")
 local settings = require("ui.settings")
 local walkthrough_ui = require("ui.walkthrough")
 local T = theme.tokens
@@ -248,10 +249,9 @@ local ARRANGEMENTS = {
   { two_line = true, count = true, trim = "number" },
 }
 
--- Squares in the transport cluster: play, stop, loop, mono (the ear left for the
--- browser, 2026-08-07; mono arrived the same day). A constant so `cluster_w`
+-- Squares in the transport cluster: play, stop, loop, mono, pitch. A constant so `cluster_w`
 -- and the draw loop can never disagree about how many squares exist.
-local N_CLUSTER = 4
+local N_CLUSTER = 5
 
 -- One candidate arrangement, measured. Returns nil when it doesn't fit, so the
 -- caller can try the next (poorer) one. `m` carries the per-frame measurements
@@ -309,17 +309,17 @@ local function try_fit(a, width, ctrl, gap, gap_y, m, cluster_w, floor_it)
     g.ctrl_y = ctrl + gap_y
     g.latch_x = 0
     -- Below the full form's width (only a dock can force it) line two does
-    -- NOT overflow: its seven ItemSpacing gaps tighten evenly, down to a 2px
+    -- NOT overflow: its eight ItemSpacing gaps tighten evenly, down to a 2px
     -- floor, so the Library button stays EXACTLY flush under line one's arrow
     -- through the squeeze (user-reported 2026-08-08: overflowing into the
     -- window padding put line two's edge past line one's). Only past the
     -- squeeze's own floor (~28px more) does the line finally clip.
     local G = gap
     local deficit = (packed_x + group_w) - width
-    if deficit > 0 then G = gap - math.min(gap - 2, deficit / 7) end
+    if deficit > 0 then G = gap - math.min(gap - 2, deficit / 8) end
     g.cluster_gap = G
     g.cluster_x = ctrl + G
-    local x = math.max(width - group_w, g.cluster_x + cluster_w - 3 * (gap - G) + G)
+    local x = math.max(width - group_w, g.cluster_x + cluster_w - 4 * (gap - G) + G)
     if trim_w then
       g.target_x = x
       g.trim_x = g.target_x + ctrl + G
@@ -414,14 +414,12 @@ transport._geometry = geometry
 
 -- The reference-mode latch: a square like every other transport control since
 -- 2026-07-30, faced with "L" for latch (2026-08-08, user's call — it wore "R"
--- for reference until then). Filled REF_RED while ON. Hover and
--- pressed are pushed to the same red so the fill never blinks back to grey.
+-- for reference until then). Filled ACCENT while ON. Hover uses ACCENT_HOVER;
+-- pressed returns to ACCENT so the button stays visibly latched.
 -- Fixed size always: latching signals itself by colour alone, never by changing
 -- shape.
 --
--- Since 2026-08-06 this button is the ONLY thing in the UI that reddens for
--- reference mode — the red window outline and the picker slot's red both went
--- (user's call). Since 2026-08-13 it is deliberately project-specific: red means
+-- Since 2026-08-13 it is deliberately project-specific: its accent fill means
 -- THIS project owns the one active latch. Other tabs stay grey and usable; a
 -- closed owner waits in the recovery queue without leaving a stuck-looking button.
 -- Genuine recovery failures are surfaced as errors instead of overloading this
@@ -429,17 +427,17 @@ transport._geometry = geometry
 --
 -- The word "LATCH" is gone from the face. That's a real cost on the tool's least
 -- self-explanatory control, so the tooltip carries the full explanation and the
--- red fill still shouts when it's on.
+-- accent fill still makes its on state clear.
 function transport.draw_latch(ctx, state)
   local action
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local ref = state.reference
   local latched = ref.latched
   if latched then
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.REF_RED)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), T.REF_RED)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.REF_RED)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.TEXT_ON_REF)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.ACCENT)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), T.ACCENT_HOVER)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.ACCENT)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.TEXT_ON_ACCENT)
   end
   if reaper.ImGui_Button(ctx, "L##reference", ctrl, ctrl) then
     if not latched and not state.selected then
@@ -454,13 +452,52 @@ function transport.draw_latch(ctx, state)
   if latched then reaper.ImGui_PopStyleColor(ctx, 4) end
   local tip = latched
     and ("Reference mode is on for " .. (ref.owner_name or "this project") ..
-      ". Its master is muted. Press Play in REAPER to hear the selected reference. " ..
+      ". Its master is muted. Press Play in Reaper to hear the selected reference. " ..
       "Click the Latch button to turn it off.")
     or (state.selected
-      and "Turn on Reference mode. This mutes the project so Play in REAPER hears the selected reference instead. You can bind the Latch button to a REAPER shortcut."
+      and "Turn on Reference mode. This mutes the project so Play in Reaper hears the selected reference instead. You can bind the Latch button to a Reaper shortcut."
       or "Choose a reference first. Click the Latch button to open the reference list.")
   tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), tip, "reference_latch")
   return action
+end
+
+-- The same Pitch button and persistent compact panel are used in both audition surfaces.
+-- The button is fixed-size and only its musical-note face changes colour.
+function transport.draw_pitch(ctx, state, font, slot)
+  local value = (state.pitch and state.pitch[slot]) or 0
+  local sound = (slot == "browse") and state.browse or state.selected
+  local id = "pitch_" .. slot
+  local size = reaper.ImGui_GetFrameHeight(ctx)
+  local use_icon = font and icons.NAMES["music-2"]
+  if not sound then reaper.ImGui_BeginDisabled(ctx) end
+  if value ~= 0 and not use_icon then
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT)
+  end
+  reaper.ImGui_Button(ctx, (use_icon and "" or "\u{266A}") .. "##" .. id, size, size)
+  if value ~= 0 and not use_icon then reaper.ImGui_PopStyleColor(ctx) end
+  if use_icon then
+    icons.paint_over_item(ctx, font, "music-2",
+      { color = value ~= 0 and T.ACCENT or T.TEXT_SECONDARY })
+  end
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  -- Open on mouse-down instead of waiting for the ordinary button release.
+  -- The compact panel cannot overlap this button, so there is no accidental
+  -- interaction with the newly appeared window during the same hold.
+  local pressed = hovered and reaper.ImGui_IsMouseClicked(ctx, 0)
+  local x0, y0, y1
+  if pressed and sound then
+    x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+    local _, rect_y1 = reaper.ImGui_GetItemRectMax(ctx)
+    y1 = rect_y1
+  end
+  if not sound then reaper.ImGui_EndDisabled(ctx) end
+
+  if pressed and sound then
+    pitchwin.toggle_at(slot, x0, y0, y1)
+  end
+  tips.show(ctx, hovered,
+    "Adjust Pitch. Higher values shorten playback; lower values lengthen it.", id)
+  return nil
 end
 
 function transport.draw(ctx, state, res)
@@ -488,9 +525,8 @@ function transport.draw(ctx, state, res)
 
   -- LATCH: the A/B-against-your-project reference-mode toggle (labeled "LATCH"
   -- on the button, 2026-07-28 — a label change only; the action type and every
-  -- internal name stay "reference"). Filled REF_RED only while ON — the only
-  -- thing in the UI that reddens for reference mode. Hover and pressed
-  -- states are pushed to the same red so the fill never blinks back to grey.
+  -- internal name stay "reference"). Filled ACCENT only while ON, following
+  -- the user's chosen palette like every other active control.
   -- Fixed width, always present: latching signals itself by colour alone, never
   -- by changing the row's shape. After the fold it leads line two.
   reaper.ImGui_SetCursorPos(ctx, row_x0 + g.latch_x, row_y0 + g.ctrl_y)
@@ -532,16 +568,25 @@ function transport.draw(ctx, state, res)
   -- reads as "mono", and an arbitrary one would need learning; the latch's "L"
   -- already set the precedent that a letter is a legitimate face here.
   --
-  -- A plain toggle like loop, NOT the latch's red fill: red means "your project
-  -- is muted, and it will stay that way until you deal with it". Mono changes
-  -- nothing but what you hear right now, so it wears the same accent face every
-  -- other monitoring toggle does.
+  -- A plain accent-faced toggle like loop. Unlike the latch, it changes only
+  -- what you hear right now and does not mute the project.
   place_cluster(3)
+  local mono_channels = state.preview.playing and (tonumber(state.preview.channels) or 0)
+    or (main_slot.sound and (tonumber(main_slot.sound.channels) or 0) or 0)
+  local mono_available = mono_channels <= 2
+  local mono_tip = mono_available
+    and "Fold left and right together in both speakers to check mono compatibility."
+    or "Mono is available for mono and stereo sounds."
   if widgets.toggle(ctx, "mono", "M", state.mono,
-      "Fold left and right together in both speakers to check mono compatibility.",
-      font) then
+      mono_tip, font, nil, mono_available) then
     action = { type = "toggle_mono" }
   end
+
+  -- PITCH: natural rate-style pitch in semitones. The value stays inside its
+  -- compact panel; the bar keeps one stable musical-note square.
+  place_cluster(4)
+  local pitch_action = transport.draw_pitch(ctx, state, font, "main")
+  action = action or pitch_action
   -- The reference picker: the name slot (the bar's one flexible element), the
   -- position count in its reserved width, then the joined step arrows — count
   -- BETWEEN slot and arrows since 2026-08-07 ("name · 1/3" is one fact). This

@@ -154,9 +154,8 @@ end
 local slot_dragged = false
 
 -- The flexible element of the control bar: the armed reference's name and the
--- "opens a list" chevron. It does NOT go red while reference mode is latched
--- any more (2026-08-06, user's call): the latch button is the only thing in the
--- UI that reddens now.
+-- "opens a list" chevron. It does not change while reference mode is latched
+-- (2026-08-06, user's call): the latch button alone carries that state.
 --
 -- Pulling the slot out is how the armed reference reaches the REAPER timeline
 -- (2026-08-07, user's call): the same press-and-pull the list's rows already
@@ -200,7 +199,7 @@ function refpicker.draw_slot(ctx, state, res, w)
   local action
   if state.deps.drag_out and state.selected_id and not state.drag
     and held and reaper.ImGui_IsMouseDragging(ctx, 0) then
-    action = { type = "drag_sound", id = state.selected_id }
+    action = { type = "drag_sound", id = state.selected_id, target = "main" }
     slot_dragged = true
   end
 
@@ -239,8 +238,8 @@ function refpicker.draw_slot(ctx, state, res, w)
       -- "on screen" at all. Nothing about the slot says it can be pulled out,
       -- so this line is the only place that affordance exists.
       if sel and state.deps.drag_out then
-        tip = tip and (tip .. "\n\nDrag to the REAPER timeline to add it.")
-          or "Drag to the REAPER timeline to add it."
+        tip = tip and (tip .. "\n\nDrag to the Reaper timeline to add it.")
+          or "Drag to the Reaper timeline to add it."
       end
       slot_tip = tip
     end
@@ -426,7 +425,7 @@ local function draw_row(ctx, state, res, p, w)
     -- That is the only route those two actions have.
     if state.deps.drag_out and not state.drag
       and held and reaper.ImGui_IsMouseDragging(ctx, 0) then
-      action = action or { type = "drag_sound", id = p.id }
+      action = action or { type = "drag_sound", id = p.id, target = "main" }
       -- Get out of the way: the drop lands somewhere this list is covering.
       reaper.ImGui_CloseCurrentPopup(ctx)
     end

@@ -68,11 +68,22 @@ function reaper_api.check_deps()
       and reaper.APIExists("BR_GetMouseCursorContext_Track")
       and reaper.APIExists("BR_GetMouseCursorContext_Position"),
     js         = reaper.APIExists("JS_Dialog_BrowseForOpenFiles"),
+    file_drag_rescue = reaper.APIExists("JS_Mouse_GetState"),
     -- Windows' modern folder-only dialog is launched through ExecProcess. The
     -- old js tree dialog remains a fallback if the Windows helper is blocked.
     folder_picker = reaper.APIExists("ExecProcess")
       or reaper.APIExists("JS_Dialog_BrowseForFolder"),
   }
+end
+
+-- Screen-space mouse truth for the OS file-drop rescue. ReaImGui synthesises a
+-- button release on DragLeave, so only js_ReaScriptAPI's physical button state
+-- can distinguish crossing a window boundary from the user actually letting go.
+-- These are two cheap reads with no held resource or side effect.
+function reaper_api.file_drag_mouse()
+  if not reaper.JS_Mouse_GetState then return nil end
+  local x, y = reaper.GetMousePosition()
+  return x, y, (reaper.JS_Mouse_GetState(1) & 1) == 1
 end
 
 -- Default library folder, under REAPER's user-data folder — never the script's
@@ -98,6 +109,15 @@ local EXT_SEEN_VERSION  = "seen_version"
 local EXT_FEEDBACK_EMAIL = "feedback_email"
 local EXT_WALKTHROUGH   = "walkthrough_seen"
 local EXT_COL_GEN       = "col_gen"
+local EXT_UI_SCALE      = "ui_scale"
+local EXT_ACCENT_COLOUR = "accent_colour"
+local EXT_OPEN_LIBRARY  = "open_library_on_startup"
+local EXT_BROWSER_VIEW  = "browser_view"
+local EXT_BROWSER_CATEGORIES = "browser_categories"
+local EXT_BROWSER_ANCHOR = "browser_category_anchor"
+local EXT_BROWSER_SOUND = "browser_sound"
+local EXT_BROWSER_SORT  = "browser_sort"
+local EXT_BROWSER_SORT_ASC = "browser_sort_asc"
 
 local function stored_ext(section, key)
   local value = reaper.GetExtState(section, key)
@@ -333,6 +353,123 @@ function reaper_api.set_master_db(db)
   reaper.SetExtState(EXT_SECTION, EXT_MASTER, tostring(db), true)
 end
 
+-- Appearance is an app preference, shared by every window and every library.
+-- Validation belongs to ui.theme because it owns the supported scale range and
+-- accent palette; this adapter only carries the saved value across restarts.
+function reaper_api.get_ui_scale()
+  return tonumber(reaper.GetExtState(EXT_SECTION, EXT_UI_SCALE))
+end
+
+function reaper_api.set_ui_scale(scale)
+  reaper.SetExtState(EXT_SECTION, EXT_UI_SCALE, string.format("%.2f", scale), true)
+end
+
+function reaper_api.get_accent_colour()
+  local value = reaper.GetExtState(EXT_SECTION, EXT_ACCENT_COLOUR)
+  return value ~= "" and value or nil
+end
+
+function reaper_api.set_accent_colour(colour)
+  reaper.SetExtState(EXT_SECTION, EXT_ACCENT_COLOUR, tostring(colour), true)
+end
+
+-- Whether the separate Library window should open with the tool. Off is both
+-- the first-run default and the safe interpretation of any unknown value.
+function reaper_api.get_open_library_on_startup()
+  return reaper.GetExtState(EXT_SECTION, EXT_OPEN_LIBRARY) == "1"
+end
+
+function reaper_api.set_open_library_on_startup(enabled)
+  reaper.SetExtState(EXT_SECTION, EXT_OPEN_LIBRARY, enabled and "1" or "0", true)
+end
+
+-- The browser remembers how it was being viewed, but not search text or raw
+-- scroll height. Category ids are currently schema-owned cN values, so a comma
+-- list is unambiguous and keeps this app preference readable in REAPER's ini.
+function reaper_api.get_browser_memory()
+  local scope = reaper.GetExtState(EXT_SECTION, EXT_BROWSER_VIEW)
+  local categories_text = reaper.GetExtState(EXT_SECTION, EXT_BROWSER_CATEGORIES)
+  local ids = {}
+  for id in categories_text:gmatch("[^,]+") do ids[id] = true end
+
+  local view
+  if scope == "uncategorised" then
+    view = { scope = "uncategorised" }
+  elseif scope == "category" then
+    view = { scope = "category", id = categories_text ~= "" and categories_text or nil }
+  elseif scope == "categories" then
+    view = {
+      scope = "categories",
+      ids = ids,
+      anchor = stored_ext(EXT_SECTION, EXT_BROWSER_ANCHOR),
+    }
+  else
+    view = { scope = "all" }
+  end
+
+  local asc_text = reaper.GetExtState(EXT_SECTION, EXT_BROWSER_SORT_ASC)
+  local asc
+  if asc_text == "1" then
+    asc = true
+  elseif asc_text == "0" then
+    asc = false
+  end
+  return {
+    view = view,
+    sound_id = stored_ext(EXT_SECTION, EXT_BROWSER_SOUND),
+    sort = {
+      col = stored_ext(EXT_SECTION, EXT_BROWSER_SORT),
+      asc = asc,
+    },
+  }
+end
+
+local function safe_category_id(id)
+  if type(id) ~= "string" or id == "" or id:find("[,%c]") then return nil end
+  return id
+end
+
+function reaper_api.set_browser_view(view)
+  local scope = type(view) == "table" and view.scope or "all"
+  local ids, anchor = {}, nil
+  if scope == "category" then
+    local id = safe_category_id(view.id)
+    if id then ids[1] = id else scope = "all" end
+  elseif scope == "categories" then
+    for id, selected in pairs(view.ids or {}) do
+      id = selected and safe_category_id(id) or nil
+      if id then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    if #ids == 0 then
+      scope = "all"
+    else
+      anchor = safe_category_id(view.anchor)
+    end
+  elseif scope ~= "uncategorised" then
+    scope = "all"
+  end
+
+  reaper.SetExtState(EXT_SECTION, EXT_BROWSER_VIEW, scope, true)
+  reaper.SetExtState(EXT_SECTION, EXT_BROWSER_CATEGORIES, table.concat(ids, ","), true)
+  reaper.SetExtState(EXT_SECTION, EXT_BROWSER_ANCHOR, anchor or "", true)
+end
+
+function reaper_api.set_browser_sound(id)
+  if type(id) == "string" and id ~= "" and not id:find("[%c]") then
+    reaper.SetExtState(EXT_SECTION, EXT_BROWSER_SOUND, id, true)
+  else
+    reaper.DeleteExtState(EXT_SECTION, EXT_BROWSER_SOUND, true)
+  end
+end
+
+function reaper_api.set_browser_sort(sort)
+  local col = type(sort) == "table" and sort.col or ""
+  local asc = type(sort) == "table" and sort.asc
+  reaper.SetExtState(EXT_SECTION, EXT_BROWSER_SORT, tostring(col or ""), true)
+  reaper.SetExtState(EXT_SECTION, EXT_BROWSER_SORT_ASC, asc == false and "0" or "1", true)
+end
+
 -- Which measurement the Loudness column shows. Also an app preference (it's a way
 -- of looking at the library, not part of it), so it lives beside the master volume.
 -- Returns the stored name as-is; the caller decides whether it still means anything.
@@ -408,7 +545,8 @@ end
 -- left to choose between, so there is nothing to remember. Any value an older
 -- build left in ExtState is simply never read again.
 
--- The browser audition strip's dragged height (px of waveform bars). nil when
+-- The browser audition strip's dragged height in 100%-scale pixels. The UI
+-- multiplies it by the current UI Size when drawing. nil when
 -- the user has never resized it — or has reset it — so the UI falls back to
 -- its default token instead of a frozen copy that would shadow a future
 -- default change. Garbage in the stored slot reads as unset, never trusted.
@@ -570,7 +708,7 @@ end
 -- Targets the ARRANGE VIEW child window ("trackview"), not the main window:
 -- with a MIDI editor docked into the main window, focusing "the main window"
 -- hands focus to the docked MIDI editor instead — a failure documented in the
--- wild and re-derived in docs/RESEARCH.md ("Keyboard focus"). Falls back to
+-- wild and re-derived in docs/research/reaper-host-facts.md ("Keyboard focus"). Falls back to
 -- the main window only when the child can't be found.
 --
 -- SWS-only on purpose (BR_Win32_*, all verified present in the installed DLL):
@@ -658,12 +796,20 @@ end
 
 --------------------------------------------------------------- files & audio
 
--- Audio extensions we accept on import (v1 = common file types REAPER reads).
+-- Audio extensions we accept on import. Keep this explicit rather than treating
+-- every file REAPER happens to open as part of the product contract: the same
+-- list drives import and the startup file check, so a sound can never be added
+-- successfully and then reported missing after a restart.
 -- Lowercased keys; anything not here is ignored by the drop/orphan scan.
 reaper_api.AUDIO_EXTS = {
   wav = true, aiff = true, aif = true, flac = true, mp3 = true,
   ogg = true, w64 = true, wv = true, m4a = true, rex = true,
 }
+
+-- The first multichannel release is deliberately bounded. The waveform and
+-- library record can represent more, but preview routing and loudness still need
+-- live host checks before higher counts become a supported promise.
+reaper_api.MAX_AUDIO_CHANNELS = 8
 
 local function ext_of(name)
   local e = name:match("%.([^%.]+)$")

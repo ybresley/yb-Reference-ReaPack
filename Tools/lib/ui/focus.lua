@@ -6,7 +6,7 @@
 --   * a text field is mid-edit (the search box, a rename popup) — covered by
 --     "any item still active",
 --   * a popup/menu/modal is open — losing OS focus snaps popups shut (upstream
---     Dear ImGui behaviour, see docs/RESEARCH.md "Keyboard focus"), so a frame
+--     Dear ImGui behaviour, see docs/research/reaper-host-facts.md "Keyboard focus"), so a frame
 --     with one up never hands focus away,
 --   * the click landed in a browsing pane (the browser's sidebar or sound
 --     list), where the arrow keys step the selection — those panes register
@@ -18,7 +18,7 @@
 -- Why reactive — a just-finished click on us — and never continuous: an idle
 -- "always refocus REAPER" loop steals focus from plugin windows and other
 -- scripts, a documented failure of exactly that design in other REAPER tools
--- (docs/RESEARCH.md). A release only counts when its PRESS landed on one of our
+-- (docs/research/reaper-host-facts.md). A release only counts when its PRESS landed on one of our
 -- windows: at that moment the click had already given us focus, so handing it
 -- to REAPER takes nothing from anyone else. A press that lands on REAPER (for
 -- example clicking out of our search box into a track name being renamed) must

@@ -6,6 +6,7 @@
 -- windows. A ui/ module: it may call reaper.ImGui_* only.
 
 local theme = require("ui.theme")
+local filedrop_rescue = require("filedrop_rescue")
 local T = theme.tokens
 
 local dropzone = {}
@@ -155,6 +156,80 @@ local function files_payload_in_flight(ctx)
   return (reaper.ImGui_GetDragDropPayloadFile(ctx, 0)) == true
 end
 
+-- ReaImGui invalidates its own mouse position after an OS drag leaves one
+-- native window, even when the same drag has already entered our other window.
+-- The normal target remains the first choice. This small rescue path is used
+-- only when that target refuses to hover and js_ReaScriptAPI says the physical
+-- left button is still held (or has genuinely just been released).
+local rescue = filedrop_rescue.new()
+local payload_active = false
+local rescue_active = false
+local rescue_x, rescue_y
+local rescue_window, current_window
+
+local function read_all_payload_paths(ctx)
+  local paths = {}
+  local i = 0
+  while true do
+    local got, path = reaper.ImGui_GetDragDropPayloadFile(ctx, i)
+    if not got or not path then break end
+    paths[#paths + 1] = path
+    i = i + 1
+  end
+  return paths
+end
+
+-- Called once before either app window draws. Auxiliary windows and popups
+-- block the rescue path so a panel underneath them can never catch a release.
+-- Ordinary ReaImGui file drops continue even while rescue is blocked.
+function dropzone.begin_file_drag_frame(ctx, state, mouse_x, mouse_y, left_down, blocked)
+  payload_active = state.deps.imgui_drop and HAS_PAYLOAD_PEEK
+    and files_payload_in_flight(ctx) or false
+  local can_rescue = not blocked and type(left_down) == "boolean"
+  local paths
+  if can_rescue and rescue:needs_paths(payload_active) then
+    paths = read_all_payload_paths(ctx)
+  end
+  rescue_active = can_rescue
+    and rescue:begin_frame(payload_active, left_down, paths) or false
+  if not can_rescue then rescue:begin_frame(payload_active, nil) end
+  rescue_x, rescue_y = mouse_x, mouse_y
+  rescue_window, current_window = nil, nil
+  return payload_active, rescue_active
+end
+
+function dropzone.set_file_drag_window(id)
+  rescue_window = id
+end
+
+function dropzone.set_current_window(id)
+  current_window = id
+end
+
+function dropzone.end_file_drag_frame()
+  rescue:finish_frame()
+  payload_active, rescue_active = false, false
+  rescue_x, rescue_y = nil, nil
+  rescue_window, current_window = nil, nil
+end
+
+local function rescue_drop(ctx, opts)
+  if not rescue_active or current_window == nil
+    or current_window ~= rescue_window then
+    return nil, false
+  end
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  if not filedrop_rescue.inside(rescue_x, rescue_y, x0, y0, x1, y1) then
+    return nil, false
+  end
+  if not opts.no_draw then dropzone.draw_drop_zone(ctx, opts.label) end
+  local paths = rescue:take_paths()
+  if not paths then return nil, true end
+  return { type = opts.action_type or "import", paths = paths,
+    category = opts.category }, true
+end
+
 -- A file-drop target over an explicit rect — for a zone bigger than any one
 -- item (the whole working view, the browser's list area; Codex, 2026-07-28:
 -- per-item targets left the blank space between them silently dropping the
@@ -175,7 +250,7 @@ end
 function dropzone.file_drop_over_rect(ctx, state, x0, y0, x1, y1, opts)
   if not state.deps.imgui_drop or not HAS_PAYLOAD_PEEK then return nil end
   if state.drag then return nil end
-  if not files_payload_in_flight(ctx) then return nil end
+  if not payload_active and not rescue_active then return nil end
   local w, h = x1 - x0, y1 - y0
   if w < 1 or h < 1 then return nil end
   local cx, cy = reaper.ImGui_GetCursorScreenPos(ctx)
@@ -189,7 +264,9 @@ end
 function dropzone.read_file_drop(ctx, state, opts)
   opts = opts or {}
   if not state.deps.imgui_drop then return nil, false end
-  if not reaper.ImGui_BeginDragDropTarget(ctx) then return nil, false end
+  if not reaper.ImGui_BeginDragDropTarget(ctx) then
+    return rescue_drop(ctx, opts)
+  end
   if not opts.no_draw then dropzone.draw_drop_zone(ctx, opts.label) end
   local action
   -- The binding's second slot is the count OUT-placeholder — the flags ride in
@@ -206,6 +283,7 @@ function dropzone.read_file_drop(ctx, state, opts)
     if #paths > 0 then
       action = { type = opts.action_type or "import", paths = paths,
         category = opts.category }
+      rescue:consume()
     end
   end
   reaper.ImGui_EndDragDropTarget(ctx)

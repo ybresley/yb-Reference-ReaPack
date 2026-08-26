@@ -10,6 +10,7 @@
 -- never draws and never touches the library.
 
 local span = require("core.span")
+local pitch = require("core.pitch")
 
 local dragout = {}
 
@@ -27,7 +28,7 @@ local UNDO_ITEMS = 4
 -- through the API. Both were shipping bugs until 2026-08-08 — every sound
 -- dropped from the tool landed nameless and, until the user alt-tabbed, as a
 -- blank grey block (found by prototypes/proto_drag_ghost.lua; see
--- docs/RESEARCH.md "Drag OUT to arrange view").
+-- docs/research/reaper-host-facts.md, "Dragging to the arrange view").
 
 -- REAPER labels an item with its TAKE's name and will not fall back to the
 -- file, so a take created by AddTakeToMediaItem shows nothing at all.
@@ -74,20 +75,26 @@ local function snap_position(position)
 end
 
 -- Open the file and confirm there is something playable in it. Returns the
--- source and its length, or nil + a reason; nothing is left open on a refusal.
+-- source, length and channel count, or nil values + a reason; nothing is left
+-- open on a refusal.
 --
 -- Its own step because the real drop asks BEFORE opening its undo block — a
 -- file that can't be read is a refusal with nothing to take back, and an undo
 -- block that opens for it would be a block opened for no change at all.
 local function open_source(path)
   local src = reaper.PCM_Source_CreateFromFile(path)
-  if not src then return nil, nil, "its file couldn't be read" end
+  if not src then return nil, nil, nil, "its file couldn't be read" end
   local length = reaper.GetMediaSourceLength(src)
   if not length or length <= 0 then
     reaper.PCM_Source_Destroy(src)
-    return nil, nil, "its file has no playable length"
+    return nil, nil, nil, "its file has no playable length"
   end
-  return src, length
+  local channels = reaper.GetMediaSourceNumChannels(src)
+  if not channels or channels < 1 then
+    reaper.PCM_Source_Destroy(src)
+    return nil, nil, nil, "its file has no playable channels"
+  end
+  return src, length, math.floor(channels)
 end
 
 -- Make the item: the take, the audio, the framed stretch, the name, the redraw.
@@ -97,7 +104,7 @@ end
 -- is left behind — any item made here is taken straight back out, because a
 -- silent half-built item (no audio in it, or sitting at the wrong time) would
 -- be worse than a plain refusal and the user would have no idea it happened.
-local function build_item(track, position, src, length, path, name, span_start, span_end)
+local function build_item(track, position, src, length, path, name, span_start, span_end, semitones)
   -- The framed span travels (loudness tools, 2026-08-06): the item carries
   -- only the sound's start->end stretch — a take start offset plus a shorter
   -- item. Clamped by core/span.lua's ONE rule (Codex, 2026-08-06 — a local
@@ -106,13 +113,15 @@ local function build_item(track, position, src, length, path, name, span_start, 
   local offs, span_to = span.range(
     { span_start = type(span_start) == "number" and span_start or nil,
       span_end = type(span_end) == "number" and span_end or nil }, length)
+  local rate = pitch.rate(semitones)
+  local item_length = (span_to - offs) / rate
 
   local item = reaper.AddMediaItemToTrack(track)
   local take = item and reaper.AddTakeToMediaItem(item)
   if not take then
     if item then reaper.DeleteTrackMediaItem(track, item) end
     reaper.PCM_Source_Destroy(src)
-    return nil, nil, "REAPER wouldn't create the item"
+    return nil, nil, "Reaper wouldn't create the item"
   end
 
   -- Attaching hands the source over: once this succeeds the take owns it, and
@@ -125,24 +134,26 @@ local function build_item(track, position, src, length, path, name, span_start, 
   if reaper.SetMediaItemTake_Source(take, src) == false then
     reaper.DeleteTrackMediaItem(track, item)
     reaper.PCM_Source_Destroy(src)
-    return nil, nil, "REAPER wouldn't attach the audio to the item"
+    return nil, nil, "Reaper wouldn't attach the audio to the item"
   end
 
   if reaper.SetMediaItemInfo_Value(item, "D_POSITION", position) == false
-    or reaper.SetMediaItemInfo_Value(item, "D_LENGTH", span_to - offs) == false
+    or reaper.SetMediaItemInfo_Value(item, "D_LENGTH", item_length) == false
+    or reaper.SetMediaItemTakeInfo_Value(take, "B_PPITCH", 0) == false
+    or reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", rate) == false
     or (offs > 0 and reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", offs) == false) then
     -- A start offset that didn't take would leave an item whose audio starts
     -- at the wrong moment — worse than a plain refusal, same as the rest. The
     -- source is NOT freed here: the take owns it now, so it goes out with the
     -- item.
     reaper.DeleteTrackMediaItem(track, item)
-    return nil, nil, "REAPER wouldn't place the item"
+    return nil, nil, "Reaper wouldn't place the item"
   end
 
   name_take(take, name, path)
   reaper.UpdateItemInProject(item)
   reaper.UpdateArrange()
-  return item, take, nil, span_to - offs
+  return item, take, nil, item_length
 end
 
 local function track_label(track)
@@ -173,12 +184,33 @@ end
 
 -- A plain-language line for the status bar while a drag is in flight, so the user
 -- can see where it would land before letting go.
-function dragout.hint(t)
+local function track_channels(track)
+  if not track then return 0 end
+  local channels = reaper.GetMediaTrackInfo_Value(track, "I_NCHAN")
+  if not channels or channels < 1 then return 0 end
+  return math.floor(channels)
+end
+
+local function channels_for_track(source_channels)
+  local channels = math.max(2, math.floor(tonumber(source_channels) or 2))
+  if channels % 2 ~= 0 then channels = channels + 1 end
+  return channels
+end
+
+function dragout.hint(t, source_channels, new_track)
   if t.over_arrange then
-    return string.format("Drop on %s at %s", track_label(t.track),
+    local label = new_track and "a new track" or track_label(t.track)
+    local text = string.format("Drop on %s at %s", label,
       reaper.format_timestr_pos(t.position, "", 0))
+    local needed = channels_for_track(source_channels)
+    local available = not new_track and track_channels(t.track) or needed
+    if available > 0 and needed > available then
+      text = text .. string.format("\nThis drop needs %d track channels; the track has %d.",
+        needed, available)
+    end
+    return text
   end
-  return "Release over REAPER's arrange view to add the sound. Release anywhere else to cancel."
+  return "Release over Reaper's arrange view to add the sound. Release anywhere else to cancel."
 end
 
 --------------------------------------------------------------- the name tag
@@ -234,7 +266,8 @@ end
 -- It is a REAL item, not a drawing. That is deliberate and it is the whole
 -- design: there is no API anywhere in REAPER, SWS or js_ReaScriptAPI that draws
 -- a preview, and no way to start an OS-level drag that would make REAPER draw
--- its own (verified against the installed binaries — docs/RESEARCH.md). The
+-- its own (verified against the installed binaries; see
+-- docs/research/reaper-host-facts.md, "Dragging to the arrange view"). The
 -- only way to get REAPER's own picture, with its own waveform, name, fades and
 -- snapping, is to give REAPER an item. The user's call was explicit: REAPER
 -- draws it, we don't paint our own.
@@ -246,8 +279,9 @@ end
 -- editing nor auto-crossfade disturbs the items it passes over.
 --
 -- Held HERE, module-local, for the same reason the drag tag is: this module
--- owns the promise that one is never left behind, so `hide_ghost` is safe and
--- cheap for anyone to call at any time, including the exit handler.
+-- owns normal and exit cleanup, so `hide_ghost` is safe and cheap for anyone
+-- to call at any time, including the exit handler. The hard-crash boundary is
+-- documented below.
 local ghost = nil -- { item, track, pos }
 
 -- Take it away. A no-op when there is none.
@@ -278,7 +312,7 @@ end
 --
 -- Deliberately NOT wrapped in an undo block: an undo point here would put a
 -- throwaway into the user's history. The real drop makes its own, separately.
-function dragout.show_ghost(track, position, path, name, span_start, span_end)
+function dragout.show_ghost(track, position, path, name, span_start, span_end, semitones)
   if not reaper.ValidatePtr2(0, track, "MediaTrack*") then return dragout.hide_ghost() end
 
   -- Snapped before anything else, because the fast path below compares this
@@ -323,7 +357,7 @@ function dragout.show_ghost(track, position, path, name, span_start, span_end)
   -- simply means no ghost this frame; the next frame tries again.
   local src, length = open_source(path)
   if not src then return end
-  local item = build_item(track, position, src, length, path, name, span_start, span_end)
+  local item = build_item(track, position, src, length, path, name, span_start, span_end, semitones)
   if not item then return end
 
   -- Never selected: a ghost must not disturb what the user had selected, and a
@@ -477,10 +511,12 @@ end
 -- track and should arrive with whatever their template gives a new track.
 --
 -- The preferred call is `insert(entries, track, position, new_track)`, where
--- entries is an ordered array of { path, name, span_start, span_end }. The
+-- entries is an ordered array of { path, name, span_start, span_end, pitch }. The
 -- single-sound argument list maps to the same path for compatibility.
 --
--- Returns true + the position it actually landed at, or false + a reason.
+-- Returns true + the position it actually landed at + channel details, or false
+-- + a reason. Existing tracks are never changed; a mismatch is returned so the
+-- caller can tell the user without blocking the drop.
 function dragout.insert(entries_or_path, track, position, name_or_new_track, span_start, span_end, legacy_new_track)
   if not reaper.ValidatePtr2(0, track, "MediaTrack*") then
     return false, "That track is no longer there."
@@ -518,13 +554,14 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
     end
   end
 
+  local max_source_channels = 1
   for i = 1, #entries do
     local entry = entries[i]
     if type(entry) ~= "table" or type(entry.path) ~= "string" or entry.path == "" then
       release_prepared()
       return false, "One of the sounds has no audio file."
     end
-    local src, length, unplayable = open_source(entry.path)
+    local src, length, channels, unplayable = open_source(entry.path)
     if not src then
       release_prepared()
       return false, unplayable
@@ -534,9 +571,12 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
       name = entry.name,
       span_start = entry.span_start,
       span_end = entry.span_end,
+      pitch = entry.pitch,
       src = src,
       length = length,
+      channels = channels,
     }
+    if channels > max_source_channels then max_source_channels = channels end
   end
 
   -- Snap only the first item. The rest follow it without gaps, even when their
@@ -581,9 +621,13 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
       made_track = reaper.GetTrack(0, idx)
       if not made_track or not reaper.ValidatePtr2(0, made_track, "MediaTrack*") then
         made_track = nil
-        return give_up("REAPER couldn't create the track.")
+        return give_up("Reaper couldn't create the track.")
       end
       track = made_track
+      local needed = channels_for_track(max_source_channels)
+      if needed > 2 and reaper.SetMediaTrackInfo_Value(track, "I_NCHAN", needed) == false then
+        return give_up("Reaper couldn't set the new track's channel count.")
+      end
     end
   end
 
@@ -595,7 +639,7 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
     local src = p.src
     p.src = nil
     local item, _, build_failed, item_length = build_item(
-      track, next_position, src, p.length, p.path, p.name, p.span_start, p.span_end)
+      track, next_position, src, p.length, p.path, p.name, p.span_start, p.span_end, p.pitch)
     if not item then
       return give_up(build_failed)
     end
@@ -614,13 +658,32 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
   -- it REAPER's peak work would be recorded in the user's undo point.
   load_missing_peaks()
 
-  return true, position
+  local available = track_channels(track)
+  local needed = channels_for_track(max_source_channels)
+  return true, position, {
+    track = track,
+    source_channels = max_source_channels,
+    track_channels = available,
+    needed_channels = needed,
+    mismatch = available > 0 and needed > available,
+  }
 end
 
 -- How the drop reads back to the user once it has landed.
-function dragout.landed_at(track, position)
-  return string.format("Added to %s at %s.", track_label(track),
-    reaper.format_timestr_pos(position, "", 0))
+function dragout.landed_at(track, position, details, count)
+  local text
+  if count and count > 1 then
+    text = string.format("Added %d sounds to %s at %s.", count, track_label(track),
+      reaper.format_timestr_pos(position, "", 0))
+  else
+    text = string.format("Added to %s at %s.", track_label(track),
+      reaper.format_timestr_pos(position, "", 0))
+  end
+  if details and details.mismatch then
+    text = text .. string.format(" This drop needs %d track channels; the track has %d. The audio was still added.",
+      details.needed_channels, details.track_channels)
+  end
+  return text
 end
 
 return dragout

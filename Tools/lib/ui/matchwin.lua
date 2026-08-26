@@ -1,6 +1,5 @@
 -- matchwin: the working view's LOUDNESS panel — the target button (◎) beside
--- the trim fader and the window it opens (DESIGN.md "Loudness tools &
--- working-view additions", decided 2026-08-06).
+-- the trim fader and the window it opens (DESIGN.md "Loudness").
 --
 -- On screen it is "LOUDNESS", and its custom-target button is "Normalize"
 -- (user's rename, 2026-08-11 — it was "MATCH LOUDNESS" / "Match"). The file,
