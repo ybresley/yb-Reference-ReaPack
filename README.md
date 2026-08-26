@@ -44,8 +44,6 @@ Restart REAPER after installing or updating an extension.
 
 - **Windows only.** macOS and Linux are not supported
 
-- **Mono and stereo audio files only (for now)**
-
 ## Send Feedback!
 
 I want to improve this tool and would really appreciate any feedback you may have, whether it’s a bug report, feature request, or just general thoughts! **And please be brutally honest!** You can send feedback from the tool, go to the Settings panel → Feedback tab. Adding your email is optional (if you want a response from me). Thanks for beta testing this tool and I hope it’s useful!
