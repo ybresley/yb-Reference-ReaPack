@@ -1,4 +1,4 @@
--- ruler: tick/label placement for the working view's time ruler. The general
+-- ruler: tick/label placement for the Reference View's time ruler. The general
 -- evidence lives in docs/research/ui-and-market-benchmarks.md, "Waveform time
 -- ruler"; this file and its specs define what is built. Pure Lua, zero
 -- reaper.* calls: handed a sound's duration, the pixel

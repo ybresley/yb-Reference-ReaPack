@@ -15,6 +15,7 @@ local matchwin = require("ui.matchwin")
 local focus    = require("ui.focus")
 local walkthrough_ui = require("ui.walkthrough")
 local pitchwin = require("ui.pitchwin")
+local refpicker = require("ui.refpicker")
 
 local app = {}
 
@@ -54,7 +55,7 @@ local main_docked_last = false
 
 -- UI Size changes the outer dimensions of floating windows as well as their
 -- contents. Ratios accumulate until each window can consume them: the Library
--- may be closed while the setting changes, while a docked working view drops
+-- may be closed while the setting changes, while a docked Reference View drops
 -- the request because REAPER owns its dimensions.
 local pending_main_scale = 1
 local pending_browser_scale = 1
@@ -98,7 +99,7 @@ local function files_drag_window(ctx, state, files_active, mouse_x, mouse_y)
   local function inside(r)
     return r and mx >= r.x and mx < r.x + r.w and my >= r.y and my < r.y + r.h
   end
-  -- The browser wins an overlap: while open it sits above the working view.
+  -- The browser wins an overlap: while open it sits above the Reference View.
   if state.browser_open and inside(last_rect.browser) then return "browser" end
   if inside(last_rect.main) then return "main" end
   return nil
@@ -114,9 +115,13 @@ end
 -- Create the ImGui context and turn on docking if the ReaImGui build supports it
 -- (feature-detected — an older build simply stays floating instead of erroring).
 -- `font_path` is the bundled Lucide icon font; loaded here so the icon system has
--- it. All resources are created ONCE here, never in the frame loop.
-function app.create_context(font_path)
-  local ctx = reaper.ImGui_CreateContext("yb-Reference")
+-- it. `context_name` is this launcher's persistent ReaImGui/REAPER layout identity.
+-- All resources are created ONCE here, never in the frame loop.
+function app.create_context(font_path, context_name, monitor_work_area)
+  assert(type(context_name) == "string" and context_name ~= "", "context name is required")
+  -- Read-only platform geometry, injected to keep native REAPER calls in the adapter.
+  res.monitor_work_area = monitor_work_area
+  local ctx = reaper.ImGui_CreateContext(context_name)
   -- Feature detection by looking the ImGui function up directly (nil = absent), the
   -- same idiom as window.lua's HAS_COL_HOVER — NOT reaper.APIExists, which is a
   -- non-ImGui call this ui/ module isn't allowed to make.
@@ -206,7 +211,19 @@ function app.create_context(font_path)
     end
   end
 
-  return ctx
+  return ctx, res
+end
+
+-- Return the requested destination so callers control whether docking occurs.
+function app.draw_dock_menu(ctx, popup_id, state)
+  local target
+  if reaper.ImGui_BeginPopup(ctx, popup_id) then
+    if reaper.ImGui_MenuItem(ctx, "Dock Window In Docker") then
+      target = state.dock_target or -1
+    end
+    reaper.ImGui_EndPopup(ctx)
+  end
+  return target
 end
 
 -- Reference mode's coloured WINDOW OUTLINE is gone (2026-08-06, user's call).
@@ -227,6 +244,7 @@ end
 -- our windows lit up this frame, which the entry script needs before it asserts
 -- REAPER's own drag cursor (see ui/dropzone.take_hand_shown).
 function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
+  refpicker.begin_frame()
   -- Focus bookkeeping first (ui/focus.lua): which mouse presses landed on one
   -- of our windows is read at the top of the frame, before any window draws;
   -- the give-focus-back decision is read at the very end.
@@ -256,6 +274,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- hang on for the rest of the session. This condition keeps being true until it
   -- is dealt with, so it always recovers.
   local action
+  local wave_id, wave_cols
   if state.drag and not reaper.ImGui_IsMouseDown(ctx, 0) then
     action = { type = "drop_sound" }
   end
@@ -331,7 +350,8 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
     -- — then the drop on the row is the user's intent, not the generic "drag
     -- ended" this pre-Begin watcher turned into.
     dropzone.set_current_window("main")
-    local frame_action = window.draw(ctx, state, res)
+    local frame_action
+    frame_action, wave_id, wave_cols = window.draw(ctx, state, res)
     dropzone.set_current_window(nil)
     if frame_action and frame_action.wins_release then
       action = frame_action
@@ -358,17 +378,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
           reaper.ImGui_OpenPopup(ctx, "dock_menu")
         end
       end
-      if reaper.ImGui_BeginPopup(ctx, "dock_menu") then
-        -- ONE item, exactly like REAPER's own windows offer (user's call,
-        -- 2026-08-08): the earlier submenu listing every docker by side was more
-        -- choice than the gesture is worth. state.dock_target is the docker it
-        -- goes to (the entry script picks it from REAPER's own docker list);
-        -- from there, dragging the window out is the way back.
-        if reaper.ImGui_MenuItem(ctx, "Dock Window In Docker") then
-          pending_dock = state.dock_target or -1
-        end
-        reaper.ImGui_EndPopup(ctx)
-      end
+      pending_dock = app.draw_dock_menu(ctx, "dock_menu", state) or pending_dock
     end
 
     -- (The post-update restart popup used to be announced from here. It is gone:
@@ -407,7 +417,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- The browser popup (Phase 5.7 Stage 3): its own Begin/End pair, same ctx,
   -- drawn only while state.browser_open. Floating only — never docked, so a
   -- curation popup can't be folded into REAPER's own docker and confused for
-  -- part of the permanent layout the working view occupies. Geometry restored
+  -- part of the permanent layout the Reference View occupies. Geometry restored
   -- from state.browser_geom (nil the first time this project's user ever opens
   -- it, or on an ancient ReaImGui) with Cond_FirstUseEver, so ImGui's own .ini
   -- memory and ours coexist — whichever ran first just gets overridden by
@@ -429,12 +439,12 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
         math.floor(w + 0.5), math.floor(h + 0.5), reaper.ImGui_Cond_Always())
       pending_browser_scale = 1
     end
-    -- The same floating floor the working view gets (SetNextWindowSizeConstraints
+    -- The same floating floor the Reference View gets (SetNextWindowSizeConstraints
     -- applies only to the very next Begin, so the browser needs its own call —
     -- without it the popup could be squashed below usable and reopen that way).
     -- RULER_H rides on top of the shared floor (2026-08-06, strip ruler): the
     -- browser stacks FIXED-height panes (strip + ruler + info row + list floor)
-    -- that just fit the old minimum — the working view instead lets its
+    -- that just fit the old minimum — the Reference View instead lets its
     -- waveform yield, so only this window needs the taller floor.
     if reaper.ImGui_SetNextWindowSizeConstraints ~= nil
       and reaper.ImGui_NumericLimits_Float ~= nil then
@@ -447,13 +457,13 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
     -- around the sidebar's dark background). The browser's inner panels take
     -- their own padding instead (see browser.draw).
     reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 0, 0)
-    -- Same no-collapse rule as the working view: one window with a fold-away
+    -- Same no-collapse rule as the Reference View: one window with a fold-away
     -- arrow and one without would read as a bug, not a choice.
     local win_flags = HAS_NO_DOCK and reaper.ImGui_WindowFlags_NoDocking() or 0
     if HAS_NO_COLLAPSE then win_flags = win_flags | reaper.ImGui_WindowFlags_NoCollapse() end
     if HAS_DRAG_FOCUS and drag_focus == "browser" then reaper.ImGui_SetNextWindowFocus(ctx) end
-    -- Centred title, like every other panel (2026-08-08 — see the working
-    -- view's Begin above).
+    -- Centred title, like every other panel (2026-08-08 — see the Reference
+    -- View's Begin above).
     local visible2, open2 = theme.begin_window(ctx, "LIBRARY###yb-Reference_Library", true, win_flags, true)
     reaper.ImGui_PopStyleVar(ctx, 1)
     if visible2 then
@@ -472,7 +482,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
       dropzone.set_current_window("browser")
       local browser_action = browser.draw(ctx, state, res)
       dropzone.set_current_window(nil)
-      -- Same precedence rule as the working view above: a release the browser's
+      -- Same precedence rule as the Reference View above: a release the browser's
       -- own drop target consumed must survive to the end of the frame.
       if browser_action and browser_action.wins_release then
         action = browser_action
@@ -590,7 +600,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- Taken (and cleared) at the very end, so it covers the drop targets in BOTH
   -- windows and can never carry over into the next frame.
   return open, action, dropzone.take_hand_shown(), give_focus, forward_keys,
-    settings.feedback_visible()
+    settings.feedback_visible(), wave_id, wave_cols, open and refpicker.preview_owner() or nil
 end
 
 return app

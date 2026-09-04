@@ -3,27 +3,17 @@
 -- and hands back plain numbers; deciding WHAT to measure and what a result means to
 -- the library is core/analysis.lua's job.
 --
--- Engine: REAPER's own CalculateNormalization, not SWS (decided in Phase 0 — see
--- prototypes/proto_loudness_NOTES.md). Our numbers therefore match REAPER's own
--- render/export loudness stats. The SWS meter reads 0.5–1.7 dB differently; that is
--- a known, accepted difference, not a bug to chase.
+-- Engine: REAPER's CalculateNormalization. The historical SWS numerical comparison
+-- used different files and does not establish a difference between the engines.
 --
 -- It answers "what gain would bring this file to a target?", so the measurement is
 -- derived: measured = target - the gain expressed in dB.
 --
--- WHY THIS IS PACED ACROSS FRAMES: the call blocks while it reads the whole file,
--- and each value costs its own full pass. Measured cost is linear and predictable
--- (~485x realtime): each LUFS value ~2.1 ms per second of audio, true peak
--- ~4.3 ms, sample peak and RMS under 1 ms. All six together ~12 ms per second of
--- audio — a 5-second reference is imperceptible, while a 10-minute file would
--- freeze the window for ~7 seconds if done in one go. Doing ONE pass per frame
--- caps that at the single most expensive pass, and the sound is playable
--- throughout — its loudness simply fills in a moment later.
---
--- Unlike waveform peaks, a pass cannot be split any finer: integrated LUFS is gated
--- over the whole file, so it has no meaningful partial answer. (The "loudest moment"
--- values could be sliced and maxed if very long references ever prove annoying —
--- that would need the start-offset argument verifying in REAPER first.)
+-- Each call blocks for a whole-file pass. Running one per frame avoids doing all
+-- six together, but does not keep REAPER responsive during a pass: issue #35's
+-- capture reached 240 ms. The scheduler only pauses during recording; imports
+-- measure immediately during preview/playback with visible progress. A pass
+-- already running cannot be interrupted.
 
 local loudness = {}
 

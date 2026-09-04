@@ -51,6 +51,10 @@ local ui = { open = false, shown_for = nil, history = false }
 
 function whatsnew.is_open() return ui.open end
 
+function whatsnew.close()
+  ui.open, ui.history, ui.shown_for = false, false, nil
+end
+
 -- Settings' View button. Reading the history never touches the seen-mark —
 -- that belongs to the post-update flow alone.
 function whatsnew.open_history()
@@ -196,6 +200,14 @@ function whatsnew.draw_release(ctx, release, opts)
       reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, whatsnew.human_date(release.date))
       if small then reaper.ImGui_PopFont(ctx) end
     end
+  end
+
+  if release.summary then
+    local reading = theme.push_release_font(ctx)
+    if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, WRAP_TO_EDGE) end
+    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, release.summary)
+    if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
+    if reading then reaper.ImGui_PopFont(ctx) end
   end
 
   for gi, g in ipairs(release.groups or {}) do

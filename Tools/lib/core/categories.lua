@@ -4,6 +4,8 @@
 -- Pure Lua. Operates in place on a library table (see core/schema.lua). A sound
 -- references a category by id, so display names can change freely.
 
+local search = require("core.search")
+
 local categories = {}
 
 -- Auto-assign colours by cycling this palette (swatch values from the UI tokens,
@@ -224,6 +226,8 @@ end
 
 -- Sidebar/header totals: how many sounds sit in the whole library, how many
 -- have no category, and how many sit under each category id.
+-- An optional query counts matching sounds across every category, regardless
+-- of the selected view. Omit it when a caller needs full library totals.
 --
 -- One pass over the sounds, one over the categories: O(sounds + categories),
 -- never O(sounds * categories).
@@ -232,7 +236,7 @@ end
 -- `uncat` rather than raising — this is a display total, not a data gate.
 -- Category deletion clears those ids normally, so a dangling id means the file
 -- was hand-edited or damaged.
-function categories.counts(lib)
+function categories.counts(lib, query)
   local by_id = {}
   for _, c in ipairs(lib.categories) do
     by_id[c.id] = 0
@@ -240,11 +244,13 @@ function categories.counts(lib)
 
   local all, uncat = 0, 0
   for _, s in ipairs(lib.sounds) do
-    all = all + 1
-    if s.category == nil or by_id[s.category] == nil then
-      uncat = uncat + 1
-    else
-      by_id[s.category] = by_id[s.category] + 1
+    if search.matches(s, query) then
+      all = all + 1
+      if s.category == nil or by_id[s.category] == nil then
+        uncat = uncat + 1
+      else
+        by_id[s.category] = by_id[s.category] + 1
+      end
     end
   end
 

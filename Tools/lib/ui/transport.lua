@@ -75,19 +75,19 @@ end
 ------------------------------------------------------- the transport controls
 
 -- PLAY/PAUSE AND STOP LIVE HERE ONCE AND BOTH WINDOWS DRAW THEM (2026-08-12,
--- when the Library gained a transport of its own): the working view's control
+-- when the Library gained a transport of its own): the Reference View's control
 -- cluster and the Library's info row call the same two functions, so the two
 -- transports cannot drift into looking or behaving differently — which is the
 -- whole reason the user asked for a full transport in the Library rather than a
 -- lone stop button.
 --
 -- Each draws ONE control-height square AT THE CURSOR. Placement stays with the
--- caller on purpose: the working view positions its cluster absolutely (its bar
+-- caller on purpose: the Reference View positions its cluster absolutely (its bar
 -- folds to two lines) while the browser lays its row out with SameLine, and a
 -- shared function that owned placement would have to speak both languages.
 --
 -- `opts` = { slot, id, sound }:
---   slot   which playback this pair speaks for — "main" (the working view and
+--   slot   which playback this pair speaks for — "main" (the Reference View and
 --          reference mode) or "browse" (the Library). It is stamped on the
 --          returned action as `target`, exactly the way the browser tags its
 --          seek, and the entry script reads it to decide whose remembered pause
@@ -101,7 +101,7 @@ end
 --
 -- The slot test matters as much as the id: there is ONE live preview and two
 -- windows that can speak for it, so without it a Library audition of the very
--- sound the working view has armed would light up both transports and let either
+-- sound the Reference View has armed would light up both transports and let either
 -- one pause it. Reading `state.preview.paused` directly (rather than through
 -- holders, which pulls in the adapters a ui/ module may not touch) is the same
 -- draw-from-state deal every other panel here has.
@@ -194,7 +194,7 @@ end
 -- The bar's shape at a given width, worked out WITHOUT drawing anything.
 -- `transport.measure` and `transport.draw` both go through here, so the height
 -- reserved for the bar can never disagree with the height it actually takes —
--- which matters because the working view reserves the bar FIRST and hands
+-- which matters because the Reference View reserves the bar FIRST and hands
 -- everything left to the waveform.
 --
 -- Full width, left to right:
@@ -400,7 +400,7 @@ local function geometry(ctx, width, count_w)
 end
 
 -- How tall the bar needs to be at `width`. Called before anything else is laid
--- out in the working view. `state` is needed because the count reserves its
+-- out in the Reference View. `state` is needed because the count reserves its
 -- width from the project's pin total.
 function transport.measure(ctx, width, state)
   return geometry(ctx, width, refpicker.count_width(ctx, state)).height
@@ -412,10 +412,9 @@ end
 -- inside REAPER calls this.
 transport._geometry = geometry
 
--- The reference-mode latch: a square like every other transport control since
--- 2026-07-30, faced with "L" for latch (2026-08-08, user's call — it wore "R"
--- for reference until then). Filled ACCENT while ON. Hover uses ACCENT_HOVER;
--- pressed returns to ACCENT so the button stays visibly latched.
+-- The reference-mode latch uses a chain link to show that reference playback
+-- follows the project transport. Filled ACCENT while ON. Hover uses
+-- ACCENT_HOVER; pressed returns to ACCENT so the button stays visibly latched.
 -- Fixed size always: latching signals itself by colour alone, never by changing
 -- shape.
 --
@@ -425,25 +424,31 @@ transport._geometry = geometry
 -- Genuine recovery failures are surfaced as errors instead of overloading this
 -- current-project control.
 --
--- The word "LATCH" is gone from the face. That's a real cost on the tool's least
--- self-explanatory control, so the tooltip carries the full explanation and the
--- accent fill still makes its on state clear.
-function transport.draw_latch(ctx, state)
+-- The icon cannot explain the safety behaviour by itself, so the tooltip carries
+-- the full explanation and the accent fill still makes the on state clear.
+function transport.draw_latch(ctx, state, font)
   local action
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local ref = state.reference
   local latched = ref.latched
+  local use_icon = font and icons.NAMES["link"]
   if latched then
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.ACCENT)
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), T.ACCENT_HOVER)
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.ACCENT)
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.TEXT_ON_ACCENT)
   end
-  if reaper.ImGui_Button(ctx, "L##reference", ctrl, ctrl) then
+  local clicked = reaper.ImGui_Button(ctx,
+    (use_icon and "" or "L") .. "##reference", ctrl, ctrl)
+  if use_icon then
+    icons.paint_over_item(ctx, font, "link",
+      latched and ON_ACCENT_FACE or nil)
+  end
+  if clicked then
     if not latched and not state.selected then
       -- Muting an empty project would buy silence for nothing. Opening this
-      -- project's chooser makes the missing step visible instead of making L
-      -- appear dead; once a reference is armed, L remains fully usable.
+      -- project's chooser makes the missing step visible instead of making
+      -- the latch appear dead; once a reference is armed, it is fully usable.
       refpicker.request_open()
     else
       action = { type = "toggle_reference" }
@@ -535,13 +540,13 @@ function transport.draw(ctx, state, res)
   -- item the frame it appears — the ring would jump onto it (the same
   -- last-item trap tips.show documents).
   local walk_x, walk_y = reaper.ImGui_GetCursorScreenPos(ctx)
-  action = transport.draw_latch(ctx, state) or action
+  action = transport.draw_latch(ctx, state, font) or action
   walkthrough_ui.note_rect(ctx, state.walkthrough, "latch",
     walk_x, walk_y, walk_x + ctrl, walk_y + ctrl)
 
   -- The transport cluster. The play/pause and stop squares are the SHARED pair
   -- (see the top of this file) — the Library's info row draws the same two —
-  -- pointed at the "main" slot, so they speak only for the working view even
+  -- pointed at the "main" slot, so they speak only for the Reference View even
   -- while the one live preview is a browse audition (Phase 5.9: independent
   -- browsing).
   --
@@ -565,8 +570,7 @@ function transport.draw(ctx, state, res)
 
   -- MONO: fold both channels together and hear the result in both speakers, the
   -- console mono button. Faced "M" rather than a glyph — Lucide has no icon that
-  -- reads as "mono", and an arbitrary one would need learning; the latch's "L"
-  -- already set the precedent that a letter is a legitimate face here.
+  -- reads as "mono", and an arbitrary one would need learning.
   --
   -- A plain accent-faced toggle like loop. Unlike the latch, it changes only
   -- what you hear right now and does not mute the project.
@@ -638,7 +642,7 @@ function transport.draw(ctx, state, res)
   -- when nothing is selected so the row never changes shape). Trim can boost as
   -- well as cut, unlike the master.
   --
-  -- Responsive collapse (tokens.md "working view — responsive collapse order"):
+  -- Responsive collapse (tokens.md "Reference View — responsive collapse order"):
   -- the trim gives way AFTER the count and the tech facts —
   -- and it collapses rather than hides (2026-08-07 brief pages 6/12): the
   -- track goes and the dB number itself becomes the control, so the value

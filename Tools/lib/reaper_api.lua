@@ -4,6 +4,7 @@
 -- what lets the rest of the code stay pure and unit-testable.
 
 local reaper_api = {}
+function reaper_api.now() return reaper.time_precise() end
 local product_error = require("product_error")
 
 local SEP = package.config:sub(1, 1) -- "\" on Windows, "/" elsewhere — never hard-coded
@@ -11,6 +12,13 @@ local SEP = package.config:sub(1, 1) -- "\" on Windows, "/" elsewhere — never 
 -- Join path segments with the OS separator.
 function reaper_api.join(...)
   return table.concat({ ... }, SEP)
+end
+
+-- Native monitor coordinates, excluding the taskbar. The caller converts its
+-- ImGui anchor first; REAPER's main window may be on a different monitor.
+function reaper_api.monitor_work_area(x, y)
+  x, y = math.floor(x), math.floor(y)
+  return reaper.my_getViewport(0, 0, 0, 0, x, y, x + 1, y + 1, true)
 end
 
 -- Is this dock id one of REAPER's FLOATING dockers? (2026-07-30)
@@ -84,6 +92,35 @@ function reaper_api.file_drag_mouse()
   if not reaper.JS_Mouse_GetState then return nil end
   local x, y = reaper.GetMousePosition()
   return x, y, (reaper.JS_Mouse_GetState(1) & 1) == 1
+end
+
+-- Ctrl/Shift/Alt state that does not depend on which REAPER child window owns
+-- keyboard focus. ReaImGui's modifier state belongs to its own context, so it
+-- can stop updating after the user works in Media Explorer and then wheels over
+-- this tool without first focusing it. js_ReaScriptAPI reads the physical keys
+-- directly; nil keeps the existing ReaImGui fallback on installs without it.
+-- Internal bits: Ctrl=1, Shift=2, Alt=4.
+function reaper_api.mouse_modifiers()
+  if not reaper.JS_Mouse_GetState then return nil end
+  local physical = reaper.JS_Mouse_GetState(4 | 8 | 16)
+  local modifiers = 0
+  if (physical & 4) ~= 0 then modifiers = modifiers | 1 end
+  if (physical & 8) ~= 0 then modifiers = modifiers | 2 end
+  if (physical & 16) ~= 0 then modifiers = modifiers | 4 end
+  return modifiers
+end
+
+-- Recording in a background project also protects it from new measurement
+-- passes. Ordinary playback and preview deliberately do not delay measurement.
+function reaper_api.recording_active()
+  local index = 0
+  while true do
+    local project = reaper.EnumProjects(index)
+    if not project then return false end
+    local play_state = reaper.GetPlayStateEx(project)
+    if (play_state & 4) ~= 0 then return true end
+    index = index + 1
+  end
 end
 
 -- Default library folder, under REAPER's user-data folder — never the script's
@@ -482,6 +519,15 @@ function reaper_api.set_loud_unit(field)
   reaper.SetExtState(EXT_SECTION, EXT_LOUD, field, true)
 end
 
+-- Both Pitch panels share a display preference, not a saved playback rate.
+function reaper_api.get_pitch_unit()
+  return reaper.GetExtState(EXT_SECTION, "pitch_unit")
+end
+
+function reaper_api.set_pitch_unit(unit)
+  reaper.SetExtState(EXT_SECTION, "pitch_unit", unit, true)
+end
+
 -- REAPER's own version string, e.g. "7.66/x64" (core/feedback strips the
 -- platform tail for display — it is always Windows 64-bit here).
 function reaper_api.app_version()
@@ -540,7 +586,7 @@ function reaper_api.set_match_target(text)
   end
 end
 
--- The working-view layout setting retired on 2026-08-06 (the reference-picker
+-- The Reference View layout setting retired on 2026-08-06 (the reference-picker
 -- redesign): the bar sits on the bottom, full stop — there is no arrangement
 -- left to choose between, so there is nothing to remember. Any value an older
 -- build left in ExtState is simply never read again.
@@ -627,7 +673,7 @@ function reaper_api.reveal_file(path)
   return false
 end
 
--- Open a FOLDER in the OS file browser — the working view's folder square, which
+-- Open a FOLDER in the OS file browser — the Reference View's folder square, which
 -- opens this project's References folder (where every pinned copy lives).
 -- Same shape as reveal_file above: SWS's clean shell call first, Explorer as the
 -- fallback, and an honest false when neither is available so the caller can say

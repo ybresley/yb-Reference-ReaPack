@@ -38,6 +38,21 @@ function search.matches(s, query)
   return in_text(s, query)
 end
 
+-- Project search matches filenames and optional labels, without changing pin
+-- order or searching Library-only notes. Empty search can use the live list.
+function search.filter_pins(list, query)
+  local q = (query or ""):match("^%s*(.-)%s*$"):lower()
+  if q == "" then return list end
+  local out = {}
+  for _, pin in ipairs(list) do
+    if (pin.name or ""):lower():find(q, 1, true)
+      or (pin.label or ""):lower():find(q, 1, true) then
+      out[#out + 1] = pin
+    end
+  end
+  return out
+end
+
 -- Return a new list of the sounds matching the view AND the query, in library
 -- order (sort is applied separately so the two concerns stay independent).
 function search.filter(lib, view, query)

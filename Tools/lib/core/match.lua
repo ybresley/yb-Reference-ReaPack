@@ -1,5 +1,5 @@
 -- match: the arithmetic behind "match this sound to a loudness target" — the
--- working view's target button and its match window (DESIGN.md, "Loudness").
+-- Reference View's target button and its match window (DESIGN.md, "Loudness").
 --
 -- Pure Lua. No reaper.*, no ImGui, no disk access. The UI shows what a match
 -- WOULD set and reports the click; this module owns the numbers, so the trim a

@@ -24,6 +24,7 @@
 local preview  = require("preview")
 local peaks    = require("peaks")
 local loudness = require("loudness")
+local copies   = require("analysis_copies")
 
 local holders = {}
 
@@ -68,15 +69,14 @@ function holders.forget_wave(slot) wave_asked[slot] = nil end
 
 --------------------------------------------------------------- the pause memory
 
--- Every slot that can remember a pause. "main" is the working view (and
--- reference mode); "browse" is the Library. Both windows carry a transport, so
--- both can park a position.
-local PAUSE_SLOTS = { "main", "browse" }
+-- Each playback surface remembers its own pause. The picker's pause lasts only
+-- while its normal list is open; Reference View and Library pauses outlive it.
+local PAUSE_SLOTS = { "main", "browse", "picker" }
 
 -- ONE REMEMBERED PAUSE PER SLOT, not one for the tool (2026-08-12, when the
 -- Library got its own transport). There is only ever one sound audible, but the
 -- two windows keep their places independently: a reference paused at 0:30 in the
--- working view has to still be sitting at 0:30 after the user has opened the
+-- Reference View has to still be sitting at 0:30 after the user has opened the
 -- Library, auditioned something else and paused THAT at 0:10. A single shared
 -- record made the second pause overwrite the first, which silently destroys the
 -- place the user was keeping in the sound they are actually working on.
@@ -117,7 +117,7 @@ end
 -- Tell the engine to stop sounding and put the shared preview fields back to
 -- idle — and NOTHING else. Separate from stop_playback because stopping the
 -- audio and forgetting where a slot was paused are two different acts: a
--- release that isn't the working view's (stop_browse_audition, below) needs
+-- release that isn't the Reference View's (stop_browse_audition, below) needs
 -- exactly this part, and so does the preview holder, whose matching pauses the
 -- pause holder clears per slot.
 function holders.stop_audio(state)
@@ -130,6 +130,16 @@ function holders.stop_audio(state)
   state.preview.position = 0
 end
 
+-- Capture the live position before stopping releases the source. Checking both
+-- ownership and sound prevents one surface from pausing another's playback.
+function holders.pause_playback(state, slot, id)
+  local live = state.preview
+  if not live.playing or live.slot ~= slot or id == nil or live.sound_id ~= id then return false end
+  holders.set_pause(state, slot, id, preview.position() or live.position, live.length)
+  holders.stop_audio(state)
+  return true
+end
+
 -- A full stop for one slot: whatever is sounding stops, and that slot's
 -- remembered pause goes with it — there is nothing left to resume. The slot is
 -- required, and it is what keeps one window's Stop button from wiping the other
@@ -139,7 +149,7 @@ function holders.stop_playback(state, slot)
   holders.clear_pause(state, slot)
 end
 
--- Stop the Library's own audition, and only that. The working view's
+-- Stop the Library's own audition, and only that. The Reference View's
 -- reference sounds through the exact same shared preview fields, so this
 -- checks the "browse" tag before touching anything at all — closing the
 -- Library must never interrupt a main-slot reference the user left playing.
@@ -147,14 +157,22 @@ end
 -- Deliberately clears NO pause, the browse slot's included. The main slot's was
 -- never this function's to touch and now cannot be reached from here anyway; the
 -- browse one is KEPT on purpose (2026-08-12), so reopening the Library finds the
--- audition still parked where the user paused it — the same promise the working
--- view's playhead makes. Closing a window is not a stop.
+-- audition still parked where the user paused it — the same promise the Reference
+-- View's playhead makes. Closing a window is not a stop.
 function holders.stop_browse_audition(state)
   if state.preview.slot ~= "browse" then return end
   holders.stop_audio(state)
 end
 
--- The working view's selection, dropped. Nothing is selected afterwards on
+-- A Reference View selection must not leave its previous waveform sounding.
+-- Library audition belongs to its own visible selection and is left alone.
+function holders.change_main_selection(state, id)
+  if state.selected_id == id then return end
+  if state.preview.slot == "main" then holders.stop_playback(state, "main") end
+  holders.clear_pause(state, "main")
+end
+
+-- The Reference View's selection, dropped. Nothing is selected afterwards on
 -- purpose: silently jumping the selection to a neighbouring row would start
 -- auditioning a sound nobody asked for.
 --
@@ -210,7 +228,8 @@ local HOLDERS = {
     name = "pause",
     ids  = function(state)
       local p = state.preview.paused
-      return p.main and p.main.sound_id, p.browse and p.browse.sound_id
+      return p.main and p.main.sound_id, p.browse and p.browse.sound_id,
+        p.picker and p.picker.sound_id
     end,
     let_go = function(state, _, matches)
       for i = 1, #PAUSE_SLOTS do
@@ -229,10 +248,8 @@ local HOLDERS = {
     end,
   },
   {
-    -- Loudness only ever runs on LIBRARY sounds, so no caller has to remember to
-    -- skip this for pins: a pin predicate simply never matches the id being
-    -- measured. The module knowing that fact is what removed it from four call
-    -- sites that each had to remember it separately.
+    -- Both project pins and Library sounds can own a measurement. The same
+    -- release rule handles unpinning, project changes and Library changes.
     name = "loudness",
     ids  = function() return loudness.current() end,
     let_go = function(_, token)
@@ -255,8 +272,8 @@ local HOLDERS = {
 }
 
 local function held_by(h, state, matches)
-  local a, b = h.ids(state)
-  return matches(a) or matches(b)
+  local a, b, c = h.ids(state)
+  return matches(a) or matches(b) or matches(c)
 end
 
 -- Who, if anyone, is holding this sound right now — the holder's name, or nil.
@@ -274,6 +291,8 @@ end
 -- background work that was interrupted — hand it to `restore` if the change this
 -- was clearing the way for ends up refused.
 function holders.release(state, matches)
+  -- Reusing readings is optional; a refused removal can measure independently.
+  copies.forget(state, matches)
   local token = { wave = { main = wave_asked.main, browse = wave_asked.browse } }
   for i = 1, #HOLDERS do
     local h = HOLDERS[i]

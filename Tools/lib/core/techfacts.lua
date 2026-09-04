@@ -1,6 +1,6 @@
 -- techfacts: one sound's technical facts as a line of text — "48 kHz · 24-bit ·
 -- WAV · stereo". Pure formatting, shared by the browser's info row and the
--- working-view bar (2026-08-07, the horizontal-layout brief): two copies of the
+-- Reference View bar (2026-08-07, the horizontal-layout brief): two copies of the
 -- same wording would drift the day one of them is edited, exactly the reason
 -- widgets.ellipsize exists.
 --

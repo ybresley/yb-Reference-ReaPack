@@ -36,6 +36,30 @@ function analysis.needs(sound)
   return sound.analysis ~= "done"
 end
 
+-- Older project snapshots can carry measurements without an analysis state.
+-- Keep those independent readings; only empty legacy pins need an automatic job.
+function analysis.pin_needs(pin)
+  if pin.analysis ~= nil then
+    return pin.analysis == "pending" or pin.analysis == "failed"
+  end
+  for _, field in ipairs(analysis.FIELDS) do
+    if pin[field] ~= nil then return false end
+  end
+  return true
+end
+
+-- Attempts are keyed by the actual record, not its id: every project starts at p1.
+function analysis.pin_queue(data, exclude_id, attempted)
+  local ids = {}
+  for _, pin in ipairs(data.pins) do
+    if pin.id ~= exclude_id and analysis.pin_needs(pin)
+      and not (attempted and attempted[pin]) then
+      ids[#ids + 1] = pin.id
+    end
+  end
+  return ids
+end
+
 -- The ids of every sound waiting to be measured, in library order. `exclude_id` is
 -- the sound already being measured right now — without it, rebuilding the queue
 -- (after an import, say) would line up a second pass over a sound mid-flight.

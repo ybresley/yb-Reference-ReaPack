@@ -16,11 +16,13 @@ local categories = require("core.categories")
 local techfacts = require("core.techfacts")
 local transport = require("ui.transport")
 local waveform = require("ui.waveform")
+local analysis_panel = require("ui.analysis_panel")
 local icons = require("ui.icons")
 local dropzone = require("ui.dropzone")
 local popups = require("ui.popups")
 local widgets = require("ui.widgets")
 local focus = require("ui.focus")
+local shortcuts = require("ui.browser_shortcuts")
 local walkthrough_ui = require("ui.walkthrough")
 local T = theme.tokens
 local M = theme.metrics
@@ -56,7 +58,7 @@ for _, name in ipairs({ "NoAlpha", "NoPicker", "NoTooltip", "NoDragDrop" }) do
 end
 
 -- Face for the info row's loop toggle when the Lucide icon font isn't
--- available; the same fallback the working view's bar uses.
+-- available; the same fallback the Reference View's bar uses.
 local LOOP = "\u{21BB}" -- ↻
 
 -- The rail scrollbars' bridges between frames (brief `table-scrollbar`,
@@ -319,8 +321,7 @@ end
 -- View-only state that never belongs in the shared library — kept here, not on
 -- `state`, so nothing outside ui/ sees it.
 local edit = { new_cat = "", rename = "", query = "", rename_id = nil, open = nil,
-  -- A bulk category delete confirmation. Single-category deletion keeps its
-  -- existing direct path; several selected rows get one explicit commitment.
+  -- Category deletion needs confirmation only when it would uncategorise sounds.
   cat_del = nil,
   -- The sound a delete confirmation is about. Kept apart from `open` above, which
   -- belongs to the sidebar: the sidebar is drawn first each frame and would consume
@@ -621,6 +622,41 @@ end
 
 local CATEGORY_COLOR_NAMES = { "Red", "Yellow", "Green", "Teal", "Blue", "Purple" }
 
+local function category_sound_count(state, ids)
+  local count = 0
+  for _, id in ipairs(ids) do count = count + (state.counts.by_id[id] or 0) end
+  return count
+end
+
+-- Mouse and keyboard deletion share the same confirmation rules.
+local function request_category_delete(state, ids)
+  if #ids == 0 then return nil end
+  if category_sound_count(state, ids) > 0 then
+    local cat = categories.get(state.library, ids[1])
+    edit.cat_del = { ids = ids, count = #ids, name = cat.name, color = cat.color, open = true }
+  elseif #ids > 1 then
+    return { type = "remove_categories", ids = ids }
+  else
+    return { type = "remove_category", id = ids[1] }
+  end
+end
+
+local function request_sound_delete(ids, name)
+  edit.del = { ids = ids, name = name, count = #ids, open = true }
+end
+
+local function pane_shortcut(ctx, state, pane)
+  local intent = shortcuts.read(ctx, state, pane, dropzone.file_drag_active())
+  if not intent then return nil end
+  if intent.type == "request_delete_categories" then
+    return request_category_delete(state, intent.ids)
+  elseif intent.type == "request_delete_sounds" then
+    request_sound_delete(intent.ids, intent.name)
+    return nil
+  end
+  return intent
+end
+
 -- The compact palette at the top of a category's right-click menu. Choosing a
 -- colour closes the menu immediately; the entry script saves the returned
 -- action in the same frame. The current colour gets both a ring and a check so
@@ -681,63 +717,56 @@ local function category_menu(ctx, state, cat)
         edit.rename_id, edit.rename, edit.open = cat.id, cat.name, "rename_cat"
       end
     end
-    local label = #ids > 1 and string.format("Delete %d Categories\u{2026}", #ids) or "Delete"
+    local sound_count = category_sound_count(state, ids)
+    local label = #ids > 1 and string.format("Delete %d Categories", #ids) or "Delete"
+    if sound_count > 0 then label = label .. "\u{2026}" end
     if reaper.ImGui_MenuItem(ctx, label) then
-      if #ids > 1 then
-        edit.cat_del = { ids = ids, count = #ids, open = true }
-      else
-        action = { type = "remove_category", id = cat.id }
-      end
+      action = request_category_delete(state, ids)
     end
     reaper.ImGui_EndPopup(ctx)
   end
   return action
 end
 
-local function delete_categories_modal(count)
-  return string.format("DELETE %d CATEGORIES###confirm_delete_categories", count)
+local function delete_categories_popup(count)
+  return count > 1
+    and string.format("DELETE %d CATEGORIES###confirm_delete_categories", count)
+    or "DELETE CATEGORY###confirm_delete_categories"
 end
 
 local function draw_category_delete_confirm(ctx)
   local del = edit.cat_del
   if not del then return nil end
-  local modal_id = delete_categories_modal(del.count)
+  local popup_id = delete_categories_popup(del.count)
+  local heading = del.count > 1 and string.format("Delete %d categories?", del.count)
+    or string.format("Delete %s?", del.name)
+  local explanation = "Sounds move to Uncategorised.\nThis can't be undone."
 
   if del.open then
-    reaper.ImGui_OpenPopup(ctx, modal_id)
+    reaper.ImGui_OpenPopup(ctx, popup_id)
     del.open = false
   end
 
-  if HAS_SIZE_CONSTRAINTS then
-    reaper.ImGui_SetNextWindowSizeConstraints(ctx,
-      M.CATEGORY_DELETE_W, 0, M.CATEGORY_DELETE_W, 10000)
-  else
-    reaper.ImGui_SetNextWindowSize(ctx, M.CATEGORY_DELETE_W, 0, reaper.ImGui_Cond_Appearing())
-  end
+  popups.fit_width(ctx, heading, explanation)
   local action
-  local centred = theme.push_title_center(ctx)
-  local modal_open = reaper.ImGui_BeginPopupModal(ctx, modal_id, nil,
-    reaper.ImGui_WindowFlags_AlwaysAutoResize())
-  theme.pop_title_center(ctx, centred)
-  if modal_open then
+  -- Ordinary popups keep both panels undimmed; dismissal never confirms deletion.
+  if reaper.ImGui_BeginPopup(ctx, popup_id) then
     if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, 0) end
-    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
-      "Sounds in these categories stay in the Library and become Uncategorised.")
-    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
-      "This can't be undone.")
+    if del.count > 1 then
+      reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, heading)
+    else
+      popups.name_question(ctx, del.name, del.color)
+    end
+    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, explanation)
     if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
-    reaper.ImGui_Dummy(ctx, 0, M.ITEM_SPACING_Y)
 
-    local buttons_w = M.POPUP_BTN_W * 2 + M.ITEM_SPACING_X
-    reaper.ImGui_SetCursorPosX(ctx,
-      reaper.ImGui_GetCursorPosX(ctx) + select(1, reaper.ImGui_GetContentRegionAvail(ctx)) - buttons_w)
-    if reaper.ImGui_Button(ctx, "Cancel", M.POPUP_BTN_W) then
+    local cancel, delete = widgets.action_pair(ctx, "Cancel", "Delete")
+    if cancel then
       edit.cat_del = nil
       reaper.ImGui_CloseCurrentPopup(ctx)
-    end
-    reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Delete", M.POPUP_BTN_W) then
-      action = { type = "remove_categories", ids = del.ids }
+    elseif delete then
+      action = del.count > 1 and { type = "remove_categories", ids = del.ids }
+        or { type = "remove_category", id = del.ids[1] }
       edit.cat_del = nil
       reaper.ImGui_CloseCurrentPopup(ctx)
     end
@@ -763,13 +792,25 @@ local function sidebar_context(ctx)
   end
 end
 
--- The category list that scrolls between the pinned views. Its own child so All
--- sounds (above) and Uncategorised + the New-category button (below) stay put at
--- any list length (2026-07-29 review — "Uncategorised will end up hidden below").
+-- Menu requests open after leaving the closing menu's scope.
+local function draw_category_edit_popups(ctx)
+  if edit.open then
+    reaper.ImGui_OpenPopup(ctx, edit.open)
+    edit.open = nil
+  end
+  local action
+  local newcat = popups.edit_popup(ctx, edit, "add_cat", "New Category", "new_cat")
+  if newcat then action = { type = "add_category", name = newcat } end
+  local renamed = popups.edit_popup(ctx, edit, "rename_cat", "Rename Category", "rename")
+  if renamed then action = { type = "rename_category", id = edit.rename_id, name = renamed } end
+  return action
+end
+
+-- The category child scrolls without moving the fixed views above it.
 local function draw_categories(ctx, state, hit_right_pad)
   local action
   local lib = state.library
-  local counts = state.counts
+  local counts = state.sidebar_counts
 
   category_drag.count = 0
   for _, cat in ipairs(lib.categories) do
@@ -837,7 +878,7 @@ end
 
 local function draw_sidebar(ctx, state)
   local action
-  local counts = state.counts
+  local counts = state.sidebar_counts
 
   -- Rows sit tight (2026-07-29, "we don't need an empty row between
   -- subcategories") — only the deliberate block separators breathe.
@@ -935,15 +976,7 @@ local function draw_sidebar(ctx, state)
   sidebar_context(ctx) -- empty space around the pinned rows
 
   -- Open a context-menu-requested popup (deferred so it isn't nested in the menu).
-  if edit.open then
-    reaper.ImGui_OpenPopup(ctx, edit.open)
-    edit.open = nil
-  end
-
-  local newcat = popups.edit_popup(ctx, edit, "add_cat", "New Category", "new_cat")
-  if newcat then action = { type = "add_category", name = newcat } end
-  local renamed = popups.edit_popup(ctx, edit, "rename_cat", "Rename Category", "rename")
-  if renamed then action = { type = "rename_category", id = edit.rename_id, name = renamed } end
+  action = draw_category_edit_popups(ctx) or action
 
   reaper.ImGui_PopStyleVar(ctx, 1)
   return action or draw_category_delete_confirm(ctx)
@@ -1119,18 +1152,9 @@ local function draw_header_menu(ctx, state)
   return action
 end
 
--- The one confirmation a delete gets. Modal, so it can't be left half-answered
--- behind the list, and drawn after the table so it isn't tied to a row that the
--- clipper may scroll out of existence mid-decision.
---
--- ONE string for OpenPopup and BeginPopupModal, and it must be the SAME string.
--- ImGui's "###" does NOT strip down to the id for matching — a label
--- "DELETE SOUND###confirm_delete" hashes as "###confirm_delete", which is a
--- DIFFERENT id from plain "confirm_delete". The 2026-08-08 recasing changed
--- only the Begin side, so OpenPopup fired at an id no popup owned and Delete
--- silently stopped working (caught by the 2026-08-09 Fable review; the same
--- misconception is recorded in the UI skill's ReaImGui gotchas reference).
-local function delete_modal(count)
+-- Draw after the table so scrolling a row out of view cannot lose its warning.
+-- OpenPopup and BeginPopup must use the same full ID, including the title.
+local function delete_popup(count)
   return count > 1
     and string.format("DELETE %d SOUNDS###confirm_delete", count)
     or "DELETE SOUND###confirm_delete"
@@ -1140,47 +1164,35 @@ local function draw_delete_confirm(ctx)
   local del = edit.del
   if not del then return nil end
 
-  local modal_id = delete_modal(del.count or 1)
+  local popup_id = delete_popup(del.count or 1)
+  local count = del.count or 1
+  local heading = count > 1 and string.format("Delete %d sounds?", count)
+    or string.format("Delete %s?", del.name)
+  local explanation = "Audio and records move to this Library's trash.\nyb-Reference can't restore them yet."
   if del.open then
-    reaper.ImGui_OpenPopup(ctx, modal_id)
+    reaper.ImGui_OpenPopup(ctx, popup_id)
     del.open = false
   end
 
-  -- The one titled panel that doesn't come through theme.begin_window (a modal
-  -- begins itself), so it pushes the centred title by hand rather than being
-  -- the single panel in the tool wearing its name on the left.
-  local centred = theme.push_title_center(ctx)
-  local modal_open = reaper.ImGui_BeginPopupModal(ctx, modal_id, nil,
-    reaper.ImGui_WindowFlags_AlwaysAutoResize())
-  theme.pop_title_center(ctx, centred)
-  if modal_open then
-    local count = del.count or 1
-    local heading = count > 1 and string.format("Delete %d sounds?", count)
-      or string.format("Delete \"%s\"?", del.name)
+  popups.fit_width(ctx, heading, explanation)
+  -- A modal would dim the other windows even with a transparent local backdrop.
+  if reaper.ImGui_BeginPopup(ctx, popup_id) then
+    if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, 0) end
     reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, heading)
-    reaper.ImGui_Dummy(ctx, 0, 4)
-    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
-      count > 1 and "The sounds and their Library records move to this Library's"
-        or "The sound and its Library record move to this Library's")
-    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
-      "trash folder.")
-    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
-      "yb-Reference can't restore deleted sounds yet.")
-    reaper.ImGui_Dummy(ctx, 0, 8)
-    if reaper.ImGui_Button(ctx, "Delete", M.POPUP_BTN_W) then
-      action = { type = "delete_sounds", ids = del.ids or { del.id } }
+    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, explanation)
+    if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
+    local cancel, delete = widgets.action_pair(ctx, "Cancel", "Delete")
+    if cancel then
       edit.del = nil
       reaper.ImGui_CloseCurrentPopup(ctx)
-    end
-    reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Cancel", M.POPUP_BTN_W) then
+    elseif delete then
+      action = { type = "delete_sounds", ids = del.ids or { del.id } }
       edit.del = nil
       reaper.ImGui_CloseCurrentPopup(ctx)
     end
     reaper.ImGui_EndPopup(ctx)
   elseif not del.open then
-    -- Dismissed with Escape rather than a button: forget the sound, or the next
-    -- right-click would find a stale one waiting.
+    -- Escape or an outside click cancels; discard the pending selection.
     edit.del = nil
   end
 
@@ -1228,6 +1240,26 @@ local function sounds_table_id(state)
     table_id_gen, table_id_scale = gen, scale
   end
   return table_id
+end
+
+local function sound_menu(ctx, state, sound)
+  local action
+  local pinned = state.pins and state.pins.by_origin[sound.id]
+  if reaper.ImGui_BeginPopupContextItem(ctx, "row_" .. sound.id) then
+    local ids = sound_action_ids(state, sound.id)
+    if pinned then
+      if reaper.ImGui_MenuItem(ctx, "Unpin (Keep Audio Copy)") then
+        action = { type = "unpin", id = pinned.id }
+      end
+    elseif reaper.ImGui_MenuItem(ctx, "Pin To This Project") then
+      action = { type = "pin_sounds", ids = ids }
+    end
+    if reaper.ImGui_MenuItem(ctx, "Delete\u{2026}") then
+      request_sound_delete(ids, sound.name)
+    end
+    reaper.ImGui_EndPopup(ctx)
+  end
+  return action
 end
 
 local function draw_sound_list(ctx, state, res)
@@ -1529,7 +1561,7 @@ local function draw_sound_list(ctx, state, res)
       -- — the sidebar echo answers "where does this sound live?" — and the pin
       -- marker moved to its own column at the row's end.
       --
-      -- Browsing is its OWN selection, independent of the working view's armed
+      -- Browsing is its OWN selection, independent of the Reference View's armed
       -- reference (Phase 5.9) — this row must never touch state.selected*, or
       -- clicking through the library while comparing would silently retarget
       -- (and re-audition) whatever the user has armed there.
@@ -1589,7 +1621,7 @@ local function draw_sound_list(ctx, state, res)
         set_echo(s)
       end
       -- Holding a row and moving the mouse starts a drag: out to REAPER's timeline,
-      -- or onto the working view's reference row to pin it. ImGui's own drag-and-drop
+      -- or onto the Reference View's reference row to pin it. ImGui's own drag-and-drop
       -- can't leave the window, so all this reports is "a drag has begun" — where it
       -- lands is worked out when the mouse is let go.
       if state.deps.drag_out and not state.drag
@@ -1602,20 +1634,7 @@ local function draw_sound_list(ctx, state, res)
       -- from in here (we're inside the closing menu) — stash which sound it's about
       -- and open it below, once the table is finished.
       local pinned = state.pins and state.pins.by_origin[s.id]
-      if reaper.ImGui_BeginPopupContextItem(ctx, "row_" .. s.id) then
-        local ids = sound_action_ids(state, s.id)
-        if pinned then
-          if reaper.ImGui_MenuItem(ctx, "Unpin (Keep Audio Copy)") then
-            action = { type = "unpin", id = pinned.id }
-          end
-        elseif reaper.ImGui_MenuItem(ctx, "Pin To This Project") then
-          action = { type = "pin_sounds", ids = ids }
-        end
-        if reaper.ImGui_MenuItem(ctx, "Delete\u{2026}") then
-          edit.del = { ids = ids, id = s.id, name = s.name, count = #ids, open = true }
-        end
-        reaper.ImGui_EndPopup(ctx)
-      end
+      action = sound_menu(ctx, state, s) or action
 
       reaper.ImGui_TableNextColumn(ctx)
       num_cell(ctx, T.TEXT_TERTIARY, fmt_duration(s.duration), row_h)
@@ -1692,11 +1711,12 @@ end
 -- Fallback guidance for the strip's idle face — what the old status row's
 -- default hint used to say, updated for the labelled Add button.
 local IDLE_HINT = "Choose a sound to audition it. Drag audio files here or use + Add Sounds."
+local EMPTY_HINT = "Library is empty. Drag audio files here or use + Add Sounds."
 
 -- The info row's tech-details line ("48 kHz · 24-bit · WAV · stereo"), rebuilt
 -- only when the browsed sound changes — never formatted per frame (frame-
 -- allocation rule). The wording itself is core.techfacts.format, shared with
--- the working-view bar since 2026-08-07 so the two lines can't drift apart.
+-- the Reference View bar since 2026-08-07 so the two lines can't drift apart.
 -- Keyed on the info TABLE as well as the id (Codex, 2026-07-29 review):
 -- browse_sound builds a fresh info table on every pick, so re-picking the same
 -- row after its file came back (or went away) invalidates the cache — an
@@ -1715,44 +1735,18 @@ local function tech_line(state)
   return tech.text
 end
 
--- The magnifier inside the search field's left padding (SEARCH_ICON_PAD clears
--- it). Drawn over the just-submitted input item.
-local function search_icon(ctx, font)
-  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
-  local _, y1 = reaper.ImGui_GetItemRectMax(ctx)
-  local cy = (y0 + y1) * 0.5
-  local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  local cp = icons.NAMES["search"]
-  if font and cp then
-    local gs = M.ICON_SM_FS
-    local glyph = utf8.char(cp)
-    reaper.ImGui_PushFont(ctx, font, gs)
-    local tw, th = reaper.ImGui_CalcTextSize(ctx, glyph)
-    reaper.ImGui_PopFont(ctx)
-    reaper.ImGui_DrawList_AddTextEx(dl, font, gs,
-      x0 + (M.SEARCH_ICON_PAD - tw) * 0.5, cy - th * 0.5, T.TEXT_TERTIARY, glyph)
-  else
-    icons.draw_search(dl, x0 + M.SEARCH_ICON_PAD * 0.5, cy, T.TEXT_TERTIARY)
-  end
-end
-
 -- Toolbar (2026-07-29 review): search top-left on the list it filters; the one
 -- global action top-right — Add sounds, labelled. The folder and gear squares
 -- that used to follow it left on 2026-08-10 (`.brief/settings-move`): the gear
--- lives in the working view's bar now, and the folder became a Settings row.
+-- lives in the Reference View's bar now, and the folder became a Settings row.
 local function draw_toolbar(ctx, state, res)
   local action
 
   -- The search field: filled, no outline, magnifier embedded in its left
   -- padding, hint dimmer than typed text (theme's TextDisabled) — a native-tool
   -- search, not a web form.
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), M.SEARCH_ICON_PAD, M.FRAME_PAD_Y)
-  reaper.ImGui_SetNextItemWidth(ctx, M.SEARCH_W)
   -- Local buffer drives the box immediately; the entry re-filters next frame.
-  local _, q = reaper.ImGui_InputTextWithHint(ctx, "##search", "Search", edit.query or "")
-  reaper.ImGui_PopStyleVar(ctx, 2)
-  search_icon(ctx, res.icon_font)
+  local _, q = widgets.search_input(ctx, res.icon_font, "##search", "Search", edit.query or "", M.SEARCH_W)
   -- Searching means the SOUND LIST is what's being narrowed — while the box is
   -- active the arrows step results, whatever pane was clicked before.
   if reaper.ImGui_IsItemActive(ctx) then nav_owner = "list" end
@@ -1791,7 +1785,7 @@ local function draw_main(ctx, state, res)
 
   -- Height budget: the strip and the info row are anchored to the bottom, the
   -- table takes everything in between (the 2026-07-29 arrangement — results on
-  -- top, preview at the bottom, mirroring the working view's waveform-then-
+  -- top, preview at the bottom, mirroring the Reference View's waveform-then-
   -- controls order).
   local gap_y = select(2, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
   local info_h = reaper.ImGui_GetFrameHeight(ctx)
@@ -1833,10 +1827,11 @@ local function draw_main(ctx, state, res)
   -- and nothing that could reach the row menus drawn inside it.
   local list_open = reaper.ImGui_BeginChild(ctx, "listarea", 0, list_h, 0, no_scroll)
   if list_open then
+    local shortcut_action = pane_shortcut(ctx, state, "list")
     -- Always draw the list (never short-circuit it behind `action or ...`, which
     -- would blank the list for a frame whenever the search box set an action).
     local list_action = draw_sound_list(ctx, state, res)
-    action = action or list_action
+    action = action or list_action or shortcut_action
     reaper.ImGui_EndChild(ctx)
     -- The categories stop keeps the list BRIGHT (context, not ringed) so a
     -- category click visibly filters it.
@@ -1845,7 +1840,7 @@ local function draw_main(ctx, state, res)
   -- The main panel's drop target spans the list AND the audition strip below
   -- it (2026-08-01, user's call) — the list rect is captured here, the one
   -- rect-based target (dropzone.file_drop_over_rect, the same mechanism as the
-  -- working view) is submitted after the strip is drawn, once the combined
+  -- Reference View) is submitted after the strip is drawn, once the combined
   -- rect is known. Guarded by list_open so a clipped-away child can't leave a
   -- stale rect.
   local list_rect
@@ -1913,9 +1908,9 @@ local function draw_main(ctx, state, res)
   end
 
   -- Compact audition strip, now the bottom pane (2026-07-29): the exact same
-  -- waveform WIDGET as the working view — click-to-seek, playhead, loop visuals
+  -- waveform WIDGET as the Reference View — click-to-seek, playhead, loop visuals
   -- — at a fixed browsing height. It draws the BROWSER's own selection
-  -- (state.browse_id/browse_waveform), never the working view's armed reference
+  -- (state.browse_id/browse_waveform), never the Reference View's armed reference
   -- (Phase 5.9 — independent selections). Deliberately no REF latch and no trim
   -- here (DESIGN — browsing can never surprise-mute). The returned seek is
   -- tagged target="browse" so the entry script acts on the BROWSED sound.
@@ -1924,13 +1919,13 @@ local function draw_main(ctx, state, res)
   -- the strip draws the sound as recorded to match. Passing the stored trim here
   -- would draw a level nobody is hearing.
   --
-  -- The strip carries the same time ruler as the working view since 2026-08-06
+  -- The strip carries the same time ruler as the Reference View since 2026-08-06
   -- (user reversal of the original strip-stays-bare brief pick, after living
-  -- with the working-view ruler). The bars keep their full height (wave_h —
+  -- with the Reference View ruler). The bars keep their full height (wave_h —
   -- BROWSER_WAVE_H by default, drag-resizable via the seam above): the block
   -- grows by RULER_H and the table above pays for it (list_h). Its own cache
   -- slot ("browse") so the two windows never thrash one entry.
-  local wave_action = waveform.draw(ctx, state, wave_h,
+  local wave_action, wave_id, wave_cols, sx0, sy0, sx1, sy1 = waveform.draw(ctx, state, wave_h,
     { id = state.browse_id, waveform = state.browse_waveform,
       ruler = true, slot = "browse",
       duration = state.browse and state.browse.duration or nil })
@@ -1938,32 +1933,32 @@ local function draw_main(ctx, state, res)
   action = action or wave_action
   -- The strip's rect (the waveform widget's own item), for the combined list +
   -- strip drop target submitted below the idle-face drawing.
-  local sx0, sy0 = reaper.ImGui_GetItemRectMin(ctx)
-  local sx1, sy1 = reaper.ImGui_GetItemRectMax(ctx)
+  local show_progress = analysis_panel.is_visible(state, "browse", dropzone.file_drag_active())
+  local idle_message = not state.browse and ((state.drag and state.drag.hint) or state.status)
+  if show_progress then
+    -- Import summaries and errors remain below progress in the empty strip.
+    -- Reserving this space affects only the overlay, never the waveform layout.
+    local bottom = idle_message and sy1 - M.GROUP_FS - M.ANALYSIS_CARD_GAP * 2 or sy1
+    analysis_panel.draw(ctx, state.analysis_progress, sx0, sy0, sx1, bottom)
+  end
 
   -- The strip's idle face carries what the retired status row used to say:
   -- the drag hint while one is in flight, a standing status message, else the
-  -- how-to line. Drawn over the empty strip (its InvisibleButton was the last
-  -- item), never laid out — so nothing can shift.
-  if not state.browse then
-    local msg = (state.drag and state.drag.hint) or state.status or IDLE_HINT
-    local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
-    local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  -- how-to line. Progress shares the strip with real messages, but replaces the
+  -- idle hint. Both are painted without moving controls.
+  if not state.browse and (not show_progress or idle_message) then
+    local hint = #state.library.sounds == 0 and EMPTY_HINT or IDLE_HINT
+    local msg = idle_message or hint
+    local x0, y0, x1, y1 = sx0, sy0, sx1, sy1
     local dl = reaper.ImGui_GetWindowDrawList(ctx)
     local col = state.drag and T.TEXT_PRIMARY or T.TEXT_TERTIARY
-    if HAS_TEXT_EX then
-      local small = theme.push_small_font(ctx)
-      local tw, th = reaper.ImGui_CalcTextSize(ctx, msg)
-      if small then reaper.ImGui_PopFont(ctx) end
-      local tx = x0 + ((x1 - x0) - tw) * 0.5
-      if tx < x0 + 12 then tx = x0 + 12 end -- a long message left-aligns instead of vanishing off both ends
-      reaper.ImGui_DrawList_AddTextEx(dl, nil, M.GROUP_FS, tx, (y0 + y1) * 0.5 - th * 0.5, col, msg)
-    else
-      local tw, th = reaper.ImGui_CalcTextSize(ctx, msg)
-      local tx = x0 + ((x1 - x0) - tw) * 0.5
-      if tx < x0 + 12 then tx = x0 + 12 end
-      reaper.ImGui_DrawList_AddText(dl, tx, (y0 + y1) * 0.5 - th * 0.5, col, msg)
-    end
+    local small = theme.push_small_font(ctx)
+    local shown = widgets.ellipsize(ctx, msg, math.max(0, x1 - x0 - M.WINDOW_PAD * 2))
+    local tw, th = reaper.ImGui_CalcTextSize(ctx, shown)
+    local tx = math.floor(x0 + ((x1 - x0) - tw) * 0.5)
+    local ty = show_progress and y1 - th - M.ANALYSIS_CARD_GAP or (y0 + y1 - th) * 0.5
+    reaper.ImGui_DrawList_AddText(dl, tx, math.floor(ty), col, shown)
+    if small then reaper.ImGui_PopFont(ctx) end
   end
 
   -- The combined list + audition-strip drop target (see the list_rect capture
@@ -1995,7 +1990,7 @@ local function draw_main(ctx, state, res)
   local btn = reaper.ImGui_GetFrameHeight(ctx)
   local gap_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
   -- The right block is play/pause + stop + loop + pitch + the ear + the PREVIEW fader.
-  -- (The ear joined 2026-08-07, moved out of the working view's bar:
+  -- (The ear joined 2026-08-07, moved out of the Reference View's bar:
   -- auto-audition only ever governed THIS window's click-to-hear, so it sits
   -- beside the audition strip it controls; loop joined it 2026-08-11 so
   -- browsing doesn't need the other window to repeat a sound; the transport
@@ -2036,12 +2031,12 @@ local function draw_main(ctx, state, res)
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local target = cx + avail - fader_block
   if target > cx then reaper.ImGui_SetCursorPosX(ctx, target) end
-  -- The transport pair (2026-08-12), leading the block in the working view's
+  -- The transport pair (2026-08-12), leading the block in the Reference View's
   -- own order — play/pause, stop, then loop — and drawn by the SAME two
   -- functions that view's cluster uses (ui/transport.lua), so the two
   -- windows' transports cannot drift apart. Pointed at the "browse" slot:
   -- they act on the sound on the strip, and the pause they park is the
-  -- Library's own, never the working view's.
+  -- Library's own, never the Reference View's.
   --
   -- Clicking a row still auditions from the start, exactly as before — this
   -- pair is how you stop one, and how you pick a paused audition back up.
@@ -2052,7 +2047,7 @@ local function draw_main(ctx, state, res)
   local stop_action = transport.draw_stop(ctx, state, res.icon_font, browse_slot)
   action = action or stop_action
   reaper.ImGui_SameLine(ctx)
-  -- The SAME loop setting the working view's bar carries (state.loop): one
+  -- The SAME loop setting the Reference View's bar carries (state.loop): one
   -- truth, reachable from whichever window you're listening in.
   if widgets.toggle(ctx, "browseloop", LOOP, state.loop,
       "Loop: keep the sound repeating until you stop it",
@@ -2075,7 +2070,7 @@ local function draw_main(ctx, state, res)
   -- Settings is drawn by ui/app.lua, not here: since 2026-08-08 it is a real
   -- top-level window rather than a modal inside this panel, so closing the
   -- browser must not take it with it. Since 2026-08-10 nothing in this window
-  -- touches it at all — the gear lives in the working view's bar.
+  -- touches it at all — the gear lives in the Reference View's bar.
 
   return action
 end
@@ -2197,7 +2192,9 @@ function browser.draw(ctx, state, res)
   local sb_open = reaper.ImGui_BeginChild(ctx, sidebar_id, M.SIDEBAR_W, 0, sb_flags)
   reaper.ImGui_PopStyleVar(ctx, 1)
   if sb_open then
-    action = merge_action(action, draw_sidebar(ctx, state))
+    local shortcut_action = pane_shortcut(ctx, state, "sidebar")
+    local sidebar_action = draw_sidebar(ctx, state)
+    action = merge_action(action, sidebar_action or shortcut_action)
     reaper.ImGui_EndChild(ctx)
     -- Walkthrough stop 3 rings the whole sidebar (the closed child is the
     -- last item here — the seam line below reads the same rect).
@@ -2239,6 +2236,61 @@ function browser.draw(ctx, state, res)
   nav.list_row, nav.view = nil, nil
 
   return action
+end
+
+-- The isolated review script seeds transient inputs and calls the production
+-- drawers in one stable scope. As in browser.draw, returned actions are intent
+-- only; the caller decides whether to apply them to its sample state.
+function browser.draw_gallery(ctx, state, res, spec, opening)
+  local kind, ids = spec.kind, spec.ids or {}
+  local action
+  if opening then
+    edit.del, edit.cat_del, edit.open = nil, nil, nil
+    if kind == "delete_sound" then
+      request_sound_delete(ids, spec.name)
+    elseif kind == "delete_category" then
+      action = request_category_delete(state, ids)
+    elseif kind == "new_category" then
+      edit.new_cat, edit.open = spec.name or "", "add_cat"
+    elseif kind == "rename_category" then
+      edit.rename_id, edit.rename, edit.open = ids[1], spec.name or "", "rename_cat"
+    elseif kind == "category_menu" then
+      reaper.ImGui_OpenPopup(ctx, "ctx_" .. ids[1])
+    elseif kind == "sidebar_menu" then
+      reaper.ImGui_OpenPopup(ctx, "sb_ctx")
+    elseif kind == "header_menu" then
+      menu_col = spec.loud_header and LOUD_COL or 0
+      reaper.ImGui_OpenPopup(ctx, "hdr_menu")
+    elseif kind == "sound_menu" then
+      reaper.ImGui_OpenPopup(ctx, "row_" .. ids[1])
+    end
+  end
+  -- Category menus and entry fields inherit the sidebar's tighter spacing.
+  local sidebar_spacing = kind == "category_menu" or kind == "sidebar_menu"
+    or kind == "new_category" or kind == "rename_category"
+  if sidebar_spacing then
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), M.ITEM_SPACING_X, M.SB_ROW_GAP)
+  end
+  if kind == "category_menu" then
+    local cat = categories.get(state.library, ids[1])
+    if cat then action = category_menu(ctx, state, cat) or action end
+  elseif kind == "sidebar_menu" then
+    sidebar_context(ctx)
+  elseif kind == "header_menu" then
+    action = draw_header_menu(ctx, state) or action
+  elseif kind == "sound_menu" then
+    for _, sound in ipairs(state.library.sounds) do
+      if sound.id == ids[1] then
+        action = sound_menu(ctx, state, sound) or action
+        break
+      end
+    end
+  end
+  local edited = draw_category_edit_popups(ctx)
+  if sidebar_spacing then reaper.ImGui_PopStyleVar(ctx, 1) end
+  local category_deleted = draw_category_delete_confirm(ctx)
+  local sound_deleted = draw_delete_confirm(ctx)
+  return sound_deleted or category_deleted or edited or action
 end
 
 return browser

@@ -23,6 +23,7 @@
 local pins       = require("core.pins")
 local importer   = require("core.importer")
 local analysis   = require("core.analysis")
+local copies     = require("analysis_copies")
 local store      = require("core.library_store")
 local reaper_api = require("reaper_api")
 local project    = require("project_state")
@@ -270,6 +271,7 @@ function service.pin_sound(state, sound)
       "couldn't be saved in your project.", sound.name)
   end
 
+  copies.remember(state, sound, record)
   rebuild_markers(state)
   return true, string.format("\"%s\" is pinned to this project. Save the project to keep it.", sound.name),
     record.id
@@ -303,6 +305,7 @@ function service.unpin(state, pin_id)
     return false, reason or
       string.format("\"%s\" couldn't be unpinned because the change couldn't be saved in your project.", p.name)
   end
+  copies.forget(state, function(id) return id == pin_id end)
   rebuild_markers(state)
   return true, string.format(
     "\"%s\" is unpinned. Save the project to keep this change. Its audio remains in the References folder.",
@@ -530,6 +533,36 @@ function service.reset_pins(state)
   rebuild_markers(state)
   return true, "This project's pinned references were reset. Pinning works here again. " ..
     "Save the project to keep this change."
+end
+
+-- Land the result of a job that was requested for one particular pin. The
+-- caller keeps the record itself with the job: checking that identity here
+-- prevents a late result from changing a replacement that reused the same id.
+-- A failed pass keeps the numbers already in the snapshot; it only records the
+-- failed state so a later retry can be told apart from a pending first pass.
+function service.complete_analysis(state, expected_pin, results)
+  local ps = state.pins
+  local current = ps and pins.find(ps.data, expected_pin and expected_pin.id)
+  if not current or current ~= expected_pin or not analysis.pin_needs(current) then return false, nil end
+
+  local old = { analysis = current.analysis }
+  for _, field in ipairs(analysis.FIELDS) do old[field] = current[field] end
+  local ok, reason = service.edit(state, function()
+    if results then
+      for _, field in ipairs(analysis.FIELDS) do current[field] = results[field] end
+      current.analysis = "done"
+    else
+      current.analysis = "failed"
+    end
+    return function()
+      current.analysis = old.analysis
+      for _, field in ipairs(analysis.FIELDS) do current[field] = old[field] end
+    end
+  end)
+  if not ok then
+    return false, reason or "The pin's loudness result couldn't be saved in the project."
+  end
+  return true
 end
 
 return service

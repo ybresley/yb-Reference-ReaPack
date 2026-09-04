@@ -4,7 +4,7 @@
 --
 -- What it does, from the user's side: once a day (and at tool startup) it
 -- quietly downloads the tool's own ReaPack catalog and, if a newer version is
--- listed, lights the accent dot on the working view's Settings gear; UPDATES
+-- listed, lights the accent dot on the Reference View's Settings gear; UPDATES
 -- section then offers "Update now", which makes ReaPack update JUST this tool
 -- (its own Progress window shows). SWS watches that transaction's report
 -- window without touching ReaPack; once the report closes and ReaPack has had

@@ -1,5 +1,5 @@
--- window: draws the WORKING VIEW — the compact window that's on screen all day.
--- TWO rows since the 2026-08-06 redesign (.brief/working-view-layout): the
+-- window: draws the Reference View — the compact window that's on screen all day.
+-- TWO rows since the 2026-08-06 redesign (.brief/reference-view-layout): the
 -- waveform, and one control bar beneath it. The reference-tab row is GONE —
 -- the project's pins live in the bar's reference picker (ui/refpicker.lua)
 -- instead, so the window looks identical whether the project has 2 pins or 40
@@ -17,6 +17,7 @@
 
 local theme = require("ui.theme")
 local waveform = require("ui.waveform")
+local analysis_panel = require("ui.analysis_panel")
 local transport = require("ui.transport")
 local dropzone = require("ui.dropzone")
 local T = theme.tokens
@@ -31,7 +32,7 @@ local HAS_RECT_HOVER = reaper.ImGui_IsMouseHoveringRect ~= nil
 local HAS_WIN_HOVER_BLOCKED = reaper.ImGui_IsWindowHovered ~= nil
   and reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem ~= nil
 
--- A sound dragged from the browser's table onto ANY part of the working view
+-- A sound dragged from the browser's table onto ANY part of the Reference View
 -- pins it to this project. The reference row used to be that target; with the
 -- row gone the whole window is, which is both simpler and a bigger target
 -- (Codex's 2026-07-28 point about blank space silently cancelling drops applies
@@ -45,7 +46,7 @@ local function pin_drop_target(ctx, state, x0, y0, x1, y1)
   if type(drag.sound_id) == "string" and drag.sound_id:sub(1, 1) == "p" then return nil end
 
   -- Gated on this window being the hovered one, so a drag over a browser window
-  -- overlapping this rect can't light the working view through it.
+  -- overlapping this rect can't light the Reference View through it.
   if HAS_WIN_HOVER_BLOCKED and not reaper.ImGui_IsWindowHovered(ctx,
       reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem()) then
     return nil
@@ -55,15 +56,17 @@ local function pin_drop_target(ctx, state, x0, y0, x1, y1)
   dropzone.draw_drop_rect(ctx, x0, y0, x1, y1, "Pin To This Project")
   dropzone.show_hand_cursor(ctx)
   if reaper.ImGui_IsMouseReleased(ctx, 0) then
-    return { type = "pin_sounds", ids = drag.sound_ids or { drag.sound_id }, wins_release = true }
+    return { type = "pin_sounds", ids = drag.sound_ids or { drag.sound_id },
+      progress_view = "main", wins_release = true }
   end
   return nil
 end
 
 function window.draw(ctx, state, res)
   local action
+  local wave_id, wave_cols
 
-  -- The WHOLE working view is one OS-file drop target (2026-08-01, user's call
+  -- The WHOLE Reference View is one OS-file drop target (2026-08-01, user's call
   -- — supersedes the old "browser opens itself" auto-open): files dropped
   -- anywhere on this window import into the library (Uncategorised) and pin to
   -- this project in one motion, with the full-window treatment while the drag
@@ -112,7 +115,7 @@ function window.draw(ctx, state, res)
   if wave_h < M.WAVE_HIDE_H then wave_h = 0 end
 
   if wave_h > 0 then
-    -- The working view always shows the ARMED reference — never the browser's
+    -- The Reference View always shows the ARMED reference — never the browser's
     -- own selection (Phase 5.9: the two are independent). Its trim scales the
     -- drawing, so riding the trim fader resizes the wave as it resizes the sound.
     -- `ruler`/`duration` opt in to the time ruler beneath it (the browser's
@@ -120,13 +123,16 @@ function window.draw(ctx, state, res)
     -- panel is — its ruler cache, and which remembered pause its playhead
     -- reads (the browser's strip passes "browse").
     -- `span_*` opt in to the start/end handles (loudness tools, 2026-08-06) —
-    -- the working view only; the browser strip passes none and stays plain.
+    -- the Reference View only; the browser strip passes none and stays plain.
     -- `empty_hint` is what the panel says with nothing armed: this window's
     -- whole area is a drop target, and an empty picture is exactly when that
     -- needs saying (2026-08-11, user's ask). Drawn over the baseline, so it
     -- costs no layout and can never shift the bar below it.
-    local wave_action = waveform.draw(ctx, state, wave_h,
+    local wave_action, wx0, wy0, wx1, wy1
+    wave_action, wave_id, wave_cols, wx0, wy0, wx1, wy1 = waveform.draw(ctx, state, wave_h,
       { id = state.selected_id, waveform = state.waveform, slot = "main",
+        view = state.wave_view, detail = state.wave_detail, navigation = true,
+        modifiers = state.mouse_modifiers,
         trim_db = state.selected and state.selected.trim_db or 0,
         ruler = ruler_on, duration = state.selected and state.selected.duration or nil,
         span_edit = true,
@@ -134,6 +140,9 @@ function window.draw(ctx, state, res)
         span_end = state.selected and state.selected.span_end or nil,
         empty_hint = "Drop audio files here to add them to the Library and pin them to this project." })
     action = action or wave_action
+    if analysis_panel.is_visible(state, "main", dropzone.file_drag_active()) then
+      analysis_panel.draw(ctx, state.analysis_progress, wx0, wy0, wx1, wy1)
+    end
   end
 
   -- Always drawn: the bar carries the reference picker, the Library button and
@@ -141,7 +150,7 @@ function window.draw(ctx, state, res)
   local bar_action = transport.draw(ctx, state, res)
   action = action or bar_action
 
-  return action
+  return action, wave_id, wave_cols
 end
 
 return window

@@ -1,4 +1,4 @@
--- settings: the Settings window, opened from the gear in the working view's
+-- settings: the Settings window, opened from the gear in the Reference View's
 -- bar (moved there from the browser toolbar 2026-08-10, `.brief/settings-move`).
 --
 -- Rebuilt 2026-08-08 from `.brief/settings-layout` (six pages, every answer the
@@ -61,6 +61,7 @@ local HAS_VIEWPORT   = reaper.ImGui_GetMainViewport ~= nil and reaper.ImGui_View
 -- open, and the typed-path fallback's buffer. Survives a close so reopening
 -- lands where the user left off.
 local ui = { open = false, section = "library", libdir = "" }
+local pending_feedback
 
 function settings.is_open() return ui.open end
 
@@ -68,9 +69,25 @@ function settings.is_open() return ui.open end
 -- call): the rest of the tool stays live and clickable behind it — "just make it
 -- open like a normal popup basically" — so opening is a plain flag, not an
 -- OpenPopup that has to be issued inside an owning window.
-function settings.open(state)
+function settings.open(state, options)
   ui.open = true
   ui.libdir = state.library_dir -- the typed-path fallback starts from the current folder
+  if options then
+    if options.section then ui.section = options.section end
+    -- Explicit buffers let an isolated preview start each example fresh.
+    if options.feedback then
+      local fb = options.feedback
+      pending_feedback = {
+        draft = fb.draft or "", email = fb.email,
+        last_phase = fb.last_phase, recovery_loaded = fb.recovery_loaded or false,
+      }
+    end
+  end
+end
+
+function settings.close()
+  ui.open = false
+  pending_feedback = nil
 end
 
 -- The entry script uses this after the frame has drawn to decide whether a
@@ -189,12 +206,13 @@ local function row(ctx, label, value, opts)
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local gap = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
 
-  -- The control's width is one of two fixed numbers, never its text's — so it is
-  -- known before the value is laid out and the value can never reach it. The
-  -- icon square (when asked for) widens the reserved right zone the same way.
+  -- Reserve the action width before laying out the field and reveal icon.
   local btn_w = 0
   if opts.button then
     btn_w = opts.compact and reaper.ImGui_GetFrameHeight(ctx) or M.SET_ACTION_W
+    if opts.fit_button then
+      btn_w = reaper.ImGui_CalcTextSize(ctx, opts.button) + M.FRAME_PAD_X * 2
+    end
   end
   local right_w = btn_w
   if opts.switch ~= nil then right_w = M.SET_SWITCH_W end
@@ -603,7 +621,7 @@ local function draw_library(ctx, state)
       -- typed path rather than hiding the setting. The reveal square still
       -- draws: opening Explorer doesn't need the picker dialog.
       local hit, typed, reveal = row(ctx, "Folder Path", ui.libdir, {
-        input = true, button = "Use This",
+        input = true, button = "Use This", fit_button = true,
         icon = ICON_REVEAL_LIB,
         note = NOTE_FOLDER,
       })
@@ -1304,6 +1322,11 @@ end
 function settings.draw(ctx, state, res)
   local action
   if not ui.open then return nil end
+  if pending_feedback then
+    fbui = pending_feedback
+    pending_feedback = nil
+    wrap_dirty = false
+  end
   -- The Lucide font for the icon squares (see `row`). Per frame, not cached at
   -- load: resources belong to ui/app.lua and may not exist on old ReaImGui.
   icon_font = res and res.icon_font or nil

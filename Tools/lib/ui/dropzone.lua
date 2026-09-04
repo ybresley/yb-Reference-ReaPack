@@ -1,7 +1,7 @@
 -- dropzone: the shared drag/drop visual treatment and reading — the dashed accent
 -- outline + wash a hovered target draws, the hand/no-entry cursor swap, and
 -- reading an OS file drop or an internal sound drag off "the last item". Used by
--- both the working view's reference row (ui/window.lua) and the browser's
+-- both the Reference View's reference row (ui/window.lua) and the browser's
 -- sidebar/list (ui/browser.lua), so the treatment can't drift between the two
 -- windows. A ui/ module: it may call reaper.ImGui_* only.
 
@@ -105,7 +105,7 @@ end
 -- Internal drag: a sound being pulled from the table (or a reference tab) can
 -- land on a target in EITHER window — both share one ImGui context, and ImGui's
 -- hover/active-item bookkeeping isn't scoped per window, so this works the same
--- whether the drag started in the working view or the browser (unverified in
+-- whether the drag started in the Reference View or the browser (unverified in
 -- REAPER until manually checked — see HANDOFF). sound_drop_state reads the LAST
 -- ITEM's part in that without drawing: (hovered, released this frame).
 -- sound_drop_target is the whole deal for a self-contained row — treatment +
@@ -142,7 +142,7 @@ local HAS_NO_RECT = reaper.ImGui_DragDropFlags_AcceptNoDrawDefaultRect ~= nil
 -- calls) just relies on the Add-sounds picker.
 -- opts: category (where an import files), label (the destination
 -- pill), no_draw (caller draws the zone), action_type (defaults to "import" —
--- the working view asks for "import_and_pin" instead, one motion).
+-- the Reference View asks for "import_and_pin" instead, one motion).
 --
 -- Peeking "is an OS files drag in flight?" MUST use GetDragDropPayloadFile,
 -- never GetDragDropPayload: the latter filters out ReaImGui's internal FILES
@@ -202,6 +202,9 @@ function dropzone.set_file_drag_window(id)
   rescue_window = id
 end
 
+-- Decorative overlays yield to the drop label without polling the payload again.
+function dropzone.file_drag_active() return payload_active or rescue_active end
+
 function dropzone.set_current_window(id)
   current_window = id
 end
@@ -231,7 +234,7 @@ local function rescue_drop(ctx, opts)
 end
 
 -- A file-drop target over an explicit rect — for a zone bigger than any one
--- item (the whole working view, the browser's list area; Codex, 2026-07-28:
+-- item (the whole Reference View, the browser's list area; Codex, 2026-07-28:
 -- per-item targets left the blank space between them silently dropping the
 -- drop). An InvisibleButton is the standard ImGui idiom for "make this whole
 -- area a drag-drop target" — waveform.draw uses the same call for its own hit

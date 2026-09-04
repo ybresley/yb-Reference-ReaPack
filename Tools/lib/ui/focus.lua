@@ -59,6 +59,10 @@ local pressed_on_us = {}
 -- keeps focus here — the zone's pane wants the arrow keys afterwards.
 local zones, zone_n = {}, 0
 
+-- Keys already handled by a pane this frame. These must not also be forwarded
+-- to REAPER's shortcut system at frame end.
+local consumed_keys = {}
+
 -- A one-shot "hand focus back now" request from ui code for non-click paths
 -- (Esc closing the browser or the match window). Still subject to the same
 -- popup/active-item safety checks at frame end.
@@ -85,7 +89,7 @@ local WATCH_FRAMES = 5
 --   * Esc / Enter / Tab — the UI's popup-and-field keys,
 --   * Delete / Backspace — forwarding those would let a stray press while
 --     browsing OUR list delete items in the user's PROJECT, a destructive
---     surprise nothing can undo being worth (they simply do nothing here).
+--     surprise. Delete belongs to the focused Library pane.
 -- Modifiers ride along physically (send_key_to_main reads the live keyboard),
 -- so Ctrl+Z forwarded as Z undoes in REAPER, exactly as bound.
 --
@@ -117,6 +121,7 @@ end
 
 function focus.frame_begin(ctx)
   zone_n = 0
+  for key in pairs(consumed_keys) do consumed_keys[key] = nil end
   if not ENABLED then return end
   local any = reaper.ImGui_HoveredFlags_AnyWindow()
   for b = 0, 2 do
@@ -127,6 +132,11 @@ function focus.frame_begin(ctx)
       if pressed_on_us[b] then watch = 0 end
     end
   end
+end
+
+-- Reserve a pane shortcut so it cannot also reach REAPER in this frame.
+function focus.consume_key(key)
+  if key ~= nil then consumed_keys[key] = true end
 end
 
 -- Register a screen rect whose clicks keep focus (called during draw, cleared
@@ -254,7 +264,8 @@ function focus.frame_end(ctx)
   if not reaper.ImGui_IsAnyItemActive(ctx)
     and reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_AnyWindow()) then
     for i = 1, #FWD do
-      if reaper.ImGui_IsKeyPressed(ctx, FWD[i].key, true) then
+      if not consumed_keys[FWD[i].key]
+        and reaper.ImGui_IsKeyPressed(ctx, FWD[i].key, true) then
         keys = keys or {}
         keys[#keys + 1] = FWD[i].vk
       end

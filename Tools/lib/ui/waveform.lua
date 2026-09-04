@@ -2,7 +2,7 @@
 -- intent. A ui/ module — it may call reaper.ImGui_* only. It never reads `state`
 -- selection directly: the caller's `opts` names which sound + which pre-built
 -- per-channel envelope to draw (the entry script builds envelopes when a
--- selection changes), so the working view and the browser's audition strip can
+-- selection changes), so the Reference View and the browser's audition strip can
 -- each show their OWN, independent selection through the same widget (Phase 5.9).
 -- Scales the envelope to the available width; never reads audio itself.
 --
@@ -13,6 +13,9 @@ local theme = require("ui.theme")
 local tips = require("ui.tips")
 local widgets = require("ui.widgets")
 local core_ruler = require("core.ruler")
+local wave_ruler = require("core.wave_ruler")
+local viewport = require("core.wave_view")
+local navigation = require("ui.wave_navigation")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -37,10 +40,11 @@ local sdrag = { which = nil, id = nil, hold = false }
 -- a sound's duration, floored pixel width or actual label-font size changes,
 -- never per frame
 -- (frame-loop rule). One slot per RULER-CARRYING view, keyed by opts.slot
--- — "main" (working view) and, since 2026-08-06, "browse" (the audition strip)
+-- — "main" (Reference View) and, since 2026-08-06, "browse" (the audition strip)
 -- — because a single shared slot would rebuild every frame while both windows
 -- are open, each stamping over the other's entry. Bounded at exactly those two.
 local ruler_cache = {}
+local visible_ruler_cache = {}
 
 local function ruler_ticks(ctx, key, duration, width_px, font_size)
   local width_floor = math.floor(width_px)
@@ -67,14 +71,29 @@ end
 -- caller always reserves RULER_H worth of space once `opts.ruler` is true,
 -- regardless of whether a sound is currently armed, so the strip's presence
 -- never changes with state (see ui/window.lua's layout arithmetic).
-local function draw_ruler(ctx, dl, key, x, y_top, avail_w, duration)
+local function draw_ruler(ctx, dl, key, x, y_top, avail_w, duration, view)
   if not duration or duration <= 0 then return end
   -- Measure, cache and draw under one exact font push. The actual current size
   -- is part of the cache key so changing UI Size can never reuse a cadence that
   -- was chosen for smaller labels.
   local small = theme.push_small_font(ctx)
   local font_size = reaper.ImGui_GetFontSize(ctx)
-  local ticks = ruler_ticks(ctx, key, duration, avail_w, font_size)
+  local ticks
+  if view then
+    local width_floor = math.floor(avail_w)
+    local c = visible_ruler_cache[key]
+    if c and c.duration == duration and c.width == width_floor
+      and c.font_size == font_size and c.t0 == view.t0 and c.t1 == view.t1 then
+      ticks = c.ticks
+    else
+      ticks = wave_ruler.build(view.t0 * duration, view.t1 * duration, avail_w,
+        function(text) return select(1, reaper.ImGui_CalcTextSize(ctx, text)) end)
+      visible_ruler_cache[key] = { duration = duration, width = width_floor,
+        font_size = font_size, t0 = view.t0, t1 = view.t1, ticks = ticks }
+    end
+  else
+    ticks = ruler_ticks(ctx, key, duration, avail_w, font_size)
+  end
   for _, tk in ipairs(ticks) do
     local tx = x + tk.x
     if tk.major then
@@ -84,7 +103,8 @@ local function draw_ruler(ctx, dl, key, x, y_top, avail_w, duration)
         -- Edge labels clamp inside the panel (the brief's mock behaviour): a
         -- centred "0" would straddle the panel's left edge, and a major landing
         -- exactly at the full width would hang its label half outside.
-        local lx = x + math.max(0, math.min(tk.x - lw * 0.5, math.max(0, avail_w - lw)))
+        local lx = x + (tk.label_x or
+          math.max(0, math.min(tk.x - lw * 0.5, math.max(0, avail_w - lw))))
         reaper.ImGui_DrawList_AddText(dl, lx, y_top + M.RULER_TICK_MAJOR + 2, T.TEXT_TERTIARY, tk.label)
       end
     else
@@ -101,48 +121,91 @@ end
 -- `show_head` covers both a sound actually playing and one paused mid-way —
 -- either way there's a real position to colour up to (see waveform.draw).
 -- `gain` is the trim expressed as a multiplier, so louder draws taller.
-local function draw_lane(dl, x, lane_y, lane_h, avail_w, ch, show_head, play_px, cols, gain)
-  local midy = lane_y + lane_h * 0.5
-  local maxs, mins = ch.maxs, ch.mins
-  local n = #maxs
-  -- A fixed inset off the lane edge, capped so a squashed panel (many channels in a
-  -- docked strip) can never pad the lane down to nothing or past it into inverted bars.
-  local lane_half = lane_h * 0.5
-  local half = lane_half - math.min(M.WAVE_LANE_PAD, lane_half * 0.2)
-  local scale = half * gain
-  for px = 0, cols - 1 do
-    -- Fold the envelope bins covered by this pixel column into one min/max.
-    local b0 = math.floor(px * n / cols) + 1
-    local b1 = math.floor((px + 1) * n / cols)
-    if b1 < b0 then b1 = b0 end
-    local hi, lo = 0, 0
-    for b = b0, b1 do
-      if maxs[b] > hi then hi = maxs[b] end
-      if mins[b] < lo then lo = mins[b] end
-    end
-    -- Clamp to the lane. A boosted trim can ask for many times the height available,
-    -- and unclamped those bars draw over the next channel's lane and outside the
-    -- panel entirely. Going flat at the ceiling is also the truth: `half` is exactly
-    -- where an untrimmed full-scale file already reaches, so a flat top means "past
-    -- full scale" — which a float file whose samples exceed 0 dBFS can manage on its
-    -- own, at no trim at all.
-    local up, dn = hi * scale, lo * scale
-    if up > half then up = half end
-    if dn < -half then dn = -half end
-    -- Columns left of the playhead read as "played" (accent); the rest is dim.
-    local col = (show_head and px <= play_px) and T.WAVE_PLAYED or T.WAVE_BARS
-    local cx = x + px
-    reaper.ImGui_DrawList_AddLine(dl, cx, midy - up, cx, midy - dn, col)
+local function flatten_colour(foreground, background)
+  local alpha = (foreground & 0xFF) / 255
+  local function channel(shift)
+    local front = (foreground >> shift) & 0xFF
+    local back = (background >> shift) & 0xFF
+    return math.floor(front * alpha + back * (1 - alpha) + 0.5)
   end
+  return (channel(24) << 24) | (channel(16) << 16) | (channel(8) << 8) | 0xFF
+end
+
+local WAVE_PANEL_SOLID = flatten_colour(T.WAVE_BG, T.BG_WINDOW)
+local WAVE_UNPLAYED_SOLID = flatten_colour(T.WAVE_BARS, WAVE_PANEL_SOLID)
+
+local function draw_lane(dl, x, lane_y, lane_h, cols, overview, detail, detail_count,
+    view, show_head, play_frac, gain)
+  local source = detail or overview
+  local n = detail and detail_count or #overview.maxs
+  if not source or not n or n < 1 then return end
+  local view_span = view.t1 - view.t0
+  local amp_span = view.a1 - view.a0
+  local inset = math.min(M.WAVE_LANE_PAD, lane_h * 0.1)
+  local draw_h = math.max(1, lane_h - inset * 2)
+  local draw_y = lane_y + inset
+  local function projected_y(amplitude)
+    return draw_y + ((view.a1 - amplitude * gain) / amp_span) * draw_h
+  end
+
+  reaper.ImGui_DrawList_PushClipRect(dl, x, lane_y, x + cols, lane_y + lane_h, true)
+  if detail and n > 1 and n < cols then
+    local previous_x, previous_y
+    for sample = 1, n do
+      local frac = (sample - 1) / (n - 1)
+      local cx = x + frac * cols
+      local cy = projected_y((source.maxs[sample] + source.mins[sample]) * 0.5)
+      if previous_x then
+        local sample_time = view.t0 + frac * view_span
+        local col = (show_head and sample_time <= play_frac) and T.WAVE_PLAYED or WAVE_UNPLAYED_SOLID
+        reaper.ImGui_DrawList_AddLine(dl, previous_x, previous_y, cx, cy, col, 1.25)
+      end
+      previous_x, previous_y = cx, cy
+    end
+  else
+    local previous_hi, previous_lo
+    for px = 0, cols - 1 do
+      local b0, b1
+      if detail then
+        b0 = math.max(1, math.min(n, math.floor(px * n / cols) + 1))
+        b1 = math.max(b0, math.min(n, math.ceil((px + 1) * n / cols)))
+      else
+        local f0 = view.t0 + (px / cols) * view_span
+        local f1 = view.t0 + ((px + 1) / cols) * view_span
+        b0 = math.max(1, math.min(n, math.floor(f0 * n) + 1))
+        b1 = math.max(b0, math.min(n, math.ceil(f1 * n)))
+      end
+      local hi, lo = -math.huge, math.huge
+      for b = b0, b1 do
+        if source.maxs[b] > hi then hi = source.maxs[b] end
+        if source.mins[b] < lo then lo = source.mins[b] end
+      end
+      local y_hi, y_lo = projected_y(hi), projected_y(lo)
+      local cx = math.floor(x) + px
+      local sample_time = view.t0 + ((px + 0.5) / cols) * view_span
+      local col = (show_head and sample_time <= play_frac) and T.WAVE_PLAYED or WAVE_UNPLAYED_SOLID
+      local top, bottom = math.floor(y_hi), math.ceil(y_lo)
+      if bottom <= top then bottom = top + 1 end
+      reaper.ImGui_DrawList_AddRectFilled(dl, cx, top, cx + 1, bottom, col)
+      if previous_hi then
+        reaper.ImGui_DrawList_AddLine(dl, cx - 0.5, previous_hi, cx + 0.5,
+          math.floor(y_hi + 0.5), col)
+        reaper.ImGui_DrawList_AddLine(dl, cx - 0.5, previous_lo, cx + 0.5,
+          math.floor(y_lo + 0.5), col)
+      end
+      previous_hi, previous_lo = math.floor(y_hi + 0.5), math.floor(y_lo + 0.5)
+    end
+  end
+  reaper.ImGui_DrawList_PopClipRect(dl)
 end
 
 -- Draw the panel. `height` is the pixel height the caller has measured out for
--- it this frame (Phase 5.7 Stage 2 — the working view hands it everything left
+-- it this frame (Phase 5.7 Stage 2 — the Reference View hands it everything left
 -- over between the reference row and the transport row, so the waveform grows
 -- and shrinks with the WINDOW, never with any state change). Falls back to the
 -- floor metric if a caller doesn't pass one.
 --
--- `opts` tells this draw WHICH sound + envelope to show — the working view
+-- `opts` tells this draw WHICH sound + envelope to show — the Reference View
 -- passes the armed reference (`state.selected_id`/`state.waveform`), the
 -- browser's audition strip passes its own browse selection instead (Phase
 -- 5.9 — independent browsing). Reading `state.selected*` in here directly
@@ -176,6 +239,7 @@ function waveform.draw(ctx, state, height, opts)
   opts = opts or {}
   local target_id = opts.id
   local slot = opts.slot or "main"
+  local view = opts.view or { t0 = 0, t1 = 1, a0 = -1, a1 = 1 }
   local gain = 10 ^ ((opts.trim_db or 0) / 20) -- dB -> multiplier; 0 dB = 1.0
   local action
   local avail_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
@@ -205,10 +269,10 @@ function waveform.draw(ctx, state, height, opts)
   -- nor the other window's park can move or erase this playhead.
   -- Both tests are against THIS SLOT, never against the shared engine's global
   -- "is anything playing" flag: there is one preview for two panels, so a
-  -- library audition makes that flag true for the working view too. Reading it
-  -- directly hid the working view's parked playhead for as long as the library
+  -- library audition makes that flag true for the Reference View too. Reading it
+  -- directly hid the Reference View's parked playhead for as long as the library
   -- was sounding (user-reported 2026-08-12), and let an audition of a sound the
-  -- working view happens to have armed drag that panel's playhead along with it.
+  -- Reference View happens to have armed drag that panel's playhead along with it.
   local sounding = state.preview.playing and state.preview.slot == slot
     and state.preview.sound_id == target_id
   local parked = state.preview.paused[slot]
@@ -238,12 +302,34 @@ function waveform.draw(ctx, state, height, opts)
     local nch = #chans
     local lane_h = h / nch
     local cols = math.max(1, math.floor(avail_w))
-    local play_px = play_frac * cols
+    local detail = opts.detail
+    local detail_channels = detail and detail.sound_id == target_id
+      and detail.count and detail.count > 0
+      and detail.t0 == view.t0 and detail.t1 == view.t1 and detail.cols == cols
+      and detail.channels or nil
+    local detail_count = detail_channels and detail.count or nil
     for ci = 1, nch do
       local lane_y = y + (ci - 1) * lane_h
-      local midy = lane_y + lane_h * 0.5
-      reaper.ImGui_DrawList_AddLine(dl, x, midy, x + avail_w, midy, T.WAVE_CENTER)
-      draw_lane(dl, x, lane_y, lane_h, avail_w, chans[ci], show_head, play_px, cols, gain)
+      draw_lane(dl, x, lane_y, lane_h, cols, chans[ci],
+        detail_channels and detail_channels[ci] or nil, detail_count,
+        view, show_head, play_frac, gain)
+
+      -- Each channel zooms around its own zero line. Match the waveform colour
+      -- on either side of the playhead, so the baseline reads as part of the
+      -- waveform rather than as a second pale outline.
+      local zero_y = lane_y + viewport.y_of_amp(view, 0) * lane_h
+      if zero_y >= lane_y and zero_y <= lane_y + lane_h then
+        zero_y = math.floor(zero_y + 0.5)
+        local split = math.max(x, math.min(x + avail_w,
+          x + viewport.x_of_time(view, play_frac) * avail_w))
+        if split > x then
+          reaper.ImGui_DrawList_AddLine(dl, x, zero_y, split, zero_y, T.WAVE_PLAYED)
+        end
+        if split < x + avail_w then
+          reaper.ImGui_DrawList_AddLine(dl, split, zero_y, x + avail_w,
+            zero_y, WAVE_UNPLAYED_SOLID)
+        end
+      end
     end
   else
     -- Nothing to show yet: a single centre baseline, plus one line of text over
@@ -252,9 +338,9 @@ function waveform.draw(ctx, state, height, opts)
     -- so the panel's own geometry never shifts with them.
     --
     -- The hint is the caller's because the two panels that draw waveforms mean
-    -- different things by "empty": a drop on the working view PINS to the
+    -- different things by "empty": a drop on the Reference View PINS to the
     -- project, a drop on the browser's strip adds to the library. Only the
-    -- working view passes one.
+    -- Reference View passes one.
     local midy = y + h * 0.5
     reaper.ImGui_DrawList_AddLine(dl, x, midy, x + avail_w, midy, T.WAVE_CENTER)
     local label, col
@@ -277,40 +363,49 @@ function waveform.draw(ctx, state, height, opts)
   -- Playhead line spanning all lanes (bars only — kept out of the ruler band
   -- beneath it, which is its own confined strip).
   if show_head then
-    local px = x + play_frac * avail_w
-    reaper.ImGui_DrawList_AddLine(dl, px, y, px, y + h, T.WAVE_PLAYHEAD, 1)
+    local play_x = viewport.x_of_time(view, play_frac)
+    if play_x >= 0 and play_x <= 1 then
+      local px = x + play_x * avail_w
+      reaper.ImGui_DrawList_AddLine(dl, px, y, px, y + h, T.WAVE_PLAYHEAD, 1)
+    end
   end
 
   if has_ruler then
-    draw_ruler(ctx, dl, slot, x, y + h, avail_w, opts.duration)
+    draw_ruler(ctx, dl, slot, x, y + h, avail_w, opts.duration,
+      opts.navigation and view or nil)
     -- The band's playhead caret (brief, 2026-08-06): the DAW-universal small
     -- triangle, so the position stays readable where the line crosses busy
     -- bars. Same white as the line, drawn after the ticks so it rides them;
     -- the line itself still stops at the wave's bottom edge.
     if show_head then
-      local px = x + play_frac * avail_w
-      reaper.ImGui_DrawList_AddTriangleFilled(dl,
-        px - 4, y + h + 8, px + 4, y + h + 8, px, y + h + 1, T.WAVE_PLAYHEAD)
+      local play_x = viewport.x_of_time(view, play_frac)
+      if play_x >= 0 and play_x <= 1 then
+        local px = x + play_x * avail_w
+        reaper.ImGui_DrawList_AddTriangleFilled(dl,
+          px - 4, y + h + 8, px + 4, y + h + 8, px, y + h + 1, T.WAVE_PLAYHEAD)
+      end
     end
   end
 
   -- One InvisibleButton reserves the layout space AND captures both clicks and
   -- hover — extended down over the ruler band instead of adding a second
-  -- handler, so a click anywhere in either zone seeks exactly the same way
-  -- (same existing gating downstream: the entry script only acts on `seek`
-  -- when a sound is actually selected — nothing new is added here). The
+  -- handler, so a click anywhere in either zone reports the same position
+  -- (downstream, the Reference View plays from it and the Library applies its
+  -- own audition rules). The
   -- start/end handles are resolved inside this SAME item by mouse proximity —
   -- never a second widget overlapping it, which would fight the seek click for
   -- hover (the refpicker rows' "hit area stops short" reasoning).
   reaper.ImGui_InvisibleButton(ctx, "##waveform", avail_w, total_h)
   local clicked = reaper.ImGui_IsItemClicked(ctx)
-  local has_duration = has_ruler and type(opts.duration) == "number" and opts.duration > 0
+  -- Duration governs seeking, spans, and navigation even when a short window
+  -- yields its ruler. Hiding ticks must not disable the waveform itself.
+  local has_duration = type(opts.duration) == "number" and opts.duration > 0
   local hovered = has_duration and reaper.ImGui_IsItemHovered(ctx)
   local item_active = reaper.ImGui_IsItemActive(ctx)
   local mx, my = reaper.ImGui_GetMousePos(ctx)
 
   -- Start/end points (loudness tools, 2026-08-06): only where the caller
-  -- opted in (the working view — the browser strip stays plain) and there is
+  -- opted in (the Reference View — the browser strip stays plain) and there is
   -- a real file to frame. Drawn here, after the bars and playhead, so the dim
   -- wash sits over the picture it excludes.
   local span_on = opts.span_edit and has_duration and target_id ~= nil
@@ -321,19 +416,19 @@ function waveform.draw(ctx, state, height, opts)
     local s1 = opts.span_end or dur
     if s1 > dur then s1 = dur end
     if s0 < 0 or s0 >= s1 then s0 = 0 end
-    local hx0 = x + (s0 / dur) * avail_w
-    local hx1 = x + (s1 / dur) * avail_w
+    local hx0 = x + viewport.x_of_time(view, s0 / dur) * avail_w
+    local hx1 = x + viewport.x_of_time(view, s1 / dur) * avail_w
 
     -- The picture dims OUTSIDE the span; the framed stretch is what plays.
-    if s0 > 0 then
-      reaper.ImGui_DrawList_AddRectFilled(dl, x, y, hx0, y + h, T.SPAN_DIM)
+    if hx0 > x then
+      reaper.ImGui_DrawList_AddRectFilled(dl, x, y, math.min(x + avail_w, hx0), y + h, T.SPAN_DIM)
     end
-    if s1 < dur then
-      reaper.ImGui_DrawList_AddRectFilled(dl, hx1, y, x + avail_w, y + h, T.SPAN_DIM)
+    if hx1 < x + avail_w then
+      reaper.ImGui_DrawList_AddRectFilled(dl, math.max(x, hx1), y, x + avail_w, y + h, T.SPAN_DIM)
     end
 
     -- Which handle is the mouse on? Bars zone only — the ruler band beneath
-    -- keeps its plain click-to-seek. The nearer line wins when the grab zones
+    -- keeps its plain position click. The nearer line wins when the grab zones
     -- overlap on a tight span.
     if (hovered or item_active) and my <= y + h then
       local d0, d1 = math.abs(mx - hx0), math.abs(mx - hx1)
@@ -346,7 +441,8 @@ function waveform.draw(ctx, state, height, opts)
     -- while the cursor is on the panel (brief, 2026-08-08 — at rest the dim
     -- wash already draws the boundary, so a bright line over the picture said
     -- it twice). Reaching in is what asks for them, so the whole panel wakes
-    -- them at once, both to the same grey. Only the RESTING flag grades: a
+    -- them at once in a faint grey. The line under the pointer turns white.
+    -- Only the RESTING flag grades: a
     -- point still at its own extreme is stored nil (never moved, or moved
     -- back), marks nothing, and sits a step dimmer than one that does.
     local woke = hovered or item_active
@@ -354,11 +450,12 @@ function waveform.draw(ctx, state, height, opts)
       local hot
       if sdrag.which == which then hot = T.ACCENT
       elseif near == which and not sdrag.which then hot = T.TEXT_PRIMARY
-      elseif woke then hot = T.TEXT_SECONDARY
+      elseif woke then hot = T.TEXT_QUATERNARY
       else hot = untouched and T.TEXT_QUATERNARY or T.TEXT_TERTIARY end
-      if woke then
+      if woke and hx >= x and hx <= x + avail_w then
         reaper.ImGui_DrawList_AddLine(dl, hx, y, hx, y + h, hot, 2)
       end
+      if hx < x or hx > x + avail_w then return end
       local dirn = (which == "start") and 1 or -1
       reaper.ImGui_DrawList_AddTriangleFilled(dl,
         hx, y, hx, y + 7, hx + dirn * 6, y, hot)
@@ -381,8 +478,7 @@ function waveform.draw(ctx, state, height, opts)
         sdrag.which, sdrag.hold = nil, false -- the armed sound changed mid-hold
       elseif item_active then
         if not sdrag.hold and reaper.ImGui_IsMouseDragging(ctx, 0) then
-          local frac = (mx - x) / avail_w
-          if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+          local frac = viewport.time_at(view, (mx - x) / avail_w)
           action = action or { type = "set_span", which = sdrag.which, seconds = frac * dur }
         end
       else
@@ -397,10 +493,22 @@ function waveform.draw(ctx, state, height, opts)
   end
 
   local on_handle = span_on and (near ~= nil or sdrag.which ~= nil)
+  local nav_action, nav_claimed, nav_hot
+  if opts.navigation and has_duration then
+    nav_action, nav_claimed, nav_hot = navigation.handle(ctx, target_id, view,
+      x, y, avail_w, h, has_ruler and M.RULER_H or 0, on_handle, opts.modifiers)
+    action = action or nav_action
+  end
   if (clicked or hovered) and not on_handle then
-    local frac = (mx - x) / avail_w
-    if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
-    if clicked then action = action or { type = "seek", fraction = frac } end
+    local local_frac = (mx - x) / avail_w
+    if local_frac < 0 then local_frac = 0 elseif local_frac > 1 then local_frac = 1 end
+    local frac = viewport.time_at(view, local_frac)
+    -- Navigation still owns its clicks, but the mouse-position guide remains
+    -- visible while a wheel gesture is changing the view. Hiding the whole
+    -- block on each wheel-event frame made that vertical line visibly flash.
+    if clicked and not nav_claimed then
+      action = action or { type = "seek", fraction = frac }
+    end
     -- Exact-time hover readout, one notch finer than the tick labels — the
     -- standard fix for a no-zoom ruler where labels alone get sparse on long
     -- files (tooltip LAST: SetTooltip replaces ImGui's "last item", so it must
@@ -410,7 +518,7 @@ function waveform.draw(ctx, state, height, opts)
       -- belongs to — where exactly a click will land. TEXT_TERTIARY keeps it
       -- clearly quieter than the full-white playhead, and the clamped frac
       -- keeps it inside the panel. Tooltip stays LAST (the house rule).
-      local gx = x + frac * avail_w
+      local gx = x + local_frac * avail_w
       reaper.ImGui_DrawList_AddLine(dl, gx, y, gx, y + total_h, T.TEXT_TERTIARY, 1)
       -- Keyed, not text-identified: this readout rewrites itself every pixel
       -- the cursor moves, and the wait must run on the panel, not the words.
@@ -425,7 +533,17 @@ function waveform.draw(ctx, state, height, opts)
       near == "start" and "Start" or "End", core_ruler.hover_label(at, dur)), "wave-handle")
   end
 
-  return action
+  if opts.navigation then
+    navigation.draw_rails(dl, view, x, y, avail_w, h,
+      has_ruler and M.RULER_H or 0, nav_hot)
+  end
+
+  if opts.navigation and target_id then
+    return action, target_id, math.max(1, math.floor(avail_w)), x, y, x + avail_w, y + total_h
+  end
+  -- A tooltip can replace ImGui's last item. Callers need the waveform bounds
+  -- themselves for progress feedback, idle text and file-drop targets.
+  return action, nil, nil, x, y, x + avail_w, y + total_h
 end
 
 return waveform

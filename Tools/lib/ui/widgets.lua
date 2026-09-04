@@ -17,6 +17,54 @@ local M = theme.metrics
 
 local widgets = {}
 
+-- Two actions fill a compact popup's bottom row without unused space at either edge.
+function widgets.action_pair(ctx, left_label, right_label)
+  local width = reaper.ImGui_GetContentRegionAvail(ctx)
+  local left_w = math.floor((width - M.ITEM_SPACING_X) * 0.5)
+  local left = reaper.ImGui_Button(ctx, left_label, left_w)
+  reaper.ImGui_SameLine(ctx)
+  local right = reaper.ImGui_Button(ctx, right_label, width - M.ITEM_SPACING_X - left_w)
+  return left, right
+end
+
+-- Shared search field: the magnifier uses the input's padding, so it never
+-- competes with typed text. Callers retain ownership of their query buffer.
+function widgets.search_input(ctx, font, id, hint, query, width)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), M.SEARCH_ICON_PAD, M.FRAME_PAD_Y)
+  reaper.ImGui_SetNextItemWidth(ctx, width)
+  local changed, text = reaper.ImGui_InputTextWithHint(ctx, id, hint, query)
+  reaper.ImGui_PopStyleVar(ctx, 2)
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local _, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local cx, cy = x0 + M.SEARCH_ICON_PAD * 0.5, (y0 + y1) * 0.5
+  local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
+  local icon_colour = text ~= "" and T.ACCENT or T.TEXT_TERTIARY
+  local colour = theme.fade(icon_colour, alpha)
+  if not icons.paint_glyph(ctx, font, "search", cx, cy, icon_colour, M.ICON_SM_FS) then
+    icons.draw_search(dl, cx, cy, colour)
+  end
+  return changed, text
+end
+
+-- Text has already been ellipsised to its row. Highlight only visible literal
+-- matches, using the same font that measured this line.
+function widgets.draw_search_text(ctx, dl, x, y, colour, text, query)
+  if query and query ~= "" then
+    local lower, offset = text:lower(), 1
+    while true do
+      local first, last = lower:find(query, offset, true)
+      if not first then break end
+      local before = select(1, reaper.ImGui_CalcTextSize(ctx, text:sub(1, first - 1)))
+      local width, height = reaper.ImGui_CalcTextSize(ctx, text:sub(first, last))
+      reaper.ImGui_DrawList_AddRectFilled(dl, x + before, y, x + before + width, y + height, T.SEARCH_MATCH_BG)
+      offset = last + 1
+    end
+  end
+  reaper.ImGui_DrawList_AddText(dl, x, y, colour, text)
+end
+
 -- Cut text down to `max_w`, ending in an ellipsis. Lives here because two
 -- screens now need it — the reference picker's rows and the browser sidebar's
 -- category rows (2026-08-07) — and a second copy of a binary search plus its
@@ -106,6 +154,12 @@ function widgets.wants_right_reset(ctx)
     and reaper.ImGui_IsMouseClicked(ctx, 1)
 end
 
+function widgets.wants_pitch_reset(ctx)
+  return widgets.wants_right_reset(ctx)
+    or (reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseClicked(ctx, 0)
+      and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Ctrl()) ~= 0)
+end
+
 -- The standard reset gesture for adjustable controls is right-click or
 -- double-click. Pitch is the deliberate exception above.
 function widgets.wants_reset(ctx)
@@ -191,7 +245,8 @@ local reset_hold = {}
 -- This is the Appearance pane's size control, but the gesture is reusable for
 -- any stepped numeric setting. Reports live values with commit=false, then the
 -- final value with commit=true on release so callers can preview continuously
--- and persist once. opts = { min, max, step, width }.
+-- and persist once. opts = { min, max, step, width, tick_step, pitch }.
+-- Pitch adds a centre-origin fill, fine dragging and its own reset gestures.
 local step_slider_drag = {}
 
 local function step_slider_value(min, max, step, t)
@@ -224,24 +279,35 @@ function widgets.step_slider(ctx, id, value, opts)
   local mx = select(1, reaper.ImGui_GetMousePos(ctx))
   local result, commit
 
-  if activated then
+  if opts.pitch and widgets.wants_pitch_reset(ctx) then
+    step_slider_drag[id] = nil
+    if active then reset_hold[id] = true end
+    result, commit = 0, true
+  elseif activated and not reset_hold[id] then
     local t = (mx - track_x0) / track_w
-    local clicked = step_slider_value(min, max, step, t)
+    local fine = opts.pitch and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Alt()) ~= 0
+    local clicked = fine and value or step_slider_value(min, max, step, t)
     step_slider_drag[id] = {
       t = (clicked - min) / (max - min),
       mx = mx,
       width = track_w,
     }
     if clicked ~= value then result, commit = clicked, false end
-  elseif active and step_slider_drag[id] then
+  elseif active and not reset_hold[id] and step_slider_drag[id] then
     local drag = step_slider_drag[id]
-    local t = drag.t + (mx - drag.mx) / drag.width
-    local dragged = step_slider_value(min, max, step, t)
+    local fine = opts.pitch and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Alt()) ~= 0
+    local t = drag.t + (mx - drag.mx) / drag.width / (fine and 5 or 1)
+    local dragged = step_slider_value(min, max, fine and 0.1 or step, t)
+    if opts.pitch then drag.t, drag.mx = math.max(0, math.min(1, t)), mx end
     if dragged ~= value then result, commit = dragged, false end
   elseif deactivated then
     local drag = step_slider_drag[id]
     step_slider_drag[id] = nil
-    if drag then
+    if reset_hold[id] then
+      reset_hold[id] = nil
+    elseif drag and opts.pitch then
+      result, commit = value, true
+    elseif drag then
       local t = drag.t + (mx - drag.mx) / drag.width
       result, commit = step_slider_value(min, max, step, t), true
     end
@@ -258,15 +324,15 @@ function widgets.step_slider(ctx, id, value, opts)
 
   reaper.ImGui_DrawList_AddRectFilled(dl, track_x0, cy - half_track,
     track_x1, cy + half_track, fade(T.FADER_TRACK, alpha), half_track)
-  if knob_x > track_x0 then
-    reaper.ImGui_DrawList_AddRectFilled(dl, track_x0, cy - half_track,
-      knob_x, cy + half_track,
+  local fill_x = opts.pitch and (track_x0 + track_w * 0.5) or track_x0
+  if knob_x ~= fill_x then
+    reaper.ImGui_DrawList_AddRectFilled(dl, math.min(fill_x, knob_x), cy - half_track,
+      math.max(fill_x, knob_x), cy + half_track,
       fade((hovered or active) and T.ACCENT_HOVER or T.FADER_FILL, alpha), half_track)
   end
 
-  -- Option B: one quiet mark per valid value, beneath the track. These are
-  -- drawn after the fill so every 5% stop stays visible across the whole range.
-  local stops = math.floor((max - min) / step + 0.5)
+  -- Paint marks after the fill so they stay visible across the whole range.
+  local stops = math.floor((max - min) / (opts.tick_step or step) + 0.5)
   for i = 0, stops do
     local tx = math.floor(track_x0 + (i / stops) * track_w + 0.5)
     reaper.ImGui_DrawList_AddLine(dl, tx, cy + half_track,
@@ -279,6 +345,10 @@ function widgets.step_slider(ctx, id, value, opts)
 
   if result ~= nil then return result, commit end
   return nil
+end
+
+function widgets.cancel_step_slider(id)
+  step_slider_drag[id], reset_hold[id] = nil, nil
 end
 
 -- A dB fader, custom-drawn: slim track, accent fill, slim pill knob, and the value
@@ -532,8 +602,6 @@ end
 local pitch_drag = {}
 local HAS_ALT = reaper.ImGui_GetKeyMods ~= nil and reaper.ImGui_Mod_Alt ~= nil
 local AXIS_LOCK_PX = 2
-local ROUND_RIGHT = reaper.ImGui_DrawFlags_RoundCornersRight
-  and reaper.ImGui_DrawFlags_RoundCornersRight() or 0
 
 -- Returns (value, commit, edit_requested). Live drag frames use commit=false;
 -- release and reset use commit=true. Pitch is temporary, but the distinction
@@ -554,7 +622,7 @@ function widgets.semitone_drag(ctx, id, value, opts)
   end
 
   local result, commit
-  if widgets.wants_right_reset(ctx) then
+  if widgets.wants_pitch_reset(ctx) then
     pitch_drag[id] = nil
     if active then reset_hold[id] = true end
     result, commit = pitch.clamp(opts.default or 0), true
@@ -602,39 +670,16 @@ function widgets.semitone_drag(ctx, id, value, opts)
   local shown = result ~= nil and result or value
   local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  local text = pitch.format(shown)
+  local text = pitch.format(shown, opts.unit)
   local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
   local rounding = select(1,
     reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding()))
   local fill = active and T.FILL_PRIMARY or (hovered and T.FILL_SECONDARY or T.FILL_TERTIARY)
-  local prefix_w = opts.prefix and (opts.prefix_width or 0) or 0
-  local outer_x0 = x0 - prefix_w
-  if prefix_w > 0 then
-    -- One joined field: the label owns the quiet base fill, while the value's
-    -- half carries the normal hover/active feedback. The colour change is the
-    -- join; a divider would turn that boundary back into two adjacent boxes.
-    reaper.ImGui_DrawList_AddRectFilled(dl, outer_x0, y0, x0 + w, y0 + h,
-      fade(T.FILL_TERTIARY, alpha), rounding)
-    local value_fill = (hovered or active) and fill or T.FILL_QUATERNARY
-    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h,
-      fade(value_fill, alpha), rounding, ROUND_RIGHT)
-    -- Keep the shared seam square even when this ReaImGui build lacks the
-    -- right-corners-only drawing flag and rounds all four corners instead.
-    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0,
-      math.min(x0 + rounding, x0 + w), y0 + h, fade(value_fill, alpha))
-    reaper.ImGui_DrawList_AddRect(dl, outer_x0, y0, x0 + w, y0 + h,
-      fade((hovered or active) and T.STROKE_PRIMARY or T.STROKE_SECONDARY, alpha),
-      rounding, 0, 1)
-    local lw, lh = reaper.ImGui_CalcTextSize(ctx, opts.prefix)
-    reaper.ImGui_DrawList_AddText(dl, outer_x0 + (prefix_w - lw) * 0.5,
-      y0 + (h - lh) * 0.5, fade(T.TEXT_SECONDARY, alpha), opts.prefix)
-  else
-    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h,
-      fade(fill, alpha), rounding)
-    reaper.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h,
-      fade((hovered or active) and T.STROKE_PRIMARY or T.STROKE_SECONDARY, alpha),
-      rounding, 0, 1)
-  end
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + w, y0 + h,
+    fade(fill, alpha), rounding)
+  reaper.ImGui_DrawList_AddRect(dl, x0, y0, x0 + w, y0 + h,
+    fade((hovered or active) and T.STROKE_PRIMARY or T.STROKE_SECONDARY, alpha),
+    rounding, 0, 1)
   reaper.ImGui_DrawList_AddText(dl, x0 + (w - tw) * 0.5, y0 + (h - th) * 0.5,
     fade(T.ACCENT, alpha), text)
 
@@ -647,6 +692,24 @@ end
 -- Forget a drag or reset hold when its panel closes.
 function widgets.cancel_semitone_drag(id)
   pitch_drag[id], reset_hold[id] = nil, nil
+end
+
+-- Equal-width segments keep the Pitch header fixed when the unit changes.
+function widgets.pitch_units(ctx, id, unit)
+  local result
+  for i = 1, 2 do
+    local key, label = i == 1 and "st" or "percent", i == 1 and "st" or "%"
+    if i == 2 then reaper.ImGui_SameLine(ctx, 0, 0) end
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(),
+      unit == key and T.FILL_SECONDARY or T.FILL_QUATERNARY)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(),
+      unit == key and T.ACCENT or T.TEXT_SECONDARY)
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding(), 0)
+    if reaper.ImGui_Button(ctx, label .. "##" .. id .. key, M.PITCH_UNIT_W) then result = key end
+    reaper.ImGui_PopStyleVar(ctx)
+    reaper.ImGui_PopStyleColor(ctx, 2)
+  end
+  return result
 end
 
 -- Hoisted so the frame loop never rebuilds it (frame-allocation rule).

@@ -18,7 +18,26 @@ function pitch.rate(value)
   return 2 ^ (pitch.clamp(value) / 12)
 end
 
-function pitch.format(value)
+function pitch.unit(value)
+  return value == "percent" and "percent" or "st"
+end
+
+function pitch.display(value, unit)
+  return unit == "percent" and pitch.rate(value) * 100 or pitch.clamp(value)
+end
+
+function pitch.parse(text, unit)
+  local value = tonumber(text)
+  if not value or value ~= value then return nil end
+  if unit == "percent" then
+    value = math.max(25, math.min(400, value))
+    return pitch.clamp(12 * math.log(value / 100, 2))
+  end
+  return pitch.clamp(math.floor(value * 10 + 0.5) / 10)
+end
+
+function pitch.format(value, unit)
+  if unit == "percent" then return string.format("%.1f%%", pitch.display(value, unit)) end
   value = pitch.clamp(value)
   if math.abs(value) < 0.0005 then return "0.0 st" end
   return string.format("%+.1f st", value)

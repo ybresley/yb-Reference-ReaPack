@@ -36,6 +36,7 @@ local T = {
   ACCENT       = 0x599CE7FF, -- play, selection edge, active sort, drop highlight
   ACCENT_HOVER = 0x6AABE9FF,
   ACCENT_WASH  = 0x599CE714, -- drop-target fill while a file drag hovers it
+  SEARCH_MATCH_BG = 0x599CE747, -- matching text within a result row
   -- Red is reserved for destructive controls. The active latch follows ACCENT,
   -- so changing the user's palette changes that state along with the other
   -- active controls without weakening the danger meaning here.
@@ -109,6 +110,7 @@ function theme.set_accent(id)
   T.ACCENT = option.color
   T.ACCENT_HOVER = option.hover
   T.ACCENT_WASH = (option.color & ~0xFF) | 0x14
+  T.SEARCH_MATCH_BG = (option.color & ~0xFF) | 0x47
   T.WAVE_PLAYED = option.color
   T.FADER_FILL = option.color
   theme.invalidate_colours()
@@ -133,7 +135,7 @@ end
 -- these (see below). Change a size HERE, never in theme.metrics.
 local BASE = {
   -- ONE body text size for the whole app (2026-07-29 redesign review): the old
-  -- split — 13px working view vs 16px browser — was exactly the inconsistency
+  -- split — 13px Reference View vs 16px browser — was exactly the inconsistency
   -- the user flagged ("two size worlds"). theme.apply pushes this over ReaImGui's
   -- built-in 13px default once per frame, so both windows, every popup and every
   -- tooltip read the same. Control height follows automatically (13 + 2×4 = 21).
@@ -216,7 +218,7 @@ local BASE = {
   -- rather than shown as a sliver. Vertical priority is absolute: the control
   -- bar first, the ruler next, the waveform last.
   WAVE_HIDE_H = 24,
-  -- The working view's time ruler (waveform ruler brief, 2026-08-05): a fixed
+  -- The Reference View's time ruler (waveform ruler brief, 2026-08-05): a fixed
   -- strip carved OUT of the waveform's own height budget, never added on top —
   -- reserved whether or not a sound is currently armed, so it never changes
   -- size with state (ui/waveform.lua, ui/window.lua). The browser's strip
@@ -230,7 +232,7 @@ local BASE = {
   RULER_TICK_MINOR = 4, -- minor tick length, px
   -- The reference picker (2026-08-06 redesign — it replaced the reference-tab
   -- row, and with it the whole side-column arrangement and its two switch
-  -- thresholds: the working view is ONE control bar under the waveform now, so
+  -- thresholds: the Reference View is ONE control bar under the waveform now, so
   -- there is no arrangement left to choose between).
   PICK_MIN_W    = 80,  -- the name slot's smallest width before the bar wraps its cluster
   -- ...and its LARGEST. The slot is the bar's flexible element — it absorbs
@@ -244,11 +246,10 @@ local BASE = {
   -- PROVISIONAL number — the brief's own decision is that the final cap gets
   -- picked by eye in REAPER with the user; this is the starting point.
   PICK_MAX_W    = 260,
-  PICK_LIST_W   = 280, -- the list popup's width FLOOR (it widens to the slot's width)
-  -- ...and its CEILING. The slot is the bar's flexible element, so a wide
-  -- window grew it without limit and the list followed it into a very long,
-  -- very empty box (user-reported 2026-08-06).
-  PICK_LIST_MAX_W = 460,
+  PICK_LIST_W   = 280, -- minimum outer width; names determine the width on opening
+  PICK_LIST_MAX_W = 560, -- maximum outer width, further limited by the monitor
+  PICK_SCREEN_MARGIN = 8,
+  PICK_ANCHOR_GAP = 3,
   -- EVERY row is this tall (2026-08-06, second pass — user-reported). A labeled
   -- pin still gets two lines and an unlabeled one a single centred line, but
   -- they no longer have DIFFERENT heights: the old 40-vs-26 pair is where all
@@ -344,15 +345,13 @@ local BASE = {
   SEARCH_W  = 176, -- the search box (fits "Search name of sounds" + the embedded magnifier at BASE_FS 13)
   SEARCH_ICON_PAD = 24, -- left FramePadding.x for the search field, clearing the drawn magnifier glyph
   POPUP_BTN_W = 72, -- popup action buttons (OK / Cancel / Delete / Close)
-  -- The untitled Pitch panel is exactly as wide as its joined field. Width is
-  -- inner content; window padding adds the outer 16px.
-  PITCH_CONTENT_W = 165,
-  PITCH_LABEL_W = 92,
-  PITCH_VALUE_W = 73,
+  -- Inner width; ordinary window padding adds the outer 16px.
+  PITCH_CONTENT_W = 278,
+  PITCH_UNIT_W = 32,
+  PITCH_VALUE_W = 78,
   PITCH_ANCHOR_GAP = 2,
-  -- Fixed outer width for the multi-category delete confirmation. Long warning
-  -- lines wrap inside it instead of stretching the modal into a wide empty box.
-  CATEGORY_DELETE_W = 320,
+  -- Small confirmations fit their text; cap long names so they wrap.
+  POPUP_MAX_W = 280,
   -- The walkthrough card (2026-08-10, `.brief/_done/walkthrough/`): a titled
   -- card beside the ringed target. Width fixed — a card that resized to each
   -- stop's sentence would read as six different cards; height auto-sizes.
@@ -391,7 +390,6 @@ local BASE = {
   RECOVERY_WIN_W    = 420,
   RECOVERY_WIN_H    = 150,
   RECOVERY_STATUS_H = 24,
-  RECOVERY_ACTION_W = 120,
   -- The bullet indent (2026-08-09 round 2, `.brief/_done/changelog-lines/` —
   -- REPLACES the area-word rail of the same day, which the user turned down:
   -- a rail can cut or bend a long area word). A bullet hangs alone in this
@@ -504,14 +502,14 @@ local BASE = {
   BROWSER_WIN_W = 720,
   BROWSER_WIN_H = 520,
   -- The Library popup's OWN width floor (2026-08-12). MIN_WIN_W above is sized
-  -- for the WORKING VIEW's transport bar; the browser just reused it, which was
+  -- for the Reference View's transport bar; the browser just reused it, which was
   -- already tight with two toggles on the info row and went stale as transport
   -- controls joined them (five squares now — see the info row's own comment in
   -- ui/browser.lua). Applied at the browser's own
   -- SetNextWindowSizeConstraints call IN PLACE OF MIN_WIN_W (mirrors how
   -- MIN_WIN_H already gets RULER_H added for that same call — width needs a
   -- full replacement rather than an addition, since the row's shape has
-  -- nothing in common with the working view's bar).
+  -- nothing in common with the Reference View's bar).
   --
   -- Derived from what the row needs, worst case for room: the sidebar dragged
   -- to ITS OWN floor (SIDEBAR_MIN_W, 120 — the pane-splitter can't go narrower
@@ -533,6 +531,13 @@ local BASE = {
   -- corner while a newer version is published (DESIGN.md "Settings, help,
   -- feedback, and releases" — the gear is the notice's only home).
   UPDATE_DOT_R = 3,
+  -- The paint-only loudness progress card. It lives inside the waveform item,
+  -- so it never changes the layout or covers the transport bar below it.
+  ANALYSIS_CARD_W = 160,
+  ANALYSIS_CARD_COMPACT_W = 288,
+  ANALYSIS_CARD_PAD = 8,
+  ANALYSIS_CARD_GAP = 4,
+  ANALYSIS_CARD_RADIUS = 4,
 }
 
 -- ---- UI scale ---------------------------------------------------------------
@@ -823,7 +828,7 @@ end
 -- that stays legible on it.
 --
 -- Two behaviours are deliberately carried over from the widened close zone this
--- replaces (which used to live in ui/app.lua, for the working view only — every
+-- replaces (which used to live in ui/app.lua, for the Reference View only — every
 -- window gets it now):
 --   * the HIT AREA is the whole title-bar-height square at the window's right
 --     end, not the glyph alone (the glyph is a small target, 2026-07-30);

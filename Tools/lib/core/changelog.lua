@@ -14,7 +14,8 @@
 -- The grammar, fixed because this parses it:
 --
 --   ## 0.3.0 — 2026-08-08          a release; version first, ISO date anywhere
---   ### New                        a group heading
+--   A short overview.              optional text before the first group
+--   ### Changes                    a group heading
 --   - **Waveform** — what changed. an entry: bold area, separator, sentence
 --     One extra fact worth it.     optional detail line, indented, no bullet
 --
@@ -47,7 +48,7 @@ local SEPARATORS = {
 -- The group names, in the order they are always shown — never the order they
 -- happened to appear in the file. A group outside this list is kept but sorts
 -- last, so a typo in a heading is visible rather than silently dropped.
-changelog.GROUP_ORDER = { "New", "Improved", "Fixed" }
+changelog.GROUP_ORDER = { "Highlights", "Changes", "Fixes", "New", "Improved", "Fixed" }
 
 local function group_rank(name)
   for i, n in ipairs(changelog.GROUP_ORDER) do
@@ -76,7 +77,7 @@ local function split_area(body)
 end
 
 -- Parse the whole file. Returns releases in the order they appear, each:
---   { version = "0.3.0", date = "2026-08-08", groups = {
+--   { version = "0.3.0", date = "2026-08-08", summary = ?, groups = {
 --       { name = "New", entries = { { area = ?, text = "…", detail = ? } } } } }
 --
 -- Releases are NOT re-sorted: the file is written newest-first and that order is
@@ -84,6 +85,8 @@ end
 function changelog.parse(text)
   local releases = {}
   if type(text) ~= "string" then return releases end
+  -- Authoring comments may contain example headings and must never become notes.
+  text = text:gsub("<!%-%-.-%-%->", "")
 
   local release, group, entry
 
@@ -111,11 +114,14 @@ function changelog.parse(text)
       -- release skill wraps long detail across lines, and dropping all but the
       -- last would silently lose half a sentence.
       entry.detail = entry.detail and (entry.detail .. " " .. detail) or detail
+    elseif release and not group and not bullet and line:match("^%S") then
+      local summary = line:gsub("%s+$", "")
+      release.summary = release.summary and (release.summary .. " " .. summary) or summary
     end
   end
 
   -- Groups into their canonical order, in place. A stable insertion sort: the
-  -- lists are three long, and table.sort gives no stability guarantee for the
+  -- lists are short, and table.sort gives no stability guarantee for the
   -- unknown-heading case that all ranks last.
   for _, r in ipairs(releases) do
     for i = 2, #r.groups do
@@ -195,8 +201,8 @@ function changelog.wrap(text, width)
 end
 
 -- One release as structured plain text for ReaPack's transaction report.
--- ReaPack adds the version, author and date itself, so this contains only group
--- headings and entries. Detail lines stay in the tool's full release notes; the
+-- ReaPack adds the version, author and date itself, so this contains only the
+-- overview, headings and entries. Detail lines stay in the full release notes; the
 -- compact native report gets the short first line of each entry.
 function changelog.reapack_lines(release, width)
   if not release then return {} end
@@ -209,6 +215,12 @@ function changelog.reapack_lines(release, width)
   -- both the visual spacer above each group and the nesting beneath it.
   local spacer = "\u{00A0}"
   local indent = spacer .. spacer
+
+  if release.summary then
+    for _, line in ipairs(changelog.wrap(release.summary, content_width)) do
+      out[#out + 1] = line
+    end
+  end
 
   for _, g in ipairs(release.groups or {}) do
     if #(g.entries or {}) > 0 then

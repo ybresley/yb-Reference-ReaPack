@@ -189,7 +189,7 @@ local function start(path, db, loop, position, semitones, channels)
     reaper.CF_Preview_SetValue(h, "B_PPITCH", 0)
     reaper.CF_Preview_SetValue(h, "D_PLAYRATE", rate)
     if position and position > 0 then
-      reaper.CF_Preview_SetValue(h, "D_POSITION", position)
+      reaper.CF_Preview_SetValue(h, "D_POSITION", position / rate)
     end
     built[i] = { handle = h, src = src, route = route }
   end
@@ -244,13 +244,21 @@ end
 -- write reaches the audible and silent routes so switching mono later never
 -- reveals a route left at an older pitch.
 function preview.set_pitch(semitones)
+  local old_rate = pitch.rate(live.pitch)
   live.pitch = pitch.clamp(semitones)
   local rate = pitch.rate(live.pitch)
+  if rate == old_rate then return end
   for i = 1, #live.parts do
     local h = handle_of(live.parts[i])
     if h then
-      reaper.CF_Preview_SetValue(h, "B_PPITCH", 0)
-      reaper.CF_Preview_SetValue(h, "D_PLAYRATE", rate)
+      local ok, position = reaper.CF_Preview_GetValue(h, "D_POSITION")
+      if ok then
+        reaper.CF_Preview_SetValue(h, "B_PPITCH", 0)
+        reaper.CF_Preview_SetValue(h, "D_PLAYRATE", rate)
+        -- SWS uses output seconds. Rebase its clock so the new rate keeps the
+        -- same source point, including its end-of-file and loop boundary.
+        reaper.CF_Preview_SetValue(h, "D_POSITION", position * old_rate / rate)
+      end
     end
   end
 end
@@ -266,7 +274,7 @@ function preview.set_loop(on)
 end
 
 function preview.seek(position)
-  local pos = position or 0
+  local pos = (position or 0) / pitch.rate(live.pitch)
   for i = 1, #live.parts do
     local h = handle_of(live.parts[i])
     if h then reaper.CF_Preview_SetValue(h, "D_POSITION", pos) end
@@ -278,8 +286,9 @@ end
 -- when a file has been replaced on disk since import.
 function preview.length() return live.length end
 
--- Current playback position in seconds, or nil if the preview is gone. Read from
--- the FIRST part only: every part plays the same file from the same spot, and
+-- Current position in source seconds, or nil if the preview is gone. SWS uses
+-- output seconds; the waveform, pause positions and saved spans use source time.
+-- Read from the FIRST part only: every part plays the same file from the same spot, and
 -- one authority means the playhead can never flicker between two answers. The
 -- first part is the stereo route, which is silent in mono but still playing —
 -- position doesn't care about volume.
@@ -291,7 +300,7 @@ function preview.position()
   if not h then return nil end
   local ok, pos = reaper.CF_Preview_GetValue(h, "D_POSITION")
   if not ok then return nil end
-  return pos
+  return pos * pitch.rate(live.pitch)
 end
 
 -- Call once per frame. A non-looping preview destroys its own handle when it

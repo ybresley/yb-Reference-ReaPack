@@ -1,4 +1,4 @@
--- matchwin: the working view's LOUDNESS panel — the target button (◎) beside
+-- matchwin: the Reference View's LOUDNESS panel — the target button (◎) beside
 -- the trim fader and the window it opens (DESIGN.md "Loudness").
 --
 -- On screen it is "LOUDNESS", and its custom-target button is "Normalize"
@@ -185,12 +185,21 @@ end
 -- the ◎ would have supplied (its rect), so the window still stands exactly
 -- where clicking the button yourself would have put it; without one it falls
 -- back to wherever ImGui last had it.
-function matchwin.open_at(x, y_top, y_bottom)
+function matchwin.open_at(x, y_top, y_bottom, options)
   if ui.open then return end
   ui.rect, ui.settle = nil, 0 -- a fresh open re-settles from scratch
   ui.open_request = true
   ui.edit_mode = false
   ui.edit_index = nil
+  if options then
+    ui.edit_mode = options.edit_mode == true
+    ui.edit_index = options.edit_index
+    if options.target then
+      ui.custom_unit = combo_index(options.target.unit)
+      ui.custom_text = tostring(options.target.value)
+    end
+    ui.drag_index = nil
+  end
   ui.anchor_x, ui.anchor_y, ui.anchor_y1 = x, y_top, y_bottom
 end
 
@@ -630,6 +639,9 @@ function matchwin.draw_popup(ctx, state, res)
   -- then): the panel shows the numbers as much as it sets them, and "match"
   -- named only half of it. The ### id is unchanged on purpose — it is what
   -- ImGui keys the window by, and renaming it would drop its remembered state.
+  -- Every state uses the same content width, including an empty preset list.
+  local outer_width = width + M.WINDOW_PAD * 2
+  reaper.ImGui_SetNextWindowSizeConstraints(ctx, outer_width, 0, outer_width, 10000)
   local visible, still_open = theme.begin_window(ctx, "LOUDNESS###yb_matchwin",
     true, flags, true)
   if not still_open then ui.open = false end
@@ -713,8 +725,11 @@ function matchwin.draw_popup(ctx, state, res)
     action = action or row_action
   end
   if #presets == 0 then
+    reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + width)
     reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY,
-      "No presets yet. Choose Edit Presets to add one.")
+      ui.edit_mode and "Set a target above, then choose Add."
+        or "No presets yet. Choose Edit Presets to add one.")
+    reaper.ImGui_PopTextWrapPos(ctx)
   else
     -- The rows sit flush (their own ItemSpacing is zeroed), which also swallows
     -- the gap between the LAST row and whatever follows it (user-reported

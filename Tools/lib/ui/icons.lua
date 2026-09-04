@@ -20,22 +20,23 @@ local icons = {}
 
 -- Lucide name -> Private-Use-Area codepoint. Only the ones we actually use.
 icons.NAMES = {
-  ["folder"]      = 0xE0D7,
-  ["folder-open"] = 0xE247,
-  ["trash-2"]     = 0xE18E,
-  ["settings"]    = 0xE154,
-  ["search"]      = 0xE151,
-  ["file-text"]   = 0xE0CC,
-  ["plus"]        = 0xE13D,
-  ["play"]        = 0xE13C,
-  ["pause"]       = 0xE12E,
-  ["square"]      = 0xE167, -- stop (Lucide has no "stop"; its square is the convention)
-  ["repeat"]      = 0xE146, -- loop
-  ["ear"]         = 0xE382, -- auto-audition (hear a sound the moment you select it)
-  ["music-2"]     = 0xE34A, -- natural pitch audition
-  ["library"]     = 0xE100, -- the working view's Library button (opens the browser popup)
-  ["pin"]         = 0xE259, -- the sound table's pinned-to-project column (2026-07-29 redesign)
-  -- The reference picker in the working view's control bar (2026-08-06).
+  ["folder"]           = 0xE0D7,
+  ["folder-open"]      = 0xE247,
+  ["trash-2"]          = 0xE18E,
+  ["settings"]         = 0xE154,
+  ["search"]           = 0xE151,
+  ["file-text"]        = 0xE0CC,
+  ["plus"]             = 0xE13D,
+  ["play"]             = 0xE13C,
+  ["pause"]            = 0xE12E,
+  ["square"]           = 0xE167, -- stop (Lucide has no "stop"; its square is the convention)
+  ["link"]             = 0xE102, -- reference playback follows the project transport
+  ["repeat"]           = 0xE146, -- loop
+  ["ear"]              = 0xE382, -- auto-audition (hear a sound the moment you select it)
+  ["music-2"]          = 0xE34A, -- natural pitch audition
+  ["library"]          = 0xE100, -- the Reference View's Library button (opens the browser popup)
+  ["pin"]              = 0xE259, -- the sound table's pinned-to-project column (2026-07-29 redesign)
+  -- The reference picker in the Reference View's control bar (2026-08-06).
   ["chevron-down"]  = 0xE06D, -- the name slot's "this opens a list" mark
   ["chevron-left"]  = 0xE06E, -- previous reference
   ["chevron-right"] = 0xE06F, -- next reference
