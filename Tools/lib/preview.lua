@@ -80,6 +80,26 @@ local live = {
   pitch  = 0,     -- semitones; natural rate-style pitch, shared by every route
 }
 
+-- SWS acknowledges Stop before its timer has necessarily destroyed the preview's
+-- own source copy. Keep only those outstanding handles, tagged by file, so a
+-- deletion can wait for actual release without delaying unrelated sounds.
+local retiring = {}
+
+local function collect_retired()
+  for i = #retiring, 1, -1 do
+    if not reaper.CF_Preview_GetValue(retiring[i].handle, "D_POSITION") then
+      table.remove(retiring, i)
+    end
+  end
+end
+
+local function retire(handle, path)
+  reaper.CF_Preview_Stop(handle)
+  if reaper.CF_Preview_GetValue(handle, "D_POSITION") then
+    retiring[#retiring + 1] = { handle = handle, path = path }
+  end
+end
+
 -- dB -> linear gain for D_VOLUME (0 dB = 1.0). Volume only ever needs a real
 -- meaning at the moment we hand it to the engine, so the conversion lives here.
 local function db_to_gain(db)
@@ -106,15 +126,15 @@ local function handle_of(p)
   return nil
 end
 
--- Release every part. Stop() also destroys the preview object, so we must not
--- touch (or re-Stop) a handle after; the sources are ours to destroy separately
--- (CF_CreatePreview does not take ownership of them). A part the engine already
--- freed only needs its source dropped.
+-- Request release of every part. Only validity checks may touch stopped handles;
+-- SWS finishes destroying them on its timer. Our original sources are independent
+-- of the copies owned by SWS and can be destroyed here.
 local function release()
+  collect_retired()
   for i = 1, #live.parts do
     local p = live.parts[i]
     local h = handle_of(p)
-    if h then reaper.CF_Preview_Stop(h) end
+    if h then retire(h, p.path) end
     if p.src then reaper.PCM_Source_Destroy(p.src) end
     live.parts[i] = nil
   end
@@ -143,7 +163,7 @@ end
 -- first, which is already open and not yet in live.parts.
 local function discard(built)
   for i = 1, #built do
-    if built[i].handle then reaper.CF_Preview_Stop(built[i].handle) end
+    if built[i].handle then retire(built[i].handle, built[i].path) end
     if built[i].src then reaper.PCM_Source_Destroy(built[i].src) end
   end
   live.channels = 0
@@ -191,7 +211,7 @@ local function start(path, db, loop, position, semitones, channels)
     if position and position > 0 then
       reaper.CF_Preview_SetValue(h, "D_POSITION", position / rate)
     end
-    built[i] = { handle = h, src = src, route = route }
+    built[i] = { handle = h, src = src, route = route, path = path }
   end
   for i = 1, #built do reaper.CF_Preview_Play(built[i].handle) end
 
@@ -211,6 +231,14 @@ end
 
 function preview.stop()
   release()
+end
+
+function preview.releasing(path)
+  collect_retired()
+  for i = 1, #retiring do
+    if retiring[i].path == path then return true end
+  end
+  return false
 end
 
 -- Turn mono monitoring on or off. A MODE, not a per-playback option: it is
@@ -312,6 +340,7 @@ end
 -- and the end is only reported once EVERY part is done. Reporting on the first
 -- would strand the other still sounding.
 function preview.poll()
+  collect_retired()
   if #live.parts == 0 then return false end
   local alive = 0
   for i = 1, #live.parts do

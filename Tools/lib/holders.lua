@@ -1,9 +1,9 @@
 -- holders: what live work is attached to a sound, and how to make all of it let
 -- go at once.
 --
--- At any moment up to five things can be holding one sound: the audio playing it,
+-- At any moment up to six things can be holding one sound: the audio playing it,
 -- the memory of where it was paused (in either window — see the pause memory
--- below), a waveform being read off it, a loudness pass measuring it, and
+-- below), a waveform being built, its visible detail reader, a loudness pass, and
 -- reference mode's marks saying it is the armed reference.
 -- Deleting a sound, unpinning it, or walking away from the whole library has to
 -- make EVERY one of them let go first — a source left open holds the file for the
@@ -24,6 +24,7 @@
 local preview  = require("preview")
 local peaks    = require("peaks")
 local loudness = require("loudness")
+local wave_detail = require("wave_detail")
 local copies   = require("analysis_copies")
 
 local holders = {}
@@ -196,7 +197,7 @@ end
 
 -- Every place a sound can be held, in the order they let go. The order is
 -- deliberate: the audible holder first (it is the only one the user can hear),
--- then the memory of it, then the two background readers keeping the file open,
+-- then the memory of it, then the background readers keeping the file open,
 -- and last the marks that merely describe what was armed.
 --
 -- `ids` reads whichever sound ids this holder is attached to right now (up to
@@ -237,6 +238,14 @@ local HOLDERS = {
         local p = state.preview.paused[slot]
         if p and matches(p.sound_id) then holders.clear_pause(state, slot) end
       end
+    end,
+  },
+  {
+    name = "wave_detail",
+    ids = function() return wave_detail.current() end,
+    let_go = function(state)
+      wave_detail.close()
+      state.wave_detail = { sound_id = nil, channels = {}, count = 0 }
     end,
   },
   {

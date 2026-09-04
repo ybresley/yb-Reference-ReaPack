@@ -971,29 +971,20 @@ function reaper_api.directory_is_empty(path)
   return true
 end
 
--- Move a file. os.rename is instant when both ends are on the same drive, which is
--- the normal case here (the trash folder lives inside the library folder). If it
--- refuses — a library folder on a different drive, a lock — fall back to copying
--- and then deleting the original. Returns true, or false + message.
---
--- If the copy lands but the original won't delete, this still reports success: the
--- file HAS arrived, and the leftover is picked up as an orphan by the startup sweep.
--- Reporting failure there would be worse — the caller would abandon a move that in
--- fact happened, leaving two copies AND the record still pointing at the old one.
+-- Library deletion moves into its own trash subfolder. Use one rename so a
+-- refusal leaves the original intact and the caller can keep its Library record.
+-- Copying first cannot safely complete a move when the original is held open.
 function reaper_api.move_file(src, dest)
-  -- Refuse outright if something is already there. os.rename won't overwrite, but
-  -- the copy fallback opens the destination for writing and would empty it before
-  -- reading a single byte — turning a safe refusal into a destroyed file.
+  -- Never replace an existing destination, even on platforms where rename allows it.
   if reaper_api.path_exists(dest) then
     return false, "Couldn't move the file because another file already exists at the destination: " ..
       dest .. "."
   end
 
-  if os.rename(src, dest) then return true end
-  local copied, err = reaper_api.copy_file(src, dest)
-  if not copied then return false, err end
-  os.remove(src)
-  return true
+  local moved, err = os.rename(src, dest)
+  if moved then return true end
+  return false, product_error.with_details(
+    "Check that the audio file is available and isn't in use, then try again.", err)
 end
 
 -- Every file directly inside a folder (non-recursive, no sub-folders). Returns

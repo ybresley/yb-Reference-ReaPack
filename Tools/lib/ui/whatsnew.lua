@@ -202,10 +202,10 @@ function whatsnew.draw_release(ctx, release, opts)
     end
   end
 
-  if release.summary then
+  if release.overview then
     local reading = theme.push_release_font(ctx)
     if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, WRAP_TO_EDGE) end
-    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, release.summary)
+    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, release.overview)
     if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
     if reading then reaper.ImGui_PopFont(ctx) end
   end

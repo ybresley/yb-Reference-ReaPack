@@ -134,27 +134,28 @@ end
 local WAVE_PANEL_SOLID = flatten_colour(T.WAVE_BG, T.BG_WINDOW)
 local WAVE_UNPLAYED_SOLID = flatten_colour(T.WAVE_BARS, WAVE_PANEL_SOLID)
 
-local function draw_lane(dl, x, lane_y, lane_h, cols, overview, detail, detail_count,
+local function projected_y(view, amplitude, gain, lane_y, lane_h)
+  local inset = math.min(M.WAVE_LANE_PAD, lane_h * 0.1)
+  local draw_h = math.max(1, lane_h - inset * 2)
+  return lane_y + inset + viewport.y_of_amp(view, amplitude * gain) * draw_h
+end
+
+local function draw_lane(dl, x, lane_y, lane_h, cols, overview, detail, detail_count, detail_cols,
     view, show_head, play_frac, gain)
   local source = detail or overview
   local n = detail and detail_count or #overview.maxs
   if not source or not n or n < 1 then return end
   local view_span = view.t1 - view.t0
-  local amp_span = view.a1 - view.a0
-  local inset = math.min(M.WAVE_LANE_PAD, lane_h * 0.1)
-  local draw_h = math.max(1, lane_h - inset * 2)
-  local draw_y = lane_y + inset
-  local function projected_y(amplitude)
-    return draw_y + ((view.a1 - amplitude * gain) / amp_span) * draw_h
-  end
-
   reaper.ImGui_DrawList_PushClipRect(dl, x, lane_y, x + cols, lane_y + lane_h, true)
-  if detail and n > 1 and n < cols then
+  -- Compare the returned count with the peak request, not the panel width,
+  -- so a capped request still draws bars across the full panel.
+  if detail and n > 1 and n < detail_cols then
     local previous_x, previous_y
     for sample = 1, n do
       local frac = (sample - 1) / (n - 1)
       local cx = x + frac * cols
-      local cy = projected_y((source.maxs[sample] + source.mins[sample]) * 0.5)
+      local cy = projected_y(view, (source.maxs[sample] + source.mins[sample]) * 0.5,
+        gain, lane_y, lane_h)
       if previous_x then
         local sample_time = view.t0 + frac * view_span
         local col = (show_head and sample_time <= play_frac) and T.WAVE_PLAYED or WAVE_UNPLAYED_SOLID
@@ -180,7 +181,8 @@ local function draw_lane(dl, x, lane_y, lane_h, cols, overview, detail, detail_c
         if source.maxs[b] > hi then hi = source.maxs[b] end
         if source.mins[b] < lo then lo = source.mins[b] end
       end
-      local y_hi, y_lo = projected_y(hi), projected_y(lo)
+      local y_hi = projected_y(view, hi, gain, lane_y, lane_h)
+      local y_lo = projected_y(view, lo, gain, lane_y, lane_h)
       local cx = math.floor(x) + px
       local sample_time = view.t0 + ((px + 0.5) / cols) * view_span
       local col = (show_head and sample_time <= play_frac) and T.WAVE_PLAYED or WAVE_UNPLAYED_SOLID
@@ -305,19 +307,19 @@ function waveform.draw(ctx, state, height, opts)
     local detail = opts.detail
     local detail_channels = detail and detail.sound_id == target_id
       and detail.count and detail.count > 0
-      and detail.t0 == view.t0 and detail.t1 == view.t1 and detail.cols == cols
+      and detail.t0 == view.t0 and detail.t1 == view.t1 and detail.width == cols
       and detail.channels or nil
     local detail_count = detail_channels and detail.count or nil
     for ci = 1, nch do
       local lane_y = y + (ci - 1) * lane_h
       draw_lane(dl, x, lane_y, lane_h, cols, chans[ci],
-        detail_channels and detail_channels[ci] or nil, detail_count,
+        detail_channels and detail_channels[ci] or nil, detail_count, detail and detail.cols,
         view, show_head, play_frac, gain)
 
       -- Each channel zooms around its own zero line. Match the waveform colour
       -- on either side of the playhead, so the baseline reads as part of the
       -- waveform rather than as a second pale outline.
-      local zero_y = lane_y + viewport.y_of_amp(view, 0) * lane_h
+      local zero_y = projected_y(view, 0, gain, lane_y, lane_h)
       if zero_y >= lane_y and zero_y <= lane_y + lane_h then
         zero_y = math.floor(zero_y + 0.5)
         local split = math.max(x, math.min(x + avail_w,

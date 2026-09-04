@@ -519,6 +519,7 @@ if not library_remembered then reaper_api.set_library_dir(library_dir) end
 -- in ui/app: context creation and the per-frame draw. library_service performs
 -- the library-changing work the UI asks for (importing, orphan sweep).
 local service    = require("library_service")
+local library_delete = require("library_delete")
 local categories = require("core.categories")
 local search     = require("core.search")
 local browser_memory = require("core.browser_memory")
@@ -980,22 +981,34 @@ end
 
 local function refresh_wave_detail()
   if not state.selected_id or not state.wave_cols then return end
+  if state.waveform.sound_id ~= state.selected_id then return end
+  -- Peak columns are capped; width keeps the drawing tied to its panel size.
+  local cols = wave_detail.columns(state.wave_cols)
   local current = state.wave_detail
-  if current.sound_id == state.selected_id and current.cols == state.wave_cols
+  if current.sound_id == state.selected_id and current.cols == cols
     and current.t0 == state.wave_view.t0 and current.t1 == state.wave_view.t1 then
+    current.width = state.wave_cols
     return
   end
-  local channels, count, read_error = wave_detail.read(state.selected_id,
-    state.wave_view.t0, state.wave_view.t1, state.wave_cols)
+  -- A refused removal keeps the finished envelope but releases its file reader.
+  -- Reopen here so detail does not depend on another envelope build completing.
+  local channels, count, read_error
+  if wave_detail.current() ~= state.selected_id
+    and not wave_detail.open(state.selected_id, sound_path(state.selected)) then
+    read_error = "Waveform detail couldn't be opened."
+  else
+    channels, count, read_error = wave_detail.read(state.selected_id,
+      state.wave_view.t0, state.wave_view.t1, cols)
+  end
   if channels then
     state.wave_detail = { sound_id = state.selected_id, channels = channels, count = count,
-      cols = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
+      cols = cols, width = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
   else
     -- Remember this failed request so the defer loop does not hammer the same
     -- host read every frame. The viewer rejects the empty detail and keeps the
     -- valid whole-file envelope on screen.
     state.wave_detail = { sound_id = state.selected_id, channels = {}, count = 0,
-      cols = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
+      cols = cols, width = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
     if read_error then state.status = read_error .. " Showing the overview instead." end
   end
 end
@@ -1006,10 +1019,7 @@ local function deliver_wave(wid, chans)
   if not wid then return end
   if wid == state.selected_id then
     state.waveform = { sound_id = wid, channels = chans }
-    if state.wave_detail.sound_id ~= wid and state.selected
-      and wave_detail.open(wid, sound_path(state.selected)) then
-      refresh_wave_detail()
-    end
+    refresh_wave_detail()
   end
   if wid == state.browse_id then state.browse_waveform = { sound_id = wid, channels = chans } end
 end
@@ -1388,11 +1398,9 @@ end
 
 --------------------------------------------------------------- pins
 
--- Unpin: like delete, anything holding the pin must let go first — its References
--- copy is about to be removed. Only the project's own copy is at stake; the
--- library original, if there is one, is never touched. (Loudness never runs on
--- pins, so there is no measurement to stop here — holders knows that, so this
--- doesn't have to.)
+-- Unpin releases work attached to the record being removed. Both the project's
+-- References audio and the Library original remain on disk; other projects may
+-- still need the References copy.
 local function unpin_sound(id)
   local p = find_sound(id)
   if not p then return end
@@ -1952,10 +1960,13 @@ local function handle_action(a)
     if not reaper_api.reveal_file(state.library_path) then
       state.status = "Couldn't open the Library folder automatically. It's here:  " .. state.library_dir
     end
-  elseif a.type == "delete_sound" then
-    delete_sound(a.id)
-  elseif a.type == "delete_sounds" then
-    delete_sounds(a.ids)
+  elseif a.type == "delete_sound" or a.type == "delete_sounds" then
+    local ok, message = library_delete.request(state,
+      a.type == "delete_sound" and { a.id } or a.ids)
+    if not ok then
+      state.status = message
+      reaper_api.message(message, "yb-Reference · Delete Sounds")
+    end
   elseif a.type == "set_loud_unit" then
     -- Switching the displayed measurement re-sorts too, so the order on screen
     -- always matches the numbers on screen when the list is sorted by loudness.
@@ -2575,6 +2586,13 @@ local function loop()
   -- result file keeps REAPER's defer loop alive while the dialog is open.
   poll_library_folder()
 
+  local delete_ids, delete_error = library_delete.tick(state)
+  if delete_ids then delete_sounds(delete_ids) end
+  if delete_error then
+    state.status = delete_error
+    reaper_api.message(delete_error, "yb-Reference · Delete Sounds")
+  end
+
   -- Reference mode is shown from the project in front: another tab may own the
   -- one live latch, while this tab's L button stays off and usable. A queued
   -- project restoring here never disturbs a different live owner.
@@ -2629,8 +2647,9 @@ local function loop()
 
   -- Advance playback bookkeeping before drawing so the waveform shows this frame's
   -- position. poll() reports a non-looping preview that just ended on its own.
+  local preview_ended = preview.poll()
   if state.preview.playing then
-    if preview.poll() then
+    if preview_ended then
       state.preview.playing = false
       state.preview.sound_id = nil
       state.preview.slot = nil

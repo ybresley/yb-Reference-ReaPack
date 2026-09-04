@@ -18,6 +18,14 @@ function detail.close()
   close_current()
 end
 
+function detail.current()
+  return current and current.sound_id
+end
+
+function detail.columns(width)
+  return math.max(1, math.min(CAPACITY, math.floor(width or 1)))
+end
+
 function detail.open(sound_id, path)
   close_current()
   local source = reaper.PCM_Source_CreateFromFile(path)
@@ -30,7 +38,7 @@ function detail.open(sound_id, path)
   end
   current = {
     sound_id = sound_id, source = source, duration = duration,
-    channel_count = channel_count, capacity = CAPACITY,
+    channel_count = channel_count,
     buffer = reaper.new_array(channel_count * CAPACITY * 2),
     channels = {}, count = 0, t0 = nil, t1 = nil, cols = 0,
   }
@@ -41,7 +49,7 @@ end
 function detail.read(sound_id, t0, t1, cols)
   local source = current
   if not source or source.sound_id ~= sound_id then return nil end
-  cols = math.max(1, math.min(source.capacity, math.floor(cols or 1)))
+  cols = detail.columns(cols)
   if source.t0 == t0 and source.t1 == t1 and source.cols == cols then
     return source.channels, source.count
   end

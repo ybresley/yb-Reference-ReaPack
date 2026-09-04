@@ -747,7 +747,9 @@ local function draw_category_delete_confirm(ctx)
     del.open = false
   end
 
-  popups.fit_width(ctx, heading, explanation)
+  if reaper.ImGui_IsPopupOpen(ctx, popup_id) then
+    popups.fit_width(ctx, heading, explanation)
+  end
   local action
   -- Ordinary popups keep both panels undimmed; dismissal never confirms deletion.
   if reaper.ImGui_BeginPopup(ctx, popup_id) then
@@ -1174,7 +1176,9 @@ local function draw_delete_confirm(ctx)
     del.open = false
   end
 
-  popups.fit_width(ctx, heading, explanation)
+  if reaper.ImGui_IsPopupOpen(ctx, popup_id) then
+    popups.fit_width(ctx, heading, explanation)
+  end
   -- A modal would dim the other windows even with a transparent local backdrop.
   if reaper.ImGui_BeginPopup(ctx, popup_id) then
     if HAS_WRAP_POS then reaper.ImGui_PushTextWrapPos(ctx, 0) end

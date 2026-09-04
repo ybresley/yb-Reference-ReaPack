@@ -77,7 +77,7 @@ local function split_area(body)
 end
 
 -- Parse the whole file. Returns releases in the order they appear, each:
---   { version = "0.3.0", date = "2026-08-08", summary = ?, groups = {
+--   { version = "0.3.0", date = "2026-08-08", overview = ?, groups = {
 --       { name = "New", entries = { { area = ?, text = "…", detail = ? } } } } }
 --
 -- Releases are NOT re-sorted: the file is written newest-first and that order is
@@ -114,9 +114,11 @@ function changelog.parse(text)
       -- release skill wraps long detail across lines, and dropping all but the
       -- last would silently lose half a sentence.
       entry.detail = entry.detail and (entry.detail .. " " .. detail) or detail
-    elseif release and not group and not bullet and line:match("^%S") then
-      local summary = line:gsub("%s+$", "")
-      release.summary = release.summary and (release.summary .. " " .. summary) or summary
+    elseif release and not group and not bullet and not line:match("^%s*#") then
+      local overview = line:match("^%s*(%S.-)%s*$")
+      if overview then
+        release.overview = release.overview and (release.overview .. " " .. overview) or overview
+      end
     end
   end
 
@@ -216,8 +218,8 @@ function changelog.reapack_lines(release, width)
   local spacer = "\u{00A0}"
   local indent = spacer .. spacer
 
-  if release.summary then
-    for _, line in ipairs(changelog.wrap(release.summary, content_width)) do
+  if release.overview then
+    for _, line in ipairs(changelog.wrap(release.overview, content_width)) do
       out[#out + 1] = line
     end
   end
