@@ -371,14 +371,10 @@ local BASE = {
   -- at which a real library path is still recognisable before it needs cutting.
   -- Draggable-and-remembered was offered and rejected — that would have cost
   -- Settings its modal behaviour.
-  -- The What's New card (2026-08-08, `.brief/_done/changelog/`). Its own window,
-  -- not the Settings one opening itself: a 620-wide panel landing on you at
-  -- startup is heavier than a card, and this one is pure reading — no buttons,
-  -- closed by its ✕ or Esc. Width is a READING measure, narrower than Settings:
-  -- a changelog line is a sentence, and 620 would run it too wide to scan.
+  -- What's New and release history share a fixed reading width.
   -- Height is a CEILING, not a size — the window auto-sizes to a short release
   -- and scrolls inside this once a big one (or several missed ones) passes it.
-  WN_WIN_W    = 440,
+  WN_WIN_W    = 495,
   WN_MAX_H    = 420,
   -- Release notes are a reading surface, so their body sits one step above the
   -- app's compact 13px control text. The version, group and area labels use the
