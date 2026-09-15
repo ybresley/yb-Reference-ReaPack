@@ -282,6 +282,175 @@ Fixes
         <source file="CHANGELOG.md">https://github.com/ybresley/yb-Reference-ReaPack/raw/d412c5f674e97191e1a9f03c3cdb577ca62388e3/Tools/CHANGELOG.md</source>
         <source main="main" file="yb-Reference_ToggleReferenceMode.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/d412c5f674e97191e1a9f03c3cdb577ca62388e3/Tools/yb-Reference_ToggleReferenceMode.lua</source>
       </version>
+      <version name="0.4.0" author="Yoni Bresley" time="2026-09-15T11:06:32Z">
+        <changelog><![CDATA[This update brings a new high-quality frequency spectrum analyser, an
+improved waveform display and new interface animations, alongside smaller
+improvements and bug fixes.
+ 
+Highlights
+  • Spectrum Analyser: A new high-quality frequency spectrum analyser
+    shows the frequency balance of reference playback, Library auditioning
+    and the Reaper project. It includes detailed frequency readouts and
+    adjustable listening bands, so you can inspect and hear specific parts
+    of a sound.
+  • Improved Waveform: The waveform now shows finer detail down to
+    individual samples, with combined time navigation and zoom, plus
+    independent waveform height adjustment.
+  • Panel Layout: The waveform and spectrum now arrange themselves to fit
+    the available space, with Side by Side and Stacked options in Settings
+    and a swap button to change their order.
+  • UI Animations: Buttons, switches and colour changes now have subtle
+    animations, adding motion to everyday controls. Interface Animations
+    in Settings → Appearance turns them on or off.
+ 
+Changes
+  • Reference Picker: Pinned-reference labels can now be edited in place
+    without closing the dropdown.
+  • Reference Playback: Reference View and Library volume readouts now
+    accept exact typed values and reset with right-click.
+  • Updates: What's New can now present substantial release features with
+    silent guided demonstrations while keeping the full release notes
+    available.
+  • Library: New categories can now be confirmed with Enter.
+ 
+Fixes
+  • Library: Library waveforms now continue loading after a sound file
+    cannot be read.
+  • Waveform: Start and end markers now match in size and stay aligned to
+    the waveform.
+  • Reference Playback: Library Pitch changes now apply reliably during
+    audition.
+  • Reference Playback: Pitch panels now stay on the current monitor and
+    remain scrollable when screen space is limited.
+  • Reference Playback: Volume readouts now show rounded zero consistently
+    while keeping the sign of nonzero values.
+  • Loudness: The Loudness panel now stays on the current monitor, opens
+    clear of its button and keeps all controls reachable.
+  • Reference Picker: Dropdown rows now keep consistent widths, and the
+    scrollbar appears only when needed.]]></changelog>
+        <source main="main">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/yb-Reference.lua</source>
+        <source file="lib/analysis_copies.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/analysis_copies.lua</source>
+        <source file="lib/analysis_service.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/analysis_service.lua</source>
+        <source file="lib/core/actions.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/actions.lua</source>
+        <source file="lib/core/analysis.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/analysis.lua</source>
+        <source file="lib/core/browser_memory.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/browser_memory.lua</source>
+        <source file="lib/core/categories.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/categories.lua</source>
+        <source file="lib/core/changelog.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/changelog.lua</source>
+        <source file="lib/core/control_bar_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/control_bar_layout.lua</source>
+        <source file="lib/core/decibels.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/decibels.lua</source>
+        <source file="lib/core/feedback.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/feedback.lua</source>
+        <source file="lib/core/importer.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/importer.lua</source>
+        <source file="lib/core/library_location.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/library_location.lua</source>
+        <source file="lib/core/library_store.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/library_store.lua</source>
+        <source file="lib/core/loop_icon.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/loop_icon.lua</source>
+        <source file="lib/core/match.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/match.lua</source>
+        <source file="lib/core/monitor_filter.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/monitor_filter.lua</source>
+        <source file="lib/core/monitor_helper_status.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/monitor_helper_status.lua</source>
+        <source file="lib/core/picker_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/picker_layout.lua</source>
+        <source file="lib/core/pins.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/pins.lua</source>
+        <source file="lib/core/pitch.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/pitch.lua</source>
+        <source file="lib/core/release_filter_demo.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/release_filter_demo.lua</source>
+        <source file="lib/core/release_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/release_layout.lua</source>
+        <source file="lib/core/release_overview_demo.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/release_overview_demo.lua</source>
+        <source file="lib/core/release_peak_demo.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/release_peak_demo.lua</source>
+        <source file="lib/core/release_settings_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/release_settings_layout.lua</source>
+        <source file="lib/core/release_tour.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/release_tour.lua</source>
+        <source file="lib/core/ruler.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/ruler.lua</source>
+        <source file="lib/core/schema.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/schema.lua</source>
+        <source file="lib/core/search.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/search.lua</source>
+        <source file="lib/core/selection.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/selection.lua</source>
+        <source file="lib/core/span.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/span.lua</source>
+        <source file="lib/core/spectrum.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum.lua</source>
+        <source file="lib/core/spectrum_axis.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_axis.lua</source>
+        <source file="lib/core/spectrum_curve.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_curve.lua</source>
+        <source file="lib/core/spectrum_hover.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_hover.lua</source>
+        <source file="lib/core/spectrum_label_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_label_layout.lua</source>
+        <source file="lib/core/spectrum_labels.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_labels.lua</source>
+        <source file="lib/core/spectrum_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_layout.lua</source>
+        <source file="lib/core/spectrum_math.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/spectrum_math.lua</source>
+        <source file="lib/core/techfacts.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/techfacts.lua</source>
+        <source file="lib/core/trash.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/trash.lua</source>
+        <source file="lib/core/ui_motion.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/ui_motion.lua</source>
+        <source file="lib/core/update_check.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/update_check.lua</source>
+        <source file="lib/core/walkthrough.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/walkthrough.lua</source>
+        <source file="lib/core/walkthrough_layout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/walkthrough_layout.lua</source>
+        <source file="lib/core/wave_ruler.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/wave_ruler.lua</source>
+        <source file="lib/core/wave_view.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/core/wave_view.lua</source>
+        <source file="lib/dragout.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/dragout.lua</source>
+        <source file="lib/feedback.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/feedback.lua</source>
+        <source file="lib/filedrop_rescue.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/filedrop_rescue.lua</source>
+        <source file="lib/holders.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/holders.lua</source>
+        <source file="lib/library_delete.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/library_delete.lua</source>
+        <source file="lib/library_service.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/library_service.lua</source>
+        <source file="lib/loudness.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/loudness.lua</source>
+        <source file="lib/monitor_filter.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/monitor_filter.lua</source>
+        <source file="lib/peaks.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/peaks.lua</source>
+        <source file="lib/picker_preview.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/picker_preview.lua</source>
+        <source file="lib/pins_service.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/pins_service.lua</source>
+        <source file="lib/playback_coordinator.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/playback_coordinator.lua</source>
+        <source file="lib/preview.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/preview.lua</source>
+        <source file="lib/product_error.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/product_error.lua</source>
+        <source file="lib/project_state.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/project_state.lua</source>
+        <source file="lib/reaper_api.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/reaper_api.lua</source>
+        <source file="lib/reference.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/reference.lua</source>
+        <source file="lib/spectrum.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/spectrum.lua</source>
+        <source file="lib/ui/analysis_panel.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/analysis_panel.lua</source>
+        <source file="lib/ui/anchored_panel.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/anchored_panel.lua</source>
+        <source file="lib/ui/app.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/app.lua</source>
+        <source file="lib/ui/browser.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/browser.lua</source>
+        <source file="lib/ui/browser_shortcuts.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/browser_shortcuts.lua</source>
+        <source file="lib/ui/dropzone.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/dropzone.lua</source>
+        <source file="lib/ui/filter_entry.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/filter_entry.lua</source>
+        <source file="lib/ui/filterwin.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/filterwin.lua</source>
+        <source file="lib/ui/focus.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/focus.lua</source>
+        <source file="lib/ui/icon_motion.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/icon_motion.lua</source>
+        <source file="lib/ui/icon_shapes.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/icon_shapes.lua</source>
+        <source file="lib/ui/icons.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/icons.lua</source>
+        <source file="lib/ui/library_recovery.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/library_recovery.lua</source>
+        <source file="lib/ui/matchwin.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/matchwin.lua</source>
+        <source file="lib/ui/newtrack_strip.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/newtrack_strip.lua</source>
+        <source file="lib/ui/numeric_input.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/numeric_input.lua</source>
+        <source file="lib/ui/pitchwin.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/pitchwin.lua</source>
+        <source file="lib/ui/popups.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/popups.lua</source>
+        <source file="lib/ui/refpicker.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/refpicker.lua</source>
+        <source file="lib/ui/release_content.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_content.lua</source>
+        <source file="lib/ui/release_examples.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_examples.lua</source>
+        <source file="lib/ui/release_helper.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_helper.lua</source>
+        <source file="lib/ui/release_navigation.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_navigation.lua</source>
+        <source file="lib/ui/release_pointer.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_pointer.lua</source>
+        <source file="lib/ui/release_showcase.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_showcase.lua</source>
+        <source file="lib/ui/release_signal.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_signal.lua</source>
+        <source file="lib/ui/release_spectrum.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/release_spectrum.lua</source>
+        <source file="lib/ui/relocation_notice.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/relocation_notice.lua</source>
+        <source file="lib/ui/settings.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/settings.lua</source>
+        <source file="lib/ui/spectrum.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/spectrum.lua</source>
+        <source file="lib/ui/spectrum_axis.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/spectrum_axis.lua</source>
+        <source file="lib/ui/spectrum_controls.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/spectrum_controls.lua</source>
+        <source file="lib/ui/spectrum_hover.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/spectrum_hover.lua</source>
+        <source file="lib/ui/spectrum_level_axis.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/spectrum_level_axis.lua</source>
+        <source file="lib/ui/spectrum_status.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/spectrum_status.lua</source>
+        <source file="lib/ui/theme.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/theme.lua</source>
+        <source file="lib/ui/tips.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/tips.lua</source>
+        <source file="lib/ui/transport.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/transport.lua</source>
+        <source file="lib/ui/walkthrough.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/walkthrough.lua</source>
+        <source file="lib/ui/wave_navigation.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/wave_navigation.lua</source>
+        <source file="lib/ui/waveform.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/waveform.lua</source>
+        <source file="lib/ui/whatsnew.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/whatsnew.lua</source>
+        <source file="lib/ui/widgets.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/widgets.lua</source>
+        <source file="lib/ui/window.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/ui/window.lua</source>
+        <source file="lib/updater.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/updater.lua</source>
+        <source file="lib/vendor/json.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/vendor/json.lua</source>
+        <source file="lib/wave_coordinator.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/wave_coordinator.lua</source>
+        <source file="lib/wave_detail.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/lib/wave_detail.lua</source>
+        <source file="assets/fonts/lucide.ttf">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/assets/fonts/lucide.ttf</source>
+        <source file="assets/fonts/LICENSE-Lucide.txt">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/assets/fonts/LICENSE-Lucide.txt</source>
+        <source file="assets/cursors/drag_copy.cur">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/assets/cursors/drag_copy.cur</source>
+        <source file="assets/windows/folder_picker.ps1">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/assets/windows/folder_picker.ps1</source>
+        <source file="assets/windows/folder_picker.vbs">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/assets/windows/folder_picker.vbs</source>
+        <source file="CHANGELOG.md">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/CHANGELOG.md</source>
+        <source type="effect" file="yb-Reference Monitoring Filter.jsfx">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/yb-Reference%20Monitoring%20Filter.jsfx</source>
+        <source main="main" file="yb-Reference_ToggleReferenceMode.lua">https://github.com/ybresley/yb-Reference-ReaPack/raw/73c35fcfe1e66f3c2c7f5dc88176134534242977/Tools/yb-Reference_ToggleReferenceMode.lua</source>
+      </version>
     </reapack>
   </category>
   <metadata>

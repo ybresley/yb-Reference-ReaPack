@@ -15,7 +15,7 @@ local T = {
   SET_GROUP_BG    = 0x1F1F1FFF, -- filled subject groups inside Settings
   -- Fills (white overlays for hover/selection/inputs)
   FILL_PRIMARY    = 0xE4E4E430, -- active/pressed
-  FILL_SECONDARY  = 0xE4E4E41E, -- selected rows, button hover (active toggles use ACCENT faces)
+  FILL_SECONDARY  = 0xE4E4E41E, -- selected rows, button hover
   FILL_TERTIARY   = 0xE4E4E411, -- default control background
   FILL_QUATERNARY = 0xE4E4E40A, -- input fields, waveform background
   -- Strokes / borders
@@ -36,6 +36,10 @@ local T = {
   ACCENT       = 0x599CE7FF, -- play, selection edge, active sort, drop highlight
   ACCENT_HOVER = 0x6AABE9FF,
   ACCENT_WASH  = 0x599CE714, -- drop-target fill while a file drag hovers it
+  ACTIVE_CONTROL_FILL   = 0x599CE71F, -- persistent active-button wash
+  ACTIVE_CONTROL_HOVER  = 0x599CE72B, -- the wash strengthens under the pointer
+  ACTIVE_CONTROL_HELD   = 0x599CE738, -- pressed active button
+  ACTIVE_CONTROL_BORDER = 0x599CE759, -- quiet accent outline around the wash
   SEARCH_MATCH_BG = 0x599CE747, -- matching text within a result row
   -- Red is reserved for destructive controls. The active latch follows ACCENT,
   -- so changing the user's palette changes that state along with the other
@@ -58,6 +62,14 @@ local T = {
   WAVE_PLAYED   = 0x599CE7FF, -- = ACCENT: part left of the playhead while playing
   WAVE_PLAYHEAD = 0xE4E4E4EB, -- = TEXT_PRIMARY: the playhead line
   WAVE_CENTER   = 0xE4E4E414, -- = STROKE_TERTIARY: quiet zero-amplitude line
+  -- Spectrum: Live has an accent edge and Average is a broader accent body.
+  -- Hover inspection draws its temporary held outline in the text colour.
+  SPECTRUM_BG           = 0xE4E4E40A, -- = WAVE_BG: analysis panel background
+  SPECTRUM_GRID         = 0xE4E4E414, -- = WAVE_CENTER: quiet graph structure
+  SPECTRUM_FREQ_GRID    = 0xE4E4E41F, -- = STROKE_SECONDARY: readable log-frequency guide
+  SPECTRUM_LIVE         = 0x599CE7FF, -- = WAVE_PLAYED: current signal
+  SPECTRUM_LIVE_FILL    = 0x599CE714, -- = ACCENT_WASH: current signal body
+  SPECTRUM_AVERAGE_FILL = 0x599CE738, -- stronger accent body without an outline
   -- Outside the start/end span the picture DIMS (loudness tools, 2026-08-06):
   -- a window-coloured wash, dark enough that the framed stretch clearly reads
   -- as "what plays", light enough that the excluded picture is still there.
@@ -69,7 +81,7 @@ local T = {
   FADER_FILL  = 0x599CE7FF, -- = ACCENT: filled part (ACCENT_HOVER while hovered)
   FADER_KNOB  = 0xE4E4E4EB, -- = TEXT_PRIMARY: the pill grab knob
   FADER_TICK  = 0xE4E4E433, -- = STROKE_PRIMARY: the 0 dB detent mark on trim
-  -- The slim scrollbar thumb (widgets.scrollbar_thumb — the browser table's rail and
+  -- The slim scrollbar thumb (widgets.overlay_scrollbar — the browser table's rail and
   -- the sidebar's, brief `table-scrollbar` 2026-08-09). It replaced ImGui's own
   -- bar there: that one carved its width out of the columns and ran up into the
   -- frozen header. No track colour on purpose — the empty strip IS the track.
@@ -80,11 +92,6 @@ local T = {
   -- look was too heavy ("less greyed out", round 2) — 0x78 keeps the dimmed
   -- controls readable while the ringed target still clearly leads.
   WALK_DIM = 0x14141478,
-  -- Its header's progress dots: the
-  -- stop you are on wears ACCENT, the rest this dim white. Same value as
-  -- FILL_PRIMARY, named for its role like the waveform's aliases — a 5px disc
-  -- is a mark, not a control fill.
-  WALK_DOT = 0xE4E4E430,
 }
 theme.tokens = T
 
@@ -104,16 +111,36 @@ for _, option in ipairs(ACCENT_OPTIONS) do ACCENTS_BY_ID[option.id] = option end
 theme.accent_options = ACCENT_OPTIONS
 theme.accent = "blue"
 
-function theme.set_accent(id)
-  local option = ACCENTS_BY_ID[id] or ACCENTS_BY_ID.blue
-  theme.accent = option.id
+local accent_transition
+
+local function apply_accent(option)
   T.ACCENT = option.color
   T.ACCENT_HOVER = option.hover
   T.ACCENT_WASH = (option.color & ~0xFF) | 0x14
+  T.ACTIVE_CONTROL_FILL = (option.color & ~0xFF) | 0x1F
+  T.ACTIVE_CONTROL_HOVER = (option.color & ~0xFF) | 0x2B
+  T.ACTIVE_CONTROL_HELD = (option.color & ~0xFF) | 0x38
+  T.ACTIVE_CONTROL_BORDER = (option.color & ~0xFF) | 0x59
   T.SEARCH_MATCH_BG = (option.color & ~0xFF) | 0x47
   T.WAVE_PLAYED = option.color
+  T.SPECTRUM_LIVE = option.color
+  T.SPECTRUM_LIVE_FILL = (option.color & ~0xFF) | 0x14
+  T.SPECTRUM_AVERAGE_FILL = (option.color & ~0xFF) | 0x38
   T.FADER_FILL = option.color
   theme.invalidate_colours()
+end
+
+function theme.set_accent(id, animate, now)
+  local option = ACCENTS_BY_ID[id] or ACCENTS_BY_ID.blue
+  if animate and option.id == theme.accent then return option.id end
+  theme.accent = option.id
+  if animate and theme.motion.enabled then
+    -- Retarget from the displayed colour, including during an unfinished fade.
+    accent_transition = { color = T.ACCENT, hover = T.ACCENT_HOVER, target = option, start = now }
+  else
+    accent_transition = nil
+    apply_accent(option)
+  end
   return option.id
 end
 
@@ -125,6 +152,51 @@ function theme.fade(col, alpha)
   if alpha >= 1 then return col end
   local a = math.floor((col & 0xFF) * alpha + 0.5)
   return (col & ~0xFF) | a
+end
+
+function theme.blend(from, to, amount)
+  if amount <= 0 then return from end
+  if amount >= 1 then return to end
+  local colour = 0
+  for shift = 0, 24, 8 do
+    local a, b = (from >> shift) & 0xFF, (to >> shift) & 0xFF
+    colour = colour | (math.floor(a + (b - a) * amount + 0.5) << shift)
+  end
+  return colour
+end
+
+-- Durations are seconds, independent of the interface's display scale.
+theme.motion = { enabled = true, generation = 0, SWITCH_SLIDE = 0.32, PITCH_UNIT_SLIDE = 0.22,
+  SLIDER_NOTCH_ECHO = 0.46, BUTTON_BLOOM = 0.42, SETTINGS_TAB_GROW = 0.18,
+  ACCENT_FADE = 0.4, ICON_MORPH = 0.4, ICON_PITCH = 0.58, ICON_FILTER = 0.55,
+  ICON_SWAP = 0.52, ICON_SETTINGS = 0.34, ICON_LIBRARY = 0.56, ICON_AUDITION = 0.585,
+  ICON_LATCH = 0.56, ICON_LOOP = 0.9, BORDER_ORBIT = 3, BORDER_HALO_ORBIT = 9,
+  WN_FOLD = 0.30, WN_GLASSLIGHT = 1.1, WN_TOPIC_TUMBLE = 0.62 }
+
+function theme.update_accent(now)
+  local transition = accent_transition
+  if not transition then return end
+  transition.start = transition.start or now
+  local progress = math.max(0, math.min(1, (now - transition.start) / theme.motion.ACCENT_FADE))
+  local eased = progress * progress * (3 - 2 * progress)
+  transition.display = transition.display or {}
+  transition.display.color = theme.blend(transition.color, transition.target.color, eased)
+  transition.display.hover = theme.blend(transition.hover, transition.target.hover, eased)
+  apply_accent(transition.display)
+  if progress >= 1 then accent_transition = nil end
+end
+
+function theme.set_animations(enabled)
+  enabled = enabled ~= false
+  if theme.motion.enabled ~= enabled then
+    theme.motion.enabled = enabled
+    theme.motion.generation = theme.motion.generation + 1
+  end
+  if not enabled and accent_transition then
+    apply_accent(accent_transition.target)
+    accent_transition = nil
+  end
+  return enabled
 end
 
 -- Layout sizes, mirrored from tokens.md "Sizing". Kept out of the colour table so
@@ -144,6 +216,25 @@ local BASE = {
   -- (user: "space is precious in REAPER" — the tool lives docked beside a project,
   -- and every pixel the chrome takes is a pixel the waveform doesn't get).
   BASE_FS = 13,
+  SPECTRUM_PANE_MIN_W = 300,
+  SPECTRUM_SPLIT_GAP = 8,
+  -- Full panel heights, including rulers, before stacking becomes useful.
+  SPECTRUM_STACK_WAVE_MIN_H = 140,
+  SPECTRUM_STACK_MIN_H = 180,
+  SPECTRUM_BAND_GAP = 3,
+  SPECTRUM_TAG_PAD_X = 4,
+  SPECTRUM_TAG_PAD_Y = 2,
+  SPECTRUM_GROUP_GAP = 6,
+  SPECTRUM_PLOT_PAD = 8,
+  SPECTRUM_OVERLAY_TRAVEL = 16,
+  SPECTRUM_LEVEL_W = 32,
+  SPECTRUM_SWITCH_SIZE = 20,
+  SPECTRUM_SETTINGS_W = 300,
+  SPECTRUM_SETTINGS_H = 459, -- opening height until the Spectrum groups are measured
+  SETTINGS_TAB_FS = 14,
+  SPECTRUM_OPTION_W = 132,
+  FILTER_ENTRY_W = 160,
+  FILTER_RESTORE_W = 22,
   -- The framed-control geometry, in one place because every square button, the
   -- bar's height and the whole collapse order derive from it. FramePadding.y is
   -- what actually sets control height: BASE_FS + 2×FRAME_PAD_Y.
@@ -228,6 +319,7 @@ local BASE = {
   -- tightening comes out of the controls, never out of the picture. The ruler's
   -- labels got smaller with everything else, so it simply reads as roomier now.
   RULER_H = 22,
+  RULER_LABEL_FADE_W = 18,
   RULER_TICK_MAJOR = 6, -- major tick length, px, pointing up from the strip's top edge
   RULER_TICK_MINOR = 4, -- minor tick length, px
   -- The reference picker (2026-08-06 redesign — it replaced the reference-tab
@@ -263,11 +355,10 @@ local BASE = {
   PICK_LIST_ROWS = 8,  -- rows shown before the list starts scrolling
   PICK_TOOL_GAP  = 4,  -- between edit mode's two buttons
   PICK_TOOL_LEAD = 10, -- from the row's name to whatever ends the row
-  -- Edit mode's buttons are NARROWER than a control. They carry no frame, so a
-  -- full 27px square left the glyph floating well inside the row's right edge
-  -- while the duration it replaces sat flush against it (user-reported
-  -- 2026-08-06). Height stays a full control for the hit area.
-  PICK_TOOL_W    = 18,
+  -- Edit mode's buttons remain narrower than a full control, but each glyph
+  -- needs enough horizontal air to read as its own target. Height stays a full
+  -- control, so widening them does not change the row.
+  PICK_TOOL_W    = 22,
   -- Between the two step arrows. They were welded together (gap 0) so they'd
   -- read as ONE TARGET rather than two things to aim between; at zero they read
   -- as one BUTTON instead (user-reported 2026-08-06). A hairline of air tells
@@ -345,47 +436,66 @@ local BASE = {
   SEARCH_W  = 176, -- the search box (fits "Search name of sounds" + the embedded magnifier at BASE_FS 13)
   SEARCH_ICON_PAD = 24, -- left FramePadding.x for the search field, clearing the drawn magnifier glyph
   POPUP_BTN_W = 72, -- popup action buttons (OK / Cancel / Delete / Close)
+  -- The untitled Monitoring Filter panel stays compact enough for a narrow
+  -- dock while leaving five named band buttons readable on one line.
+  FILTER_CONTENT_W = 318,
+  FILTER_ANCHOR_GAP = 2,
+  FILTER_FIELD_W = 60,
+  FILTER_STATUS_H = 48,
   -- Inner width; ordinary window padding adds the outer 16px.
   PITCH_CONTENT_W = 278,
   PITCH_UNIT_W = 32,
   PITCH_VALUE_W = 78,
-  PITCH_ANCHOR_GAP = 2,
+  PANEL_ANCHOR_GAP = 2,
   -- Small confirmations fit their text; cap long names so they wrap.
   POPUP_MAX_W = 280,
-  -- The walkthrough card (2026-08-10, `.brief/_done/walkthrough/`): a titled
-  -- card beside the ringed target. Width fixed — a card that resized to each
-  -- stop's sentence would read as six different cards; height auto-sizes.
-  -- 230 on the first live look ran the footer's three residents into each
-  -- other ("1 of 6" under "Skip walkthrough"); 260 seats them with air.
-  WALK_CARD_W   = 260,
+  -- A consistent card width gives the broader lessons room to breathe.
+  WALK_CARD_W   = 340,
   WALK_CARD_PAD = 12, -- its inner padding (spacing scale)
   WALK_RING_PAD = 4,  -- accent ring's inflation around the target (spacing scale)
-  -- The header's progress dots. A RADIUS, so it stays whole through set_scale's
-  -- rounding — 3 draws the 6px disc that reads cleanly beside 13px text.
-  WALK_DOT_R    = 3,
-  WALK_DOT_GAP  = 4,  -- gap between two dots (spacing scale)
-  -- The Settings modal (`.brief/settings-layout`, 2026-08-08, every answer the
-  -- user's own): a FIXED window with a section list down the left, one section's
-  -- rows in the pane beside it. Fixed, not auto-sizing, because the nav list
-  -- would otherwise stretch and shrink on every section click; 620 is the width
-  -- at which a real library path is still recognisable before it needs cutting.
-  -- Draggable-and-remembered was offered and rejected — that would have cost
-  -- Settings its modal behaviour.
+  WALK_RING_RADIUS = 5,
   -- What's New and release history share a fixed reading width.
   -- Height is a CEILING, not a size — the window auto-sizes to a short release
   -- and scrolls inside this once a big one (or several missed ones) passes it.
   WN_WIN_W    = 495,
   WN_MAX_H    = 420,
-  -- Release notes are a reading surface, so their body sits one step above the
-  -- app's compact 13px control text. The version, group and area labels use the
-  -- bold cut at this same size; only the date remains subordinate small text.
+  WN_SHOWCASE_W = 820,
+  WN_SHOWCASE_H = 900,
+  WN_SHOWCASE_MIN_W = 720,
+  WN_SHOWCASE_MIN_H = 780,
+  WN_CARD_PAD = 18,
+  WN_CARD_COMPACT_PAD = 12,
+  WN_CARD_FS = 18,
+  WN_CARD_SMALL_FS = 15,
+  WN_CARD_LARGE_FS = 30,
+  WN_TOPIC_RAIL = 196,
+  WN_TOPIC_GAP = 20,
+  WN_TOPIC_ROW = 38,
+  WN_TOPIC_NUMBER = 24,
+  WN_TOPIC_NUMBER_FS = 13,
+  WN_TOPIC_FS = 16,
+  WN_TOPIC_BODY_FS = 16,
+  WN_SHOWCASE_PAD = 20,
+  WN_DESCRIPTION_FS = 16,
+  WN_HEADING_FS = 20,
+  -- Entries get a small extra gap; section gaps remain more distinct.
   WN_TEXT_FS  = 14,
+  WN_OVERVIEW_FS = 16,
+  WN_LINE_GAP = 2,
+  WN_ENTRY_EXTRA_GAP = 3,
+  WN_VERSION_GAP = 8,
+  WN_SECTION_GAP = 18,
+  WN_OVERVIEW_LINE_GAP = 4,
+  WN_GROUP_HEADING_GAP = 7,
+  WN_GROUP_PAD_X = 12,
+  WN_GROUP_PAD_Y = 10,
   -- A remembered library that disappears opens a compact recovery surface.
   -- One reserved status line keeps the actions still when a message appears
   -- without leaving the old three-line blank block during the normal state.
   RECOVERY_WIN_W    = 420,
   RECOVERY_WIN_H    = 150,
   RECOVERY_STATUS_H = 24,
+  RECOVERY_ACTION_W = 120,
   -- The bullet indent (2026-08-09 round 2, `.brief/_done/changelog-lines/` —
   -- REPLACES the area-word rail of the same day, which the user turned down:
   -- a rail can cut or bend a long area word). A bullet hangs alone in this
@@ -393,7 +503,8 @@ local BASE = {
   -- sits on the column at its right edge. A COLUMN width, not a spacing
   -- token, which is why it may sit off the spacing scale.
   WN_IND      = 14,
-  SET_WIN_W   = 620,
+  SET_WIN_W   = 632,
+  SET_CONTENT_GAP = 12, -- separates the navigation from the content's own padding
   -- A taller fixed surface keeps the grouped Settings layout comfortable while
   -- overflowing tabs remain reachable through the content-pane scrollbar.
   SET_WIN_H   = 480,
@@ -430,6 +541,7 @@ local BASE = {
   SET_SWITCH_W = 30,
   SET_SWITCH_H = 16,
   SET_SWITCH_KNOB = 12,
+  BUTTON_BLOOM_SPREAD = 13,
   -- Appearance uses one discrete slider plus a fixed readout. The slider stays
   -- long enough for eleven 5% stops to be deliberate; the readout holds "150%"
   -- without changing width as the value moves.
@@ -438,6 +550,8 @@ local BASE = {
   -- Version pairs share one label column so the installed value never moves
   -- when an available version or action appears.
   SET_VERSION_LABEL_W = 54,
+  SET_VERSION_PAD = 12,
+  SET_VERSION_GAP = 12,
   FB_EMAIL_W   = 240, -- ordered Feedback form: room for a useful address slice
   -- (SET_INPUT_W, the old email-only field width, retired 2026-08-10.
   -- Feedback now owns FB_EMAIL_W because its field has a dedicated line.)
@@ -470,6 +584,7 @@ local BASE = {
   SCROLL_RAIL_W     = 12,
   SCROLL_THUMB_W    = 6,
   SCROLL_THUMB_MIN_H = 24, -- a huge list must still leave something to grab
+  WAVE_TIME_THUMB_MIN_W = 12, -- the waveform's horizontal zoom thumb
   -- The browser's subordinate text: the info row's tech details and the
   -- PREVIEW fader label. Sidebar category names and counts use BASE_FS; caps and
   -- colour distinguish those grouping rows from mixed-case sound names.
@@ -493,8 +608,8 @@ local BASE = {
   MIN_WIN_H = 210,
   -- First-open floating sizes. Unlike a minimum, these are multiplied by UI
   -- Size so a fresh window starts with the same usable room at every zoom.
-  MAIN_WIN_W = 900,
-  MAIN_WIN_H = 600,
+  MAIN_WIN_W = 1120,
+  MAIN_WIN_H = 360,
   BROWSER_WIN_W = 720,
   BROWSER_WIN_H = 520,
   -- The Library popup's OWN width floor (2026-08-12). MIN_WIN_W above is sized
@@ -534,6 +649,7 @@ local BASE = {
   ANALYSIS_CARD_PAD = 8,
   ANALYSIS_CARD_GAP = 4,
   ANALYSIS_CARD_RADIUS = 4,
+  BORDER_GLOW_WIDTH = 1.5,
 }
 
 -- ---- UI scale ---------------------------------------------------------------
@@ -651,7 +767,10 @@ end
 local resolved_colors, resolved_vars
 
 function theme.invalidate_colours()
-  resolved_colors = nil
+  -- Keep the cached style entries while a colour fade updates them each frame.
+  if resolved_colors then
+    for _, colour in ipairs(resolved_colors) do colour[2] = T[colour[3]] end
+  end
 end
 
 -- Drop the cached style vars so the next frame rebuilds them from the current
@@ -664,7 +783,7 @@ local function resolve()
   resolved_colors = {}
   for _, c in ipairs(COLORS) do
     local fn = reaper["ImGui_Col_" .. c[1]]
-    if fn then resolved_colors[#resolved_colors + 1] = { fn(), T[c[2]] } end
+    if fn then resolved_colors[#resolved_colors + 1] = { fn(), T[c[2]], c[2] } end
   end
   resolved_vars = {}
   for _, v in ipairs(build_vars()) do
@@ -742,14 +861,15 @@ end
 -- probe-and-fallback shape as push_heading_font; when no bold cut exists the
 -- text simply stays regular, which is un-emphasised rather than wrong.
 local bold_font_ok
-function theme.push_bold_font(ctx)
+function theme.push_bold_font(ctx, size)
   if not ui_font_bold then return false end
+  size = size or theme.metrics.BASE_FS
   if bold_font_ok == nil then
-    bold_font_ok = pcall(reaper.ImGui_PushFont, ctx, ui_font_bold, theme.metrics.BASE_FS)
+    bold_font_ok = pcall(reaper.ImGui_PushFont, ctx, ui_font_bold, size)
     return bold_font_ok
   end
   if bold_font_ok then
-    reaper.ImGui_PushFont(ctx, ui_font_bold, theme.metrics.BASE_FS)
+    reaper.ImGui_PushFont(ctx, ui_font_bold, size)
     return true
   end
   return false
@@ -758,37 +878,40 @@ end
 -- Release-note reading text: slightly larger than compact app chrome without
 -- changing the size of controls or every other window.
 local release_font_ok
-function theme.push_release_font(ctx)
+function theme.push_release_font(ctx, size)
+  size = size or theme.metrics.WN_TEXT_FS
   if release_font_ok == nil then
-    release_font_ok = pcall(reaper.ImGui_PushFont, ctx, nil, theme.metrics.WN_TEXT_FS)
+    release_font_ok = pcall(reaper.ImGui_PushFont, ctx, nil, size)
     return release_font_ok
   end
   if release_font_ok then
-    reaper.ImGui_PushFont(ctx, nil, theme.metrics.WN_TEXT_FS)
+    reaper.ImGui_PushFont(ctx, nil, size)
     return true
   end
   return false
 end
 
 local release_bold_font_ok
-function theme.push_release_bold_font(ctx)
-  if not ui_font_bold then return theme.push_release_font(ctx) end
+function theme.push_release_bold_font(ctx, size)
+  size = size or theme.metrics.WN_TEXT_FS
+  if not ui_font_bold then return theme.push_release_font(ctx, size) end
   if release_bold_font_ok == nil then
     release_bold_font_ok = pcall(
-      reaper.ImGui_PushFont, ctx, ui_font_bold, theme.metrics.WN_TEXT_FS)
+      reaper.ImGui_PushFont, ctx, ui_font_bold, size)
     if release_bold_font_ok then return true end
-    return theme.push_release_font(ctx)
+    return theme.push_release_font(ctx, size)
   end
   if release_bold_font_ok then
-    reaper.ImGui_PushFont(ctx, ui_font_bold, theme.metrics.WN_TEXT_FS)
+    reaper.ImGui_PushFont(ctx, ui_font_bold, size)
     return true
   end
-  return theme.push_release_font(ctx)
+  return theme.push_release_font(ctx, size)
 end
 
 -- Push the whole theme. Returns how many colours, vars and fonts were pushed so
 -- the caller pops exactly that many (mismatched counts make ImGui raise).
 function theme.apply(ctx)
+  if accent_transition then theme.update_accent(reaper.ImGui_GetTime(ctx)) end
   if not (resolved_colors and resolved_vars) then resolve() end
   for _, c in ipairs(resolved_colors) do
     reaper.ImGui_PushStyleColor(ctx, c[1], c[2])

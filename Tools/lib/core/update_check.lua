@@ -15,6 +15,9 @@
 
 local update_check = {}
 
+local NO_RELEASE_NOTES = "No release notes were provided for this version."
+update_check.NO_RELEASE_NOTES = NO_RELEASE_NOTES
+
 -- One attribute out of a tag's attribute text. The leading %s anchors the match
 -- to a whole attribute name — ` name="…"` can never match inside ` filename="…"`.
 -- (The captures below always include the space before the first attribute.)
@@ -89,6 +92,63 @@ function update_check.versions(xml, package_file, category)
       end
     end
   end
+  return out
+end
+
+local function xml_text(s)
+  return (s:gsub("&lt;", "<")
+    :gsub("&gt;", ">")
+    :gsub("&quot;", '"')
+    :gsub("&apos;", "'")
+    :gsub("&amp;", "&"))
+end
+
+-- Release-note records for one package, in catalog order. ReaPack normally
+-- writes changelogs as CDATA; plain XML text is accepted too. The note itself
+-- is kept intact because it is already the release's authored plain text.
+function update_check.releases(xml, package_file, category)
+  local out = {}
+  if type(xml) ~= "string" or type(package_file) ~= "string" then return out end
+  for cat_attrs, cat_body in xml:gmatch("<category(%s[^>]*)>(.-)</category>") do
+    if category == nil or attr(cat_attrs, "name") == category then
+      for rp_attrs, rp_body in cat_body:gmatch("<reapack(%s[^>]*)>(.-)</reapack>") do
+        if attr(rp_attrs, "name") == package_file then
+          for v_attrs, v_body in rp_body:gmatch("<version(%s[^>]*)>(.-)</version>") do
+            local version = attr(v_attrs, "name")
+            if version and version ~= "" then
+              local raw = v_body:match("<changelog[^>]*>%s*<!%[CDATA%[(.-)%]%]>%s*</changelog>")
+              if raw == nil then
+                raw = v_body:match("<changelog[^>]*>(.-)</changelog>")
+                if raw ~= nil then raw = xml_text(raw) end
+              end
+              local time = attr(v_attrs, "time")
+              local date = time and time:match("^(%d%d%d%d%-%d%d%-%d%d)") or nil
+              out[#out + 1] = {
+                version = version,
+                text = raw and raw:match("%S") and raw or NO_RELEASE_NOTES,
+                date = date,
+              }
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- Every release strictly newer than the installed version, newest first.
+function update_check.newer_releases(xml, package_file, category, installed)
+  if type(installed) ~= "string" or installed == "" then return {} end
+  local out = {}
+  for _, release in ipairs(update_check.releases(xml, package_file, category)) do
+    if update_check.compare(release.version, installed) > 0 then
+      out[#out + 1] = release
+    end
+  end
+  table.sort(out, function(a, b)
+    return update_check.compare(a.version, b.version) > 0
+  end)
   return out
 end
 

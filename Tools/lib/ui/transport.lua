@@ -8,11 +8,13 @@ local tips = require("ui.tips")
 local widgets = require("ui.widgets")
 local match = require("core.match")
 local icons = require("ui.icons")
+local icon_motion = require("ui.icon_motion")
 local refpicker = require("ui.refpicker")
 local matchwin = require("ui.matchwin")
 local pitchwin = require("ui.pitchwin")
 local settings = require("ui.settings")
 local walkthrough_ui = require("ui.walkthrough")
+local control_bar_layout = require("core.control_bar_layout")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -26,7 +28,7 @@ local STOP = "\u{25A0}" -- ■
 local LOOP = "\u{21BB}" -- ↻
 
 -- Hoisted so the frame loop never rebuilds it (frame-allocation rule).
-local ON_ACCENT_FACE = { color = T.TEXT_ON_ACCENT }
+local SOFT_ACTIVE_FACE = { color = T.ACCENT_HOVER }
 
 local RESET_HINT = " \u{00B7} right-click or double-click to reset"
 
@@ -67,7 +69,8 @@ function transport.draw_master(ctx, state)
   reaper.ImGui_SameLine(ctx, 0, spacing)
   -- Master caps at 0 dB (unity) and only attenuates from there.
   local mdb, mcommit = widgets.db_fader(ctx, "master", state.master_db,
-    { min = -60, max = 0, default = 0, tip = "Master preview volume" .. RESET_HINT })
+    { min = -60, max = 0, default = 0, tip = "Master preview volume" .. RESET_HINT,
+      value_tip = "Click to type a preview volume · right-click to reset" })
   if mdb ~= nil then return { type = "set_master", db = mdb, commit = mcommit } end
   return nil
 end
@@ -113,10 +116,7 @@ local function playback_state(state, slot, id)
   return playing, paused
 end
 
--- Play / pause. Accent-filled while actually sounding — hover and pressed are
--- pushed to accent shades like the latch pushes its red, since overriding only
--- the resting colour lets ImGui's grey hover fill swallow the blue on mouseover.
--- Over that fill the glyph switches to TEXT_ON_ACCENT so it stays legible.
+-- Play / pause. Every audio transport uses the shared soft active treatment.
 --
 -- "Stopped" and "paused" share the same PLAY face: clicking either resumes from
 -- wherever this slot was left, or starts fresh. Dimmed — never hidden, never
@@ -130,19 +130,21 @@ function transport.draw_play(ctx, state, font, opts)
 
   local dim = opts.sound == nil
   if dim then reaper.ImGui_BeginDisabled(ctx) end
-  if playing then
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.ACCENT)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), T.ACCENT_HOVER)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.ACCENT)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.TEXT_ON_ACCENT) -- text fallback face
-  end
+  local soft_pushed = widgets.push_soft_active(ctx, playing)
+  if playing then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER) end
   local clicked = reaper.ImGui_Button(ctx,
     (use_icon and "" or (playing and PAUSE or PLAY)) .. "##playpause_" .. slot, ctrl, ctrl)
-  if playing then reaper.ImGui_PopStyleColor(ctx, 4) end
+  if playing then
+    reaper.ImGui_PopStyleColor(ctx)
+    widgets.pop_soft_active(ctx, soft_pushed)
+  end
+  -- Follow confirmed playback, so failed starts and pausing never light a bloom.
+  widgets.play_bloom(ctx, slot, playing and not dim)
   -- The painted glyph fades itself against the live style alpha (icons.lua), so
   -- a disabled square dims face and all with no hand-faded colour here.
   if use_icon then
-    icons.paint_over_item(ctx, font, face, playing and ON_ACCENT_FACE or nil)
+    SOFT_ACTIVE_FACE.color = T.ACCENT_HOVER
+    icons.paint_over_item(ctx, font, face, playing and SOFT_ACTIVE_FACE or nil)
   end
   local hovered = reaper.ImGui_IsItemHovered(ctx)
   if dim then reaper.ImGui_EndDisabled(ctx) end
@@ -191,212 +193,33 @@ end
 
 --------------------------------------------------------------- bar geometry
 
--- The bar's shape at a given width, worked out WITHOUT drawing anything.
--- `transport.measure` and `transport.draw` both go through here, so the height
--- reserved for the bar can never disagree with the height it actually takes —
--- which matters because the Reference View reserves the bar FIRST and hands
--- everything left to the waveform.
---
--- Full width, left to right:
---
---   [L][>][#][loop][M]  [ LABEL . name  v ] 2/6 [<][>]  48 kHz . 24-bit . WAV . stereo  [@][==trim==][library][gear]
---
--- ([@] = the match window's target button, which collapses WITH the trim
--- fader it drives — one unit in every arrangement below. The gear holds the
--- bar's corner — the user's pick, 2026-08-10 `.brief/settings-move`, when it
--- moved here from the browser toolbar and the References-folder square it
--- replaces became a Settings row.)
---
--- THE RULE, from the 2026-08-08 brief (.brief/bar-space-and-folding, replacing
--- the 08-07 ladder): **space is never left empty — the name box absorbs it.**
--- The box takes every pixel between the arrows and the right-hand group, up to
--- PICK_MAX_W; pieces fold away one by one only when the box has given
--- everything back. The user accepted the visible consequence: at each fold
--- moment the box GROWS by the folded piece's width (~35/27/68px) — small
--- steps, each at an instant a control visibly leaves anyway. (This knowingly
--- retires the 08-06 "slot never widens while narrowing" cap: THAT rule, kept
--- mechanically, was what pinned the box at 80px under a mid-bar hole — the
--- thing the user photographed and rejected.)
---
--- Narrowing, in order. **NOTHING ever disappears** (user's call, 2026-08-08
--- third round: the folder button used to hide on one line and reappear on
--- two — "no icon should disappear; when there's no more room for removing
--- stuff, that's when we create the 2nd row"). The only moves are shrinks and
--- folds:
---   1. the info text steps aside (it only ever borrows genuinely spare room —
---      see draw — so its leaving moves nothing)
---   2. the name box shrinks, PICK_MAX_W down to PICK_MIN_W
---   3. the trim fader folds to [@] + a draggable dB number, the box taking
---      the freed width — the ONE mid-ladder step left. Once a number, NEVER
---      a fader again at any narrower size (no shape flip-flops)
---   4. out of room: the bar folds to the user's balanced TWO lines — line one
---      is the name box stretched to whatever space it has, ending in the
---      count + arrows; line two is [L][cluster] left and [@][number][library]
---      [gear] pinned right. Two lines is the MAXIMUM — no third, ever.
---   5. that full two-line form IS the minimum (second round: "don't remove
---      the library or folder icons" — the gear inherits the folder square's
---      never-hides standing). The floating window's floor (MIN_WIN_W)
---      sits just above it; only a REAPER dock can go narrower, and there the
---      bar keeps every control and CLIPS at the window's edge. Nothing poorer
---      exists.
---
--- `trim`: "fader" (the @ + full fader) or "number" (the @ + the draggable dB
--- number). The trim never leaves the bar; the count, Library and gear never
--- hide — so the Library/gear pair isn't flagged per arrangement at all.
-local ARRANGEMENTS = {
-  { count = true, trim = "fader"  },
-  { count = true, trim = "number" },
-  { two_line = true, count = true, trim = "number" },
-}
-
+-- Measure host-controlled sizes here, then pass them with the live scaled theme
+-- metrics to the pure policy. `transport.measure` and `transport.draw` both use
+-- this function, so the reserved and drawn heights agree.
 -- Squares in the transport cluster: play, stop, loop, mono, pitch. A constant so `cluster_w`
 -- and the draw loop can never disagree about how many squares exist.
 local N_CLUSTER = 5
 
--- One candidate arrangement, measured. Returns nil when it doesn't fit, so the
--- caller can try the next (poorer) one. `m` carries the per-frame measurements
--- (count/arrows/number widths) so the parameter list stays readable.
---
--- Every control's x AND y come out of here (`ctrl_y` is the line every button
--- sits on — 0 on one line, the second line after the fold), so `draw` never
--- repeats the arithmetic.
-local function try_fit(a, width, ctrl, gap, gap_y, m, cluster_w, floor_it)
-  local count_on = a.count and m.count_w > 0
-  -- The count sits BETWEEN the slot and the arrows ("name · 1/3" reads as one
-  -- fact), with PICK_COUNT_PAD of air either side rather than the usual
-  -- ItemSpacing — a small dim number wedged against controls at ItemSpacing
-  -- read as cramped (user-reported 2026-08-06).
-  local before_arrows = count_on and (M.PICK_COUNT_PAD + m.count_w + M.PICK_COUNT_PAD) or gap
-  -- The trim control brings the target button (◎) with it: the button drives
-  -- it, so they fold as one unit — in both its shapes.
-  local trim_w = (a.trim == "fader" and M.SLIDER_W) or (a.trim == "number" and m.num_w) or nil
-
-  local g = {
-    ctrl = ctrl, gap = gap, gap_y = gap_y,
-    two_line = a.two_line or false,
-    count_w = count_on and m.count_w or 0,
-    trim_shown = a.trim, trim_w = trim_w,
-  }
-
-  if a.two_line then
-    -- The balanced fold (the user's own layout, 2026-08-08): line one is the
-    -- name box stretched across the window — no cap; the fold only exists
-    -- below ~PICK_MAX_W + fixtures anyway, and an empty tail here was exactly
-    -- the hole the brief killed — ending in the count and arrows. Line two:
-    -- R + the cluster on the left, the right-hand group (◎ · trim · Library ·
-    -- gear) PINNED RIGHT — the same grammar as one line, and what makes
-    -- line two's right edge sit exactly under line one's arrows at every
-    -- width (user-reported 2026-08-08: packed-left, the Library button's edge
-    -- drifted out of line with the arrow above it).
-    local slot_w = width - before_arrows - m.arrows_w
-    -- Library + gear sit PICK_ARROW_GAP apart, not ItemSpacing: they end
-    -- line two exactly under the arrow pair ending line one, and the arrows'
-    -- tighter pair gap is what the eye lines the columns up by — at the
-    -- normal gap the inner square poked 2px further left than the ‹ above it
-    -- (user-reported 2026-08-08, when the pair was folder + Library).
-    local group_w = ctrl + M.PICK_ARROW_GAP + ctrl -- Library + gear, always
-    if trim_w then group_w = group_w + gap + ctrl + gap + trim_w end
-    local packed_x = ctrl + gap + cluster_w + gap -- tightest the group may sit
-    if (slot_w < M.PICK_MIN_W or packed_x + group_w > width) and not floor_it then return nil end
-
-    g.slot_x, g.slot_w = 0, math.max(0, slot_w)
-    if count_on then
-      g.count_x = g.slot_w + M.PICK_COUNT_PAD
-      g.arrows_x = g.count_x + m.count_w + M.PICK_COUNT_PAD
-    else
-      g.arrows_x = g.slot_w + gap
-    end
-    g.ctrl_y = ctrl + gap_y
-    g.latch_x = 0
-    -- Below the full form's width (only a dock can force it) line two does
-    -- NOT overflow: its eight ItemSpacing gaps tighten evenly, down to a 2px
-    -- floor, so the Library button stays EXACTLY flush under line one's arrow
-    -- through the squeeze (user-reported 2026-08-08: overflowing into the
-    -- window padding put line two's edge past line one's). Only past the
-    -- squeeze's own floor (~28px more) does the line finally clip.
-    local G = gap
-    local deficit = (packed_x + group_w) - width
-    if deficit > 0 then G = gap - math.min(gap - 2, deficit / 8) end
-    g.cluster_gap = G
-    g.cluster_x = ctrl + G
-    local x = math.max(width - group_w, g.cluster_x + cluster_w - 4 * (gap - G) + G)
-    if trim_w then
-      g.target_x = x
-      g.trim_x = g.target_x + ctrl + G
-      x = g.trim_x + trim_w + G
-    end
-    g.library_x = x
-    g.gear_x = g.library_x + ctrl + M.PICK_ARROW_GAP
-    g.height = ctrl * 2 + gap_y
-    return g
-  end
-
-  -- One line: the right-hand group pinned right, the box absorbing every pixel
-  -- between the arrows and it — up to PICK_MAX_W. Above the cap the leftover
-  -- is genuinely spare, and the info text borrows it (see draw): with every
-  -- control on show, edge room reads as margin; it was the STARVED box beside
-  -- a mid-bar hole that read as broken.
-  local right_w = ctrl + gap + ctrl -- Library + the gear, always
-  if trim_w then right_w = right_w + gap + ctrl + gap + trim_w end
-  local slot_raw = width - (ctrl + gap + cluster_w + gap)
-    - before_arrows - m.arrows_w - gap - right_w
-  if slot_raw < M.PICK_MIN_W and not floor_it then return nil end
-
-  g.slot_w = math.max(0, math.min(slot_raw, M.PICK_MAX_W))
-  g.ctrl_y = 0
-  g.latch_x = 0
-  g.cluster_gap = gap -- only line two ever tightens it
-  g.cluster_x = ctrl + gap
-  g.slot_x = g.cluster_x + cluster_w + gap
-  if count_on then
-    g.count_x = g.slot_x + g.slot_w + M.PICK_COUNT_PAD
-    g.arrows_x = g.count_x + m.count_w + M.PICK_COUNT_PAD
-  else
-    g.arrows_x = g.slot_x + g.slot_w + gap
-  end
-  g.gear_x = width - ctrl -- the corner (user's pick, 2026-08-10)
-  g.library_x = g.gear_x - gap - ctrl
-  if trim_w then
-    g.trim_x = g.library_x - gap - trim_w
-    g.target_x = g.trim_x - gap - ctrl -- the ◎ button, immediately left
-  end
-  -- The info text's borrowed zone: after the arrows, up to the right group.
-  -- Positive ONLY once the box is at its full cap (uncapped, the box takes
-  -- this exactly to zero) — which is what makes the text's coming and going
-  -- move nothing, and why a longer line on a different sound can't resize the
-  -- box: the box never waits on the text.
-  g.tech_x = g.arrows_x + m.arrows_w + M.PICK_COUNT_PAD
-  g.tech_max = (g.target_x or g.library_x) - gap - g.tech_x
-  g.height = ctrl
-  return g
-end
-
 local function geometry(ctx, width, count_w)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local gap, gap_y = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing())
-  local cluster_w = ctrl * N_CLUSTER + gap * (N_CLUSTER - 1)
 
-  local m = { count_w = count_w or 0 }
+  local measured = {
+    ctrl = ctrl,
+    gap = gap,
+    gap_y = gap_y,
+    count_w = count_w or 0,
+    cluster_count = N_CLUSTER,
+  }
   -- Asked of the picker, never re-derived here: this used to be its own
   -- `ctrl * 2`, which silently went stale the day the arrow pair gained a
   -- gap between them, so the fit test measured a bar 4px narrower than the
   -- one that draws (Codex, 2026-08-06).
-  m.arrows_w = refpicker.arrows_width(ctx)
+  measured.arrows_w = refpicker.arrows_width(ctx)
   -- The collapsed trim's number, sized for its widest reading ("+24.0 dB").
-  m.num_w = select(1, reaper.ImGui_CalcTextSize(ctx, "+24.0 dB"))
+  measured.num_w = select(1, reaper.ImGui_CalcTextSize(ctx, "+24.0 dB"))
     + select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding())) * 2
-
-  for _, a in ipairs(ARRANGEMENTS) do
-    local g = try_fit(a, width, ctrl, gap, gap_y, m, cluster_w, false)
-    if g then return g end
-  end
-  -- Narrower than the full two-line form (only a dock can force this — the
-  -- floating window's minimum sits above it). Floors lifted: the name box goes
-  -- to its floor and line two keeps EVERY control, clipping at the window's
-  -- edge (user's call, 2026-08-08 second round — the full form is the
-  -- minimum; never shed the Library or gear squares, never a third line).
-  return try_fit(ARRANGEMENTS[#ARRANGEMENTS], width, ctrl, gap, gap_y,
-    m, cluster_w, true)
+  return control_bar_layout.geometry(width, measured, M)
 end
 
 -- How tall the bar needs to be at `width`. Called before anything else is laid
@@ -406,15 +229,9 @@ function transport.measure(ctx, width, state)
   return geometry(ctx, width, refpicker.count_width(ctx, state)).height
 end
 
--- The collapse arithmetic, exposed for the offline width sweep (run against a
--- fake `reaper` outside REAPER whenever the ARRANGEMENTS change — it proved
--- the 2026-08-06 slot-never-widens rule and re-proved this ladder). Nothing
--- inside REAPER calls this.
-transport._geometry = geometry
-
 -- The reference-mode latch uses a chain link to show that reference playback
--- follows the project transport. Filled ACCENT while ON. Hover uses
--- ACCENT_HOVER; pressed returns to ACCENT so the button stays visibly latched.
+-- follows the project transport. Its active state uses the same soft accent
+-- wash, outline and bright icon as the rest of this row.
 -- Fixed size always: latching signals itself by colour alone, never by changing
 -- shape.
 --
@@ -431,19 +248,11 @@ function transport.draw_latch(ctx, state, font)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local ref = state.reference
   local latched = ref.latched
-  local use_icon = font and icons.NAMES["link"]
-  if latched then
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.ACCENT)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), T.ACCENT_HOVER)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.ACCENT)
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.TEXT_ON_ACCENT)
-  end
-  local clicked = reaper.ImGui_Button(ctx,
-    (use_icon and "" or "L") .. "##reference", ctrl, ctrl)
-  if use_icon then
-    icons.paint_over_item(ctx, font, "link",
-      latched and ON_ACCENT_FACE or nil)
-  end
+  local soft_pushed = widgets.push_soft_active(ctx, latched)
+  local clicked = reaper.ImGui_Button(ctx, "##reference", ctrl, ctrl)
+  icon_motion.paint_item(ctx, "reference_latch", "link",
+    latched and T.ACCENT_HOVER or T.TEXT_SECONDARY,
+    latched, clicked and (latched or state.selected ~= nil))
   if clicked then
     if not latched and not state.selected then
       -- Muting an empty project would buy silence for nothing. Opening this
@@ -454,37 +263,30 @@ function transport.draw_latch(ctx, state, font)
       action = { type = "toggle_reference" }
     end
   end
-  if latched then reaper.ImGui_PopStyleColor(ctx, 4) end
-  local tip = latched
-    and ("Reference mode is on for " .. (ref.owner_name or "this project") ..
-      ". Its master is muted. Press Play in Reaper to hear the selected reference. " ..
-      "Click the Latch button to turn it off.")
-    or (state.selected
-      and "Turn on Reference mode. This mutes the project so Play in Reaper hears the selected reference instead. You can bind the Latch button to a Reaper shortcut."
-      or "Choose a reference first. Click the Latch button to open the reference list.")
-  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), tip, "reference_latch")
+  widgets.pop_soft_active(ctx, soft_pushed)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  if hovered then
+    local tip = latched
+      and ("Reference mode is on for " .. (ref.owner_name or "this project") ..
+        ". Its master is muted. Press Play in Reaper to hear the selected reference. " ..
+        "Click the Latch button to turn it off.")
+      or (state.selected
+        and "Turn on Reference mode. This mutes the project so Play in Reaper hears the selected reference instead. You can bind the Latch button to a Reaper shortcut."
+        or "Choose a reference first. Click the Latch button to open the reference list.")
+    tips.show(ctx, true, tip, "reference_latch")
+  end
   return action
 end
 
 -- The same Pitch button and persistent compact panel are used in both audition surfaces.
--- The button is fixed-size and only its musical-note face changes colour.
+-- The icon shows an adjustment; the outline shows that the panel is open.
 function transport.draw_pitch(ctx, state, font, slot)
   local value = (state.pitch and state.pitch[slot]) or 0
   local sound = (slot == "browse") and state.browse or state.selected
   local id = "pitch_" .. slot
-  local size = reaper.ImGui_GetFrameHeight(ctx)
-  local use_icon = font and icons.NAMES["music-2"]
   if not sound then reaper.ImGui_BeginDisabled(ctx) end
-  if value ~= 0 and not use_icon then
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT)
-  end
-  reaper.ImGui_Button(ctx, (use_icon and "" or "\u{266A}") .. "##" .. id, size, size)
-  if value ~= 0 and not use_icon then reaper.ImGui_PopStyleColor(ctx) end
-  if use_icon then
-    icons.paint_over_item(ctx, font, "music-2",
-      { color = value ~= 0 and T.ACCENT or T.TEXT_SECONDARY })
-  end
-  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local _, hovered = widgets.panel_button(ctx, font, id, "music-2",
+    pitchwin.is_open(slot), "\u{266A}", value ~= 0, sound ~= nil, true)
   -- Open on mouse-down instead of waiting for the ordinary button release.
   -- The compact panel cannot overlap this button, so there is no accidental
   -- interaction with the newly appeared window during the same hold.
@@ -530,8 +332,8 @@ function transport.draw(ctx, state, res)
 
   -- LATCH: the A/B-against-your-project reference-mode toggle (labeled "LATCH"
   -- on the button, 2026-07-28 — a label change only; the action type and every
-  -- internal name stay "reference"). Filled ACCENT only while ON, following
-  -- the user's chosen palette like every other active control.
+  -- internal name stay "reference"). The shared soft accent treatment appears
+  -- only while ON and follows the user's chosen palette.
   -- Fixed width, always present: latching signals itself by colour alone, never
   -- by changing the row's shape. After the fold it leads line two.
   reaper.ImGui_SetCursorPos(ctx, row_x0 + g.latch_x, row_y0 + g.ctrl_y)
@@ -556,7 +358,10 @@ function transport.draw(ctx, state, res)
   -- already reported something, and the square would vanish for that frame.
   local main_slot = { slot = "main", id = state.selected_id, sound = state.selected }
   place_cluster(0)
+  local play_x, play_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local play_action = transport.draw_play(ctx, state, font, main_slot)
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "latch",
+    play_x, play_y, play_x + ctrl, play_y + ctrl)
   action = action or play_action
 
   place_cluster(1)
@@ -564,13 +369,18 @@ function transport.draw(ctx, state, res)
   action = action or stop_action
 
   place_cluster(2)
-  if widgets.toggle(ctx, "loop", LOOP, state.loop, "Loop", font, "repeat") then action = { type = "toggle_loop" } end
+  local controls_x, controls_y = reaper.ImGui_GetCursorScreenPos(ctx)
+  local controls_right = controls_x + (g.trim_x + g.trim_w)
+    - (g.cluster_x + 2 * (ctrl + g.cluster_gap))
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "transport",
+    controls_x, controls_y, controls_right, controls_y + ctrl)
+  if widgets.toggle(ctx, "loop", LOOP, state.loop, "Loop", font, "repeat", nil,
+      "loop") then action = { type = "toggle_loop" } end
   -- (The auto-audition ear left the bar 2026-08-07 — it only ever governed the
   -- browser's click-to-hear, so it lives beside the browser's audition strip.)
 
   -- MONO: fold both channels together and hear the result in both speakers, the
-  -- console mono button. Faced "M" rather than a glyph — Lucide has no icon that
-  -- reads as "mono", and an arbitrary one would need learning.
+  -- console mono button. Two circles converge into one while the channels fold.
   --
   -- A plain accent-faced toggle like loop. Unlike the latch, it changes only
   -- what you hear right now and does not mute the project.
@@ -582,7 +392,7 @@ function transport.draw(ctx, state, res)
     and "Fold left and right together in both speakers to check mono compatibility."
     or "Mono is available for mono and stereo sounds."
   if widgets.toggle(ctx, "mono", "M", state.mono,
-      mono_tip, font, nil, mono_available) then
+      mono_tip, font, nil, mono_available, "mono") then
     action = { type = "toggle_mono" }
   end
 
@@ -612,7 +422,7 @@ function transport.draw(ctx, state, res)
   action = action or arrow_action
 
   -- The armed sound's tech facts ("48 kHz · 24-bit · WAV · stereo"), following
-  -- the picker unit — small dim metadata in the browser info row's exact voice
+  -- the picker unit, using normal label contrast for legibility at the small size
   -- (the text is state.selected_tech, formatted by the entry script once per
   -- selection through the same core.techfacts the browser uses).
   --
@@ -633,7 +443,7 @@ function transport.draw(ctx, state, res)
       local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
       local _, y1 = reaper.ImGui_GetItemRectMax(ctx)
       reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx),
-        x0, (y0 + y1) * 0.5 - th * 0.5, T.TEXT_TERTIARY, state.selected_tech)
+        x0, (y0 + y1) * 0.5 - th * 0.5, T.TEXT_SECONDARY, state.selected_tech)
     end
     if small then reaper.ImGui_PopFont(ctx) end
   end
@@ -655,13 +465,6 @@ function transport.draw(ctx, state, res)
     -- collapse step, immediately to its left, in both shapes. Clicking it
     -- opens the match window (submitted at the end of this function).
     reaper.ImGui_SetCursorPos(ctx, row_x0 + g.target_x, row_y0 + g.ctrl_y)
-    -- The ◎ is the walkthrough's finale target — noted from geometry, see the
-    -- latch's note. (It used to be noted twice, for a second match stop that
-    -- described the open panel while still ringing this button; that stop is
-    -- gone — 2026-08-10, `.brief/walkthrough-footer/`.)
-    local match_x, match_y = reaper.ImGui_GetCursorScreenPos(ctx)
-    walkthrough_ui.note_rect(ctx, state.walkthrough, "match_open",
-      match_x, match_y, match_x + ctrl, match_y + ctrl)
     matchwin.draw_button(ctx, state, res)
 
     reaper.ImGui_SetCursorPos(ctx, row_x0 + g.trim_x, row_y0 + g.ctrl_y)
@@ -670,13 +473,16 @@ function transport.draw(ctx, state, res)
     -- reset gesture — collapsing changes the control's shape, never its feel
     -- or its wiring (widgets.db_drag matches the fader's dB-per-pixel).
     local trim_opts = { min = match.TRIM_SILENCE, max = match.TRIM_MAX, default = 0,
-      taper = true, width = g.trim_w }
+      taper = true, width = g.trim_w, edit_key = sel and sel.id or false }
     local draw_trim = trim_shown == "fader" and widgets.db_fader or widgets.db_drag
     if sel then
       trim_opts.tip = (trim_shown == "fader"
           and "Adjust the selected reference's remembered trim"
           or "Adjust the selected reference's remembered trim \u{00B7} drag up or down")
         .. RESET_HINT
+      if trim_shown == "fader" then
+        trim_opts.value_tip = "Click to type trim · right-click to reset"
+      end
       -- A real fader's shape since 2026-08-07: silence at the bottom, +24 at
       -- the top, steps growing as it goes down. No cut a match asks for can be
       -- out of its reach any more (core/match.lua owns both numbers).
@@ -698,12 +504,13 @@ function transport.draw(ctx, state, res)
   -- Walkthrough stop 1's target — and the frozen state's ring, since this is
   -- the button that reopens the Library. Geometry-noted (see the latch).
   local lib_x, lib_y = reaper.ImGui_GetCursorScreenPos(ctx)
-  walkthrough_ui.note_rect(ctx, state.walkthrough, "library",
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "library_button",
     lib_x, lib_y, lib_x + ctrl, lib_y + ctrl)
-  if icons.button(ctx, font, "openlibrary", "library",
-      { tip = "Open the Library.", fallback = icons.draw_folder }) then
+  if widgets.panel_button(ctx, font, "openlibrary", "library",
+      state.browser_open, icons.draw_folder) then
     action = action or { type = "toggle_browser" }
   end
+  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), "Open the Library.")
 
   -- Settings, the bar's corner (the user's pick over gear-beside-Library —
   -- same brief). Moved here from the browser toolbar so Settings is one click
@@ -714,16 +521,18 @@ function transport.draw(ctx, state, res)
   -- never managed.
   reaper.ImGui_SetCursorPos(ctx, row_x0 + g.gear_x, row_y0 + g.ctrl_y)
   local update_due = state.update and state.update.available ~= nil
-  if icons.button(ctx, font, "settings", "settings",
-      { tip = update_due and "Settings. An update is available" or "Settings",
-        fallback = icons.draw_gear }) then
-    settings.open(state)
-    -- Also reported as an action: the entry script refreshes the update
-    -- feature's registry read, so the UPDATES section opens describing NOW
-    -- (a pin set or cleared in ReaPack five minutes ago), not the last daily
-    -- check. Losing this to an earlier same-frame action is harmless — the
-    -- window still opens, just on day-old facts.
-    action = action or { type = "settings_opened" }
+  -- Settings changes state on the button's release, so its motion must start
+  -- from that same release. Starting it on mouse-down lets the intervening
+  -- closed frames cancel the turn before the window opens.
+  if widgets.panel_button(ctx, font, "settings", "settings",
+      settings.is_open(), icons.draw_gear) then
+    if settings.is_open() then
+      settings.close()
+    else
+      settings.open(state)
+      -- Refresh update information only when opening the panel.
+      action = action or { type = "settings_opened" }
+    end
   end
   if update_due then
     local max_x = reaper.ImGui_GetItemRectMax(ctx)
@@ -732,6 +541,8 @@ function transport.draw(ctx, state, res)
     reaper.ImGui_DrawList_AddCircleFilled(reaper.ImGui_GetWindowDrawList(ctx),
       max_x - r - 2, min_y + r + 2, r, T.ACCENT)
   end
+  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+    update_due and "Settings. An update is available" or "Settings")
 
   -- Every item above was placed absolutely, so leave the cursor where a normal
   -- row would have left it — directly below the bar's full (possibly wrapped)

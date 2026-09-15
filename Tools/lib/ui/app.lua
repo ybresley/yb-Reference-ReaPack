@@ -5,6 +5,7 @@
 -- crosses over.
 
 local theme    = require("ui.theme")
+local numeric_input = require("ui.numeric_input")
 local window   = require("ui.window")
 local browser  = require("ui.browser")
 local dropzone = require("ui.dropzone")
@@ -15,6 +16,8 @@ local matchwin = require("ui.matchwin")
 local focus    = require("ui.focus")
 local walkthrough_ui = require("ui.walkthrough")
 local pitchwin = require("ui.pitchwin")
+local filterwin = require("ui.filterwin")
+local actions = require("core.actions")
 local refpicker = require("ui.refpicker")
 
 local app = {}
@@ -122,6 +125,7 @@ function app.create_context(font_path, context_name, monitor_work_area)
   -- Read-only platform geometry, injected to keep native REAPER calls in the adapter.
   res.monitor_work_area = monitor_work_area
   local ctx = reaper.ImGui_CreateContext(context_name)
+  numeric_input.init(ctx)
   -- Feature detection by looking the ImGui function up directly (nil = absent), the
   -- same idiom as window.lua's HAS_COL_HOVER — NOT reaper.APIExists, which is a
   -- non-ImGui call this ui/ module isn't allowed to make.
@@ -244,6 +248,8 @@ end
 -- our windows lit up this frame, which the entry script needs before it asserts
 -- REAPER's own drag cursor (see ui/dropzone.take_hand_shown).
 function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
+  -- Curves share a scratch buffer, like fonts; their measured values stay separate.
+  res.spectrum_draw = state.spectrum and state.spectrum.draw
   refpicker.begin_frame()
   -- Focus bookkeeping first (ui/focus.lua): which mouse presses landed on one
   -- of our windows is read at the top of the frame, before any window draws;
@@ -274,7 +280,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- hang on for the rest of the session. This condition keeps being true until it
   -- is dealt with, so it always recovers.
   local action
-  local wave_id, wave_cols
+  local wave_id, wave_cols, browse_wave_id, browse_wave_cols
   if state.drag and not reaper.ImGui_IsMouseDown(ctx, 0) then
     action = { type = "drop_sound" }
   end
@@ -480,7 +486,8 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
       end
 
       dropzone.set_current_window("browser")
-      local browser_action = browser.draw(ctx, state, res)
+      local browser_action
+      browser_action, browse_wave_id, browse_wave_cols = browser.draw(ctx, state, res)
       dropzone.set_current_window(nil)
       -- Same precedence rule as the Reference View above: a release the browser's
       -- own drop target consumed must survive to the end of the frame.
@@ -505,6 +512,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
       end
 
       -- The walkthrough's spotlight over the browser (no-op unless active).
+      walkthrough_ui.note_rect(ctx, state.walkthrough, "library", gx, gy, gx + gw, gy + gh)
       walkthrough_ui.wash(ctx, state.walkthrough, "browser")
 
       -- Esc closes the browser, but only while it's the focused window and no
@@ -552,8 +560,14 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- Pitch: a real top-level panel so it stays open while the transport in
   -- either host is used. Drawn outside both hosts for the same reason as the
   -- Loudness window; draws nothing until its musical-note button opens it.
-  local pitch_action = pitchwin.draw(ctx, state)
-  action = action or pitch_action
+  local pitch_action = pitchwin.draw(ctx, state, res)
+  -- A Library geometry report or another completed control action must not
+  -- swallow a Pitch change made in this separate top-level panel.
+  action = actions.combine(pitch_action, action)
+
+  -- Monitoring Filter: one top-level panel shared by every monitored source.
+  -- Like Pitch, it stays open while the transport and Library are used.
+  local filter_action = filterwin.draw(ctx, state, res)
 
   -- Settings: a real top-level window since 2026-08-08 (it was a modal inside
   -- the browser panel), so it is drawn OUT here beside the other two rather than
@@ -572,9 +586,9 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
 
   -- What's New: its own top-level window too, opened by the entry script when
   -- the running version is newer than the one whose notes were last read. Drawn
-  -- after Settings so it lands on top of it — the one moment both can be up is a
-  -- user who opened Settings before the card was dismissed.
-  local wn_action = whatsnew.draw(ctx, state)
+  -- after Settings; it explicitly requests focus on opening so submission
+  -- order is not relied upon to bring its native window to the front.
+  local wn_action = whatsnew.draw(ctx, state, res)
   action = action or wn_action
 
   -- The walkthrough's card: its own tiny window, drawn after both hosts so it
@@ -599,8 +613,11 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   dropzone.end_file_drag_frame()
   -- Taken (and cleared) at the very end, so it covers the drop targets in BOTH
   -- windows and can never carry over into the next frame.
-  return open, action, dropzone.take_hand_shown(), give_focus, forward_keys,
-    settings.feedback_visible(), wave_id, wave_cols, open and refpicker.preview_owner() or nil
+  -- A field losing focus and a waveform/picker click are independent intents.
+  -- Finish the edit first, including before a click selects that edited band.
+  return open, actions.combine(filter_action, action), dropzone.take_hand_shown(), give_focus, forward_keys,
+    settings.feedback_visible(), wave_id, wave_cols, open and refpicker.preview_owner() or nil,
+    browse_wave_id, browse_wave_cols
 end
 
 return app

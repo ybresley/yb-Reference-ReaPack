@@ -1,26 +1,11 @@
--- walkthrough: the first-open tour's overlay (decided 2026-08-10,
--- `.brief/_done/walkthrough/` — every answer the user's own). Spotlight look:
--- each tool window gets a dark wash with the current stop's target left bright
--- inside an accent ring, and one titled card sits beside the target carrying
--- progress dots, Back, Skip and one button. The wash is PAINT, not glass —
--- nothing is blocked, real actions advance the stops (core/walkthrough.lua owns
--- that state machine; this file only draws it and reports button presses).
---
--- A ui/ module: reaper.ImGui_* only. It never touches the library, never writes
--- the seen-mark — card presses leave as { type = "walkthrough", ev = ... }. Two
--- exceptions: a stop whose button DOES the deed it teaches emits that deed's own
--- action (`open_browser`), and the finale OPENS the match window itself on
--- arrival, the way the ◎ does — opening is view state, not an action
--- (matchwin.lua).
---
--- The card is its own little WINDOW rather than shapes on the host's draw list,
--- for one reason: its buttons must swallow their clicks. Hand-drawn buttons over
--- the waveform would click through to the seek handler underneath — a real
--- window on top receives the mouse the way any overlapping window does.
+-- Guided tour over the real interface. Highlights are paint-only; the card
+-- is a separate window so navigation clicks cannot reach the controls below.
+-- Card actions are handled by the entry script. Position stays stable per step.
 
 local wt    = require("core.walkthrough")
+local placement = require("core.walkthrough_layout")
 local theme = require("ui.theme")
-local matchwin = require("ui.matchwin") -- the finale opens it, rings it, keeps clear of it
+local widgets = require("ui.widgets")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -64,21 +49,15 @@ local rects = {}
 -- Host-window rects, recorded by wash() so card() can anchor and clamp without
 -- being inside either window's Begin scope.
 local hosts = {}
--- The stop position whose `auto` deed has already been carried out, so it fires
--- once on arrival and never again (see card()).
-local auto_done = nil
--- Last frame's active flag. The tour ENDING is an edge, not a state: closing the
--- match window whenever the tour is inactive would make that window impossible
--- to open at all.
-local was_active = false
+local card_position
 
 -- The stop the ring and card belong to right now. While frozen the target is
 -- the LIBRARY BUTTON — the card parks on the main window asking for a reopen,
 -- and ringing the button that does it is the whole hint.
 local function effective_target(ws)
   local cur = wt.current(ws)
-  if not cur or cur == "welcome" then return nil, cur end
-  if wt.is_frozen(ws) then return "library", cur end
+  if not cur then return nil, cur end
+  if wt.is_frozen(ws) then return "library_button", cur end
   return cur.id, cur
 end
 
@@ -150,7 +129,7 @@ function walkthrough.wash(ctx, ws, win)
   local frame = reaper.ImGui_GetFrameCount(ctx)
   local id, cur = effective_target(ws)
   local target_win = "main"
-  if cur and cur ~= "welcome" and not wt.is_frozen(ws) then target_win = cur.window end
+  if cur and not wt.is_frozen(ws) then target_win = cur.window end
 
   local holes, ring = {}, nil
   if id and win == target_win then
@@ -159,7 +138,7 @@ function walkthrough.wash(ctx, ws, win)
       ring = inflate_clamped(r, wx, wy, ww, wh)
       holes[#holes + 1] = ring
     end
-    local ctx_id = type(cur) == "table" and cur ~= "welcome" and cur.context or nil
+    local ctx_id = type(cur) == "table" and cur.context or nil
     if ctx_id then
       local c = rects[ctx_id]
       if c and c.frame == frame then
@@ -204,8 +183,16 @@ function walkthrough.wash(ctx, ws, win)
     -- Only the TARGET wears the ring — a ringed context would make two
     -- subjects out of one stop.
     if ring then
-      reaper.ImGui_DrawList_AddRect(dl, ring.x1, ring.y1, ring.x2, ring.y2,
-        T.ACCENT, 5, 0, 1)
+      local radius = M.WALK_RING_RADIUS
+      if wt.is_frozen(ws) or (type(cur) == 'table' and cur.act) then
+        reaper.ImGui_DrawList_AddRect(dl, ring.x1, ring.y1, ring.x2, ring.y2,
+          theme.fade(T.ACCENT, 0.5), radius, 0, M.BORDER_GLOW_WIDTH)
+        widgets.draw_border_glow(ctx, dl, ring.x1, ring.y1, ring.x2, ring.y2,
+          radius, T.ACCENT)
+      else
+        widgets.draw_border_halo(ctx, dl, ring.x1, ring.y1, ring.x2, ring.y2,
+          radius, T.ACCENT)
+      end
     end
   end
 end
@@ -216,45 +203,13 @@ end
 -- Library button was unpressable on the short docked strip, where the old
 -- "clamp into the host window" rule parked the card straight over the bar).
 --
--- So: sides are TRIED, and the first one that fits whole is taken — every
--- candidate clears the ring by construction. Two passes (below): inside the host
--- window first, so a roomy window keeps the card in the tool; then the screen's
--- work area, since the card owns an OS window of its own and can stand beside a
--- strip it cannot fit inside.
+-- Side placement is tried across the host and screen before above or below.
+-- The whole Library is an obstacle, even when only its sound list is highlighted.
 local HAS_VIEWPORT = reaper.ImGui_GetMainViewport ~= nil
   and reaper.ImGui_Viewport_GetWorkPos ~= nil and reaper.ImGui_Viewport_GetWorkSize ~= nil
 
-local SIDES = { "above", "below", "right", "left" }
-
 local function clamp(v, lo, hi)
-  if v < lo then return lo end
-  if v > hi then return hi end
-  return v
-end
-
--- The card's corner for one side of the ring: above/below hug the ring's right
--- edge, left/right its top.
-local function side_pos(side, ring, cw, ch, gap)
-  if side == "above" then return ring.x2 - cw, ring.y1 - ch - gap end
-  if side == "below" then return ring.x2 - cw, ring.y2 + gap end
-  if side == "left"  then return ring.x1 - cw - gap, ring.y1 end
-  return ring.x2 + gap, ring.y1
-end
-
--- First side of `ring` on which the card fits whole inside the given bounds, or
--- nil. A candidate slides only along the axis its side did NOT use (an "above"
--- card slides sideways, never downward), so sliding can't walk it onto the ring.
-local function place_in(ring, cw, ch, bx, by, bw, bh)
-  local gap, m = M.WALK_RING_PAD * 2, M.WINDOW_PAD
-  local x0, y0 = bx + m, by + m
-  local x1, y1 = bx + bw - m - cw, by + bh - m - ch
-  if x1 < x0 or y1 < y0 then return nil end
-  for _, side in ipairs(SIDES) do
-    local x, y = side_pos(side, ring, cw, ch, gap)
-    if side == "above" or side == "below" then x = clamp(x, x0, x1) else y = clamp(y, y0, y1) end
-    if x >= x0 and x <= x1 and y >= y0 and y <= y1 then return x, y end
-  end
-  return nil
+  return math.max(lo, math.min(math.max(lo, hi), v))
 end
 
 -- A text-styled control (the Back and Skip links): an InvisibleButton with the words
@@ -313,30 +268,21 @@ end
 -- it is its own window). Returns a { type = "walkthrough", ev = ... } action
 -- or nil; the entry script runs the state machine.
 function walkthrough.card(ctx, ws)
-  -- The tour ending takes the match window with it, opened by the tour or by
-  -- hand (user's ask, 2026-08-11). Checked before the active guard below,
-  -- because "the tour just ended" is exactly the state that guard returns on,
-  -- and on the EDGE only — acting on "inactive" every frame would slam the
-  -- window shut the moment anyone opened it outside a tour. Skip and Done both
-  -- land here.
   local active = (ws and ws.active) or false
-  if was_active and not active then matchwin.close() end
-  was_active = active
   if not active or not CARD_OK then
-    auto_done = nil
+    card_position = nil
     return nil
   end
   local cur = wt.current(ws)
   if not cur then return nil end
 
-  local frozen = cur ~= "welcome" and wt.is_frozen(ws)
+  local frozen = wt.is_frozen(ws)
   local frame = reaper.ImGui_GetFrameCount(ctx)
 
-  -- Anchor host: the target's window, except welcome and frozen, which both
-  -- belong to the main window. A host that didn't draw this frame (browser
+  -- A frozen Library step points to the reopen button in the main window. A host that didn't draw this frame (browser
   -- mid-close) falls back to main; no host at all (main hidden) = no card.
   local host_key = "main"
-  if cur ~= "welcome" and not frozen and cur.window == "browser" then host_key = "browser" end
+  if not frozen and cur.window == "browser" then host_key = "browser" end
   local host = hosts[host_key]
   if not (host and host.frame == frame) then host = hosts.main end
   if not (host and host.frame == frame) then return nil end
@@ -347,10 +293,9 @@ function walkthrough.card(ctx, ws)
   -- This stop's copy, settled here so the measurement and the drawing below
   -- read from one place (a card measured from different words than it draws is
   -- the flicker again, wearing a different hat).
-  local title = cur == "welcome" and wt.WELCOME.title or cur.title
-  local body = cur == "welcome" and wt.WELCOME.body
-    or (frozen and wt.FROZEN_BODY or cur.body)
-  local note = (cur ~= "welcome" and not frozen) and cur.note or nil
+  local title = cur.title
+  local body = frozen and wt.FROZEN_BODY or cur.body
+  local note = not frozen and cur.note or nil
   local card_h = measure_card(ctx, title, body, note)
 
   -- The screen's usable area: the card is allowed to leave the tool window (see
@@ -370,31 +315,14 @@ function walkthrough.card(ctx, ws)
     vh = math.max(host.y + host.h, py + ph) - vy
   end
 
-  local r = cur ~= "welcome" and rects[frozen and "library" or cur.id] or nil
+  local r = rects[frozen and "library_button" or cur.id]
   if r and r.frame ~= frame then r = nil end
 
-  -- The finale's second bright region: the match panel, a window of its own.
-  -- Opened here the moment the stop is reached (`auto`) and asked for its rect
-  -- so the card can keep clear of it as well as of the ring. Fired ONCE per
-  -- arrival — reopening it every frame would take the user's ✕ away from them.
-  if cur ~= "welcome" and not frozen and cur.auto == "open_match" then
-    if auto_done ~= ws.pos then
-      auto_done = ws.pos
-      if not matchwin.is_open() then
-        -- Anchored on the RING, not on the button inside it: the ring stands
-        -- WALK_RING_PAD proud of the ◎ on every side, so anchoring to the
-        -- button left the panel 4px in from the ring's left edge and covered
-        -- the ring's top (user-reported 2026-08-11 — it read as a misaligned
-        -- panel sitting on the button).
-        local p = M.WALK_RING_PAD
-        matchwin.open_at(r and (r.x1 - p) or nil, r and (r.y1 - p) or nil,
-          r and (r.y2 + p) or nil)
-      end
-    end
-  else
-    auto_done = nil
-  end
-
+  local browser = hosts.browser
+  local library_rect = browser and browser.frame == frame and {
+    x1 = browser.x, y1 = browser.y,
+    x2 = browser.x + browser.w, y2 = browser.y + browser.h,
+  } or nil
   local x, y
   if r then
     -- Beside its target — inside the host if it fits there, otherwise anywhere
@@ -403,27 +331,14 @@ function walkthrough.card(ctx, ws)
     -- steps out beside it, leaving the drop area it talks about fully visible.
     local ring = { x1 = r.x1 - M.WALK_RING_PAD, y1 = r.y1 - M.WALK_RING_PAD,
                    x2 = r.x2 + M.WALK_RING_PAD, y2 = r.y2 + M.WALK_RING_PAD }
-    -- A panel stop keeps clear of BOTH: the box to avoid is the two together.
-    -- They stand one above the other (the panel opens off the ◎), so the union
-    -- is a tall column and the card simply takes a side of it.
-    --
-    -- While the panel is OPENING its rect doesn't exist yet — it is set when the
-    -- panel first draws, which is the frame after the request. Drawing the card
-    -- against the ring alone for that one frame put it exactly where the panel
-    -- was about to appear, and it visibly hopped aside the moment it did
-    -- (user-reported 2026-08-11). So: no card that frame. One frame without it
-    -- is invisible; one frame in the wrong place is not.
-    if cur.panel == "match" then
-      local p = matchwin.rect()
-      if not p then
-        if matchwin.is_open() then return nil end
-      else
-        ring.x1, ring.y1 = math.min(ring.x1, p.x1), math.min(ring.y1, p.y1)
-        ring.x2, ring.y2 = math.max(ring.x2, p.x2), math.max(ring.y2, p.y2)
-      end
+    -- Browser stops sit outside the entire Library, including its title bar.
+    -- Avoiding only the highlighted list lets the Library cover the card.
+    if host_key == "browser" and library_rect then
+      ring = library_rect
     end
-    x, y = place_in(ring, cw, card_h, host.x, host.y, host.w, host.h)
-    if not x then x, y = place_in(ring, cw, card_h, vx, vy, vw, vh) end
+    x, y = placement.place(ring, cw, card_h,
+      { host, { x = vx, y = vy, w = vw, h = vh } },
+      library_rect and { library_rect } or {}, M.WALK_RING_PAD * 2, margin)
     if not x then
       -- Nowhere clears it (a tiny screen): below the target, on screen. Overlap
       -- is unavoidable here, and a reachable card beats a hidden one.
@@ -431,14 +346,26 @@ function walkthrough.card(ctx, ws)
       y = clamp(ring.y2 + M.WALK_RING_PAD * 2, vy + margin, vy + vh - margin - card_h)
     end
   else
-    -- The welcome card, and any stop whose target didn't draw this frame (a
+    -- A stop whose target did not draw this frame (a
     -- narrow dock clipped it): centred on the tool, kept on screen — the tour
     -- never silently disappears.
     x = clamp(host.x + (host.w - cw) / 2, vx + margin, vx + vw - margin - cw)
     y = clamp(host.y + (host.h - card_h) / 2, vy + margin, vy + vh - margin - card_h)
   end
 
+  card_position = placement.stabilize(card_position, ws.pos, x, y, cw, card_h,
+    { x = vx, y = vy, w = vw, h = vh }, library_rect and { library_rect } or {}, margin,
+    { id = host_key, x = host.x, y = host.y })
+  x, y = card_position.x, card_position.y
+
+  -- On a screen too small to avoid overlap, keep the tutorial controls reachable.
+  -- Only raise the card in that fallback, so normal Library input retains focus.
+  if library_rect and placement.overlaps(x, y, cw, card_h, library_rect)
+      and reaper.ImGui_SetNextWindowFocus then
+    reaper.ImGui_SetNextWindowFocus(ctx)
+  end
   reaper.ImGui_SetNextWindowPos(ctx, x, y, reaper.ImGui_Cond_Always())
+  reaper.ImGui_SetNextWindowSize(ctx, cw, card_h, reaper.ImGui_Cond_Always())
   if reaper.ImGui_SetNextWindowSizeConstraints ~= nil
     and reaper.ImGui_NumericLimits_Float ~= nil then
     local _, flt_max = reaper.ImGui_NumericLimits_Float()
@@ -461,26 +388,19 @@ function walkthrough.card(ctx, ws)
 
   local action
 
-  -- Title and progress share the header row. The dots stay passive: they report
-  -- position at a glance while the labelled Back control owns navigation.
+  -- A compact count leaves room for the heading as the tour gains stops.
   local title_x, title_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local title_avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local hd = theme.push_heading_font(ctx)
   local title_h = select(2, reaper.ImGui_CalcTextSize(ctx, title))
   reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, title)
   if hd then reaper.ImGui_PopFont(ctx) end
-  if cur ~= "welcome" then
-    local n = #wt.STOPS
-    local step = M.WALK_DOT_R * 2 + M.WALK_DOT_GAP
-    local dots_w = n * step - M.WALK_DOT_GAP
-    local dx = title_x + title_avail - dots_w
+  do
+    local progress = string.format('%d / %d', ws.pos, #wt.STOPS)
+    local progress_w, progress_h = reaper.ImGui_CalcTextSize(ctx, progress)
     local dl = reaper.ImGui_GetWindowDrawList(ctx)
-    for i = 1, n do
-      reaper.ImGui_DrawList_AddCircleFilled(dl,
-        dx + M.WALK_DOT_R + (i - 1) * step,
-        title_y + title_h / 2, M.WALK_DOT_R,
-        i == ws.pos and T.ACCENT or T.WALK_DOT)
-    end
+    reaper.ImGui_DrawList_AddText(dl, title_x + title_avail - progress_w,
+      title_y + (title_h - progress_h) / 2, T.TEXT_TERTIARY, progress)
   end
 
   -- Body, wrapped to the card. Frozen replaces the stop's own lesson with the
@@ -506,32 +426,22 @@ function walkthrough.card(ctx, ws)
   local x0 = reaper.ImGui_GetCursorPosX(ctx)
   local frame_h = reaper.ImGui_GetFrameHeight(ctx)
 
-  -- EVERY stop has a button now, and on a stop that waits for a real click it
-  -- performs that click's own deed (`act`) rather than jumping the stop — so it
-  -- wears the deed's name. The tour is then walked on by the resulting real
-  -- event, which is also what the user's own click would have produced.
+  -- A closed Library offers Open; otherwise the button advances the tour.
   local btn_label, act
-  if cur == "welcome" then btn_label = "Start"
-  elseif frozen then btn_label, act = wt.FROZEN_BUTTON, wt.FROZEN_ACT
+  if frozen then btn_label, act = wt.FROZEN_BUTTON, wt.FROZEN_ACT
   else btn_label, act = cur.button, cur.act end
 
-  local skip_label = cur == "welcome" and "Not Now" or "Skip"
+  local skip_label = "Skip"
   local skip_w = select(1, reaper.ImGui_CalcTextSize(ctx, skip_label))
 
-  if cur ~= "welcome" then
+  do
     if text_button(ctx, "Back", frame_h, ws.pos <= 1) then
-      -- The finale opened Loudness as part of arriving. Leaving it backwards
-      -- takes that temporary panel too, matching Skip and Done cleanup.
-      if cur.panel == "match" then matchwin.close() end
       action = { type = "walkthrough", ev = "back" }
     end
   end
 
   -- Skip sits just left of the button; both hug the card's right edge.
   local skip_x = x0 + avail - M.POPUP_BTN_W - M.ITEM_SPACING_X * 2 - skip_w
-  if cur ~= "welcome" then
-    reaper.ImGui_SameLine(ctx)
-  end
   reaper.ImGui_SameLine(ctx, skip_x)
   if text_button(ctx, skip_label, frame_h) then
     action = { type = "walkthrough", ev = "skip" }
@@ -539,8 +449,7 @@ function walkthrough.card(ctx, ws)
 
   reaper.ImGui_SameLine(ctx, x0 + avail - M.POPUP_BTN_W)
   if reaper.ImGui_Button(ctx, btn_label, M.POPUP_BTN_W) then
-    -- A stop with a deed reports THAT and lets the deed's own event walk the
-    -- tour on (the entry script owns the browser); every other stop just walks.
+    -- Reopening the Library keeps the current step; Next advances it.
     action = act and { type = act } or { type = "walkthrough", ev = "next" }
   end
 

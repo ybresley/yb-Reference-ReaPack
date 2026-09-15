@@ -17,6 +17,7 @@ function ruler.format_label(seconds, step)
   local places = decimal_places(step)
   local scale = 10 ^ places
   local rounded = math.floor(math.max(0, seconds) * scale + 0.5) / scale
+  if rounded == 0 then return "0" end
   if rounded < 60 then return string.format("%." .. places .. "f", rounded) end
   if rounded < 3600 then
     local minutes = math.floor(rounded / 60)
@@ -47,6 +48,15 @@ local function label_left(x, label_width, width)
   return math.max(0, math.min(x - label_width * 0.5, math.max(0, width - label_width)))
 end
 
+local function tick_label(time, step, is_last)
+  local label = ruler.format_label(time, step)
+  if is_last and label ~= "0" then
+    local _, colons = label:gsub(":", "")
+    label = label .. (colons == 2 and " h" or colons == 1 and " m" or " s")
+  end
+  return label
+end
+
 local function labels_fit(start_time, finish_time, width, step, measure)
   local span = finish_time - start_time
   local first = math.ceil(start_time / step - EPS)
@@ -55,7 +65,7 @@ local function labels_fit(start_time, finish_time, width, step, measure)
   for index = first, last do
     local time = index * step
     local x = (time - start_time) / span * width
-    local label = ruler.format_label(time, step)
+    local label = tick_label(time, step, index == last)
     local label_width = measure(label)
     local left = label_left(x, label_width, width)
     if previous_right and left < previous_right + LABEL_PAD_PX then return false end
@@ -93,7 +103,8 @@ function ruler.build(start_time, finish_time, width, measure)
     local x = (time - start_time) / span * width
     local tick = { x = x, time = time, major = is_major }
     if is_major then
-      local label = ruler.format_label(time, major_step)
+      local label = tick_label(time, major_step,
+        major_index == math.floor(finish_time / major_step + EPS))
       local label_width = measure(label)
       local left = label_left(x, label_width, width)
       if not previous_label_right or left >= previous_label_right + LABEL_PAD_PX then

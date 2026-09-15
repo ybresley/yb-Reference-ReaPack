@@ -82,6 +82,10 @@ function panel.draw(ctx, progress, x0, y0, x1, y1)
     T.BG_POPUP, M.ANALYSIS_CARD_RADIUS)
   reaper.ImGui_DrawList_AddRect(dl, card_x0, card_y0, card_x1, card_y1,
     T.STROKE_SECONDARY, M.ANALYSIS_CARD_RADIUS)
+  if not progress.paused then
+    widgets.draw_border_glow(ctx, dl, card_x0, card_y0, card_x1, card_y1,
+      M.ANALYSIS_CARD_RADIUS, T.ACCENT)
+  end
 
   local inner_x = card_x0 + M.ANALYSIS_CARD_PAD
   local inner_w = card_x1 - M.ANALYSIS_CARD_PAD - inner_x

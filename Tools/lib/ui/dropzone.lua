@@ -7,9 +7,11 @@
 
 local theme = require("ui.theme")
 local filedrop_rescue = require("filedrop_rescue")
+local widgets = require("ui.widgets")
 local T = theme.tokens
 
 local dropzone = {}
+local drop_motion = { frame = nil, generation = nil }
 
 -- The drop-target treatment while a file drag hovers it: dashed accent outline +
 -- accent wash, and — for a big area — a centred pill naming where the files will
@@ -33,6 +35,53 @@ local function dashed_rect(dl, x0, y0, x1, y1, col)
   end
 end
 
+-- A hover-only cue: the corners pull inward as the pointer enters a target,
+-- then leave the existing dashed outline to describe the still-valid landing
+-- area. It never reports an import result.
+local function draw_magnetic_corners(ctx, dl, x0, y0, x1, y1, label, local_x, local_y, alpha)
+  if not theme.motion.enabled or reaper.ImGui_GetFrameCount == nil then
+    return
+  end
+  local frame = reaper.ImGui_GetFrameCount(ctx)
+  local x, y = math.floor(local_x + 0.5), math.floor(local_y + 0.5)
+  local w, h = math.floor(x1 - x0 + 0.5), math.floor(y1 - y0 + 0.5)
+  if drop_motion.generation ~= theme.motion.generation then
+    drop_motion.frame = nil
+    drop_motion.generation = theme.motion.generation
+  end
+  -- A window move leaves this identity unchanged. A frame can submit an outer
+  -- target and a more specific target: only its first target updates the shared
+  -- event identity, so the later overlay cannot restart the event every frame.
+  local trigger = false
+  if drop_motion.frame ~= frame then
+    trigger = drop_motion.frame ~= frame - 1 or drop_motion.label ~= label
+      or drop_motion.x ~= x or drop_motion.y ~= y or drop_motion.w ~= w or drop_motion.h ~= h
+    drop_motion.label, drop_motion.frame = label, frame
+    drop_motion.x, drop_motion.y, drop_motion.w, drop_motion.h = x, y, w, h
+  end
+  local progress = widgets.motion_event(ctx, "drop_magnetic_corners", true, 0.52, trigger)
+  if not progress then return end
+  local settle = 1 - progress
+  local scale = theme.scale
+  local inset = (2 + progress * 3) * scale
+  local length = (9 + settle * 8) * scale
+  local max_length = math.min((x1 - x0 - inset * 2) * 0.5,
+    (y1 - y0 - inset * 2) * 0.5)
+  if max_length <= 0 then return end
+  if length > max_length then length = max_length end
+  local colour = theme.fade(T.ACCENT_HOVER, (0.72 * settle + 0.12) * alpha)
+  local thickness = (1.25 + settle * 0.75) * scale
+  local lx, rx, ty, by = x0 + inset, x1 - inset, y0 + inset, y1 - inset
+  reaper.ImGui_DrawList_AddLine(dl, lx, ty, lx + length, ty, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, lx, ty, lx, ty + length, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, rx, ty, rx - length, ty, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, rx, ty, rx, ty + length, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, lx, by, lx + length, by, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, lx, by, lx, by - length, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, rx, by, rx - length, by, colour, thickness)
+  reaper.ImGui_DrawList_AddLine(dl, rx, by, rx, by - length, colour, thickness)
+end
+
 -- The treatment on an explicit rect. The foreground list draws over the
 -- target's own content (rows, child background) rather than under it. It
 -- ignores window clipping, so the rect is CLAMPED by hand to the current
@@ -46,8 +95,11 @@ function dropzone.draw_drop_rect(ctx, x0, y0, x1, y1, label)
   x1, y1 = math.min(x1 - 1, wx + ww - 2), math.min(y1 - 1, wy + wh - 2)
   if x1 <= x0 or y1 <= y0 then return end
   local dl = reaper.ImGui_GetForegroundDrawList(ctx)
-  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, T.ACCENT_WASH, 4)
-  dashed_rect(dl, x0, y0, x1, y1, T.ACCENT)
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1,
+    theme.fade(T.ACCENT_WASH, alpha), 4)
+  dashed_rect(dl, x0, y0, x1, y1, theme.fade(T.ACCENT, alpha))
+  draw_magnetic_corners(ctx, dl, x0, y0, x1, y1, label, x0 - wx, y0 - wy, alpha)
   if label then
     -- "Add to Whooshes" — the filing destination, named before the drop lands.
     -- Skipped when the target is too small to host it (a tiny docked strip).
@@ -56,10 +108,11 @@ function dropzone.draw_drop_rect(ctx, x0, y0, x1, y1, label)
       local cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
       local px, py = 12, 4
       reaper.ImGui_DrawList_AddRectFilled(dl, cx - tw * 0.5 - px, cy - th * 0.5 - py,
-        cx + tw * 0.5 + px, cy + th * 0.5 + py, T.BG_POPUP, 999)
+        cx + tw * 0.5 + px, cy + th * 0.5 + py, theme.fade(T.BG_POPUP, alpha), 999)
       reaper.ImGui_DrawList_AddRect(dl, cx - tw * 0.5 - px, cy - th * 0.5 - py,
-        cx + tw * 0.5 + px, cy + th * 0.5 + py, T.STROKE_SECONDARY, 999)
-      reaper.ImGui_DrawList_AddText(dl, cx - tw * 0.5, cy - th * 0.5, T.TEXT_PRIMARY, label)
+        cx + tw * 0.5 + px, cy + th * 0.5 + py, theme.fade(T.STROKE_SECONDARY, alpha), 999)
+      reaper.ImGui_DrawList_AddText(dl, cx - tw * 0.5, cy - th * 0.5,
+        theme.fade(T.TEXT_PRIMARY, alpha), label)
     end
   end
 end
