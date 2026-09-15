@@ -20,8 +20,8 @@ local tips = {}
 
 tips.DELAY = 0.15 -- seconds of continuous hover before a tip appears
 
--- Both are needed to time anything; an older ReaImGui without them simply
--- shows tips the way it always did.
+-- Without both clock functions, show the tip immediately. This also supports
+-- callers using a partial API stand-in outside REAPER.
 local HAS_CLOCK = reaper.ImGui_GetTime ~= nil and reaper.ImGui_GetFrameCount ~= nil
 
 -- Identity defaults to the tooltip TEXT: moving onto a control that says

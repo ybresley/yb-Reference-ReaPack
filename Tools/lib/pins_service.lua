@@ -30,6 +30,9 @@ local project    = require("project_state")
 
 local product_error = require("product_error")
 local service = {}
+-- A failed Save As must keep using the original audio even after a tab switch.
+-- This lasts only for the open project; no absolute path enters its pin data.
+local stalled_moves = setmetatable({}, { __mode = "k" })
 
 local function empty_pins(proj, path)
   return {
@@ -53,6 +56,7 @@ local DAMAGED = "This project's pinned references couldn't be read. Changes to p
 -- damaged data loads as an empty list, so the lookup would report a missing pin
 -- and hide the real reason from the user.
 local function damaged(state)
+  if state.pins.relocation_error then return state.pins.relocation_error end
   if state.pins.load_error then return DAMAGED end
   return nil
 end
@@ -99,29 +103,46 @@ function service.rebuild_markers(state)
 end
 local rebuild_markers = service.rebuild_markers
 
--- Save As moved the project to another folder: the pin records travel inside the
--- project, but their audio doesn't move on its own. Carry the copies forward so
--- the pins keep playing from the new home. Failures don't touch the records —
--- the old folder still holds the audio, and the returned warning says what
--- happened rather than letting the user discover it as silent dead pins.
-local function carry_files_forward(old_dir, new_dir, data)
-  if #data.pins == 0 then return nil end
-  reaper_api.ensure_dir(new_dir)
-  local failed = 0
-  for _, p in ipairs(data.pins) do
-    local dest = reaper_api.join(new_dir, p.filename)
-    if not reaper_api.path_exists(dest) then
-      local ok = reaper_api.copy_file(reaper_api.join(old_dir, p.filename), dest)
-      if not ok then failed = failed + 1 end
+local function same_folder(a, b)
+  if package.config:sub(1, 1) == "\\" then
+    a, b = a:gsub("/", "\\"):lower(), b:gsub("/", "\\"):lower()
+  end
+  return a == b
+end
+
+-- All copies must land before any pin changes its address. An existing name is
+-- not proof of matching audio, even when its byte size matches the original.
+-- Completed copies stay on disk after a refusal; deleting them could damage a
+-- project saved by another process while this move was in progress.
+local function carry_files_forward(old_dir, fresh, original_text, retry)
+  local data, plan = fresh.data, {}
+  local changed = retry == true
+  if not same_folder(old_dir, fresh.dir) then
+    reaper_api.ensure_dir(fresh.dir)
+    local taken = {}
+    for _, name in ipairs(reaper_api.list_files(fresh.dir)) do taken[name:lower()] = true end
+    for _, pin in ipairs(data.pins) do
+      local name = importer.unique_filename(pin.filename, taken)
+      taken[name:lower()] = true
+      local ok, err = reaper_api.copy_file(reaper_api.join(old_dir, pin.filename),
+        reaper_api.join(fresh.dir, name))
+      if not ok then return false, err end
+      plan[#plan + 1] = { pin = pin, before = pin.filename, after = name }
+      changed = changed or name ~= pin.filename
     end
   end
-  if failed > 0 then
-    return string.format(
-      "%d pinned reference%s couldn't be copied to the project's new References folder. " ..
-        "%s audio remains in the old References folder (%s).",
-      failed, failed == 1 and "" or "s", failed == 1 and "Its" or "Their", old_dir)
+  if not changed then return true end
+  for _, item in ipairs(plan) do item.pin.filename = item.after end
+  local ok, saved = pcall(project.write_pins, fresh.proj, pins.encode(data))
+  if not ok or not saved then
+    for _, item in ipairs(plan) do item.pin.filename = item.before end
+    -- Read-back failure may mean a partial write. Restore the exact previous
+    -- text when possible; the session fallback remains necessary either way.
+    pcall(project.write_pins, fresh.proj, original_text or pins.encode(data))
+    return false, "The updated pinned references couldn't be saved in the project."
   end
-  return nil
+  project.mark_dirty(fresh.proj)
+  return true, "Pinned references are ready in this project's References folder. Save the project again to keep them."
 end
 
 -- Bring state.pins in line with the project in front of the user. Called once per
@@ -146,11 +167,16 @@ function service.refresh(state)
   -- e.g. a latched reference keeps its restored selection through Save As, but
   -- never inherits one from a genuinely different project.
   local same_project = ps ~= nil and ps.proj == proj
-  local moved_from = (same_project and ps.dir and #ps.data.pins > 0) and ps.dir or nil
+  local held = stalled_moves[proj]
+  if held and not same_project and held.path ~= path then held = nil; stalled_moves[proj] = nil end
+  local moved_from = held and held.dir
+    or ((same_project and ps.dir and #ps.data.pins > 0) and ps.dir or nil)
 
   local fresh = empty_pins(proj, path)
   local text = project.read_pins(proj)
-  if text then
+  if held then
+    fresh.data = held.data
+  elseif text then
     local ok, result = pcall(pins.decode, text)
     if ok then
       fresh.data = result
@@ -160,8 +186,25 @@ function service.refresh(state)
   end
 
   local warning = nil
-  if moved_from and fresh.dir and moved_from ~= fresh.dir then
-    warning = carry_files_forward(moved_from, fresh.dir, fresh.data)
+  if held and held.path == path then
+    fresh.dir, fresh.relocation_error = held.dir, held.warning
+    warning = held.warning
+  elseif moved_from and fresh.dir and (held or not same_folder(moved_from, fresh.dir))
+      and not fresh.load_error then
+    local ok, message = carry_files_forward(moved_from, fresh, text, held ~= nil)
+    if ok then
+      stalled_moves[proj] = nil
+      warning = message
+    else
+      warning = product_error.with_details(
+        "Pinned references couldn't be moved to the project's new folder. They still use the original " ..
+        "References folder in this session, and changes to pins are paused. Before closing yb-Reference, " ..
+        "use Save As to save the project in its original folder or another folder, then save again. " ..
+        "The saved project may otherwise open the wrong audio. Original References folder:\n" .. moved_from,
+        message)
+      fresh.dir, fresh.relocation_error = moved_from, warning
+      stalled_moves[proj] = { path = path, dir = moved_from, data = fresh.data, warning = warning }
+    end
   end
 
   state.pins = fresh
@@ -188,6 +231,7 @@ end
 local function persist(state, opts)
   opts = opts or {}
   local ps = state.pins
+  if ps.relocation_error then return false end
   if ps.load_error and not opts.force then return false end
   if not project.write_pins(ps.proj, pins.encode(ps.data)) then return false end
   if not opts.quiet then project.mark_dirty(ps.proj) end
@@ -223,8 +267,9 @@ local edit = service.edit
 
 -- Pin a library sound to the current project. Returns (true, message, pin_id) or
 -- (false, message[, existing_pin_id when it was already pinned]).
-function service.pin_sound(state, sound)
+function service.pin_sound(state, sound, copy_file)
   local ps = state.pins
+  local pin_data, pin_dir, library = ps.data, ps.dir, state.library
 
   local refusal = service.can_pin(state)
   if refusal then return false, refusal end
@@ -247,7 +292,19 @@ function service.pin_sound(state, sound)
   local src = reaper_api.join(state.library_dir, sound.filename)
   local dest = reaper_api.join(ps.dir, dest_name)
 
-  local copied, cerr = reaper_api.copy_file(src, dest)
+  local copied, cerr = (copy_file or reaper_api.copy_file)(src, dest)
+  -- The injected copier may yield between chunks. Its completed audio remains
+  -- harmless if another action changed the destination while it was working.
+  if state.pins ~= ps or ps.data ~= pin_data or ps.dir ~= pin_dir
+      or state.library ~= library then
+    return false, "The sound wasn't pinned because the project or Library changed while its audio was being copied."
+  end
+  refusal = service.can_pin(state)
+  if refusal then return false, refusal end
+  existing = pins.already_pinned(ps.data, sound)
+  if existing then
+    return false, string.format("\"%s\" is already pinned to this project.", sound.name), existing.id
+  end
   if not copied then
     return false, string.format("\"%s\" couldn't be pinned because its audio couldn't be copied " ..
       "to the project's References folder:\n\n%s",
@@ -525,6 +582,7 @@ end
 -- in the last saved .RPP until they save again — recoverable up to that point).
 function service.reset_pins(state)
   local ps = state.pins
+  if ps.relocation_error then return false, ps.relocation_error end
   ps.data = pins.new_state()
   if not persist(state, { force = true }) then
     return false, "The damaged pinned-reference data couldn't be replaced. Nothing was changed."

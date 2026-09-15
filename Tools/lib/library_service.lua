@@ -6,6 +6,7 @@
 -- response to a UI action.
 
 local importer   = require("core.importer")
+local categories = require("core.categories")
 local store      = require("core.library_store")
 local trash      = require("core.trash")
 local reaper_api = require("reaper_api")
@@ -15,34 +16,61 @@ local service = {}
 
 -- Import a list of source paths into the library, filing them under an optional
 -- category. Follows the crash-safe order: for each file, copy it
--- in FIRST, then write its record. Records are saved once at the end — a crash
+-- in FIRST, then save its record immediately. A crash
 -- mid-import leaves at worst orphan files (harmless, sweep-detectable), never a
 -- record pointing at a file that isn't there.
 --
 -- Returns a summary { added, duplicates={}, skipped={}, errors={} } so the caller
 -- can tell the user what happened without this layer touching the UI.
-function service.import_files(state, paths, category)
+function service.import_files(state, paths, category, options)
+  options = options or {}
+  local pause = options.pause or function() end
   local lib = state.library
 
   -- Names already in use = existing records UNION the real files on disk. The
   -- disk half matters: an orphan left by a past crash has no record, and we must
   -- never overwrite it when choosing a collision-free name.
-  local taken = importer.taken_filenames(lib)
-  for _, name in ipairs(reaper_api.list_audio_files(state.library_dir)) do
+  local taken, duplicates = {}, {}
+  local function index_sound(s)
+    if s.filename then taken[s.filename:lower()] = true end
+    if s.source_name and s.size_bytes then
+      local sizes = duplicates[s.source_name] or {}
+      duplicates[s.source_name] = sizes
+      sizes[s.size_bytes] = sizes[s.size_bytes] or s
+    end
+  end
+  local indexed_count, indexed_seq
+  local function rebuild_index()
+    repeat
+      indexed_count, indexed_seq = #lib.sounds, lib.seq.sound
+      duplicates = {}
+      for i, s in ipairs(lib.sounds) do
+        index_sound(s)
+        if i % 256 == 0 then pause() end
+      end
+    until indexed_count == #lib.sounds and indexed_seq == lib.seq.sound
+  end
+  rebuild_index()
+  for _, name in ipairs(reaper_api.list_audio_files(state.library_dir, pause)) do
     taken[name:lower()] = true
   end
 
-  local summary = { added = 0, duplicates = {}, skipped = {}, errors = {} }
+  local summary = options.summary or { added = 0, duplicates = {}, skipped = {}, errors = {} }
 
-  for _, src in ipairs(paths) do
+  for i, src in ipairs(paths) do
+    summary.current, summary.total = i, #paths
+    pause()
+    if indexed_count ~= #lib.sounds or indexed_seq ~= lib.seq.sound then rebuild_index() end
     local source_name = importer.basename(src)
     local size = reaper_api.file_size(src)
+    local duplicate = duplicates[source_name] and duplicates[source_name][size]
 
     if not reaper_api.is_audio_file(source_name) then
       summary.skipped[#summary.skipped + 1] = source_name ..
         ": isn't one of the supported audio formats."
-    elseif importer.find_duplicate(lib, source_name, size) then
+    elseif duplicate then
       summary.duplicates[#summary.duplicates + 1] = source_name
+      if options.on_sound then options.on_sound(duplicate) end
     else
       local info = reaper_api.probe_audio(src)
       if not info or info.channels < 1 then
@@ -54,32 +82,69 @@ function service.import_files(state, paths, category)
       else
         local dest_name = importer.unique_filename(source_name, taken)
         local dest_path = reaper_api.join(state.library_dir, dest_name)
-        local ok, err = reaper_api.copy_file(src, dest_path)
+        local ok, err = reaper_api.copy_file(src, dest_path, pause)
         if not ok then
           summary.errors[#summary.errors + 1] = source_name .. ": " .. tostring(err)
         else
           taken[dest_name:lower()] = true
-          importer.add_sound(lib, {
+          local sound = importer.add_sound(lib, {
             filename    = dest_name,
             source_name = source_name,
             size_bytes  = size,
             duration    = info.duration,
             channels    = info.channels,
-            category    = category,
+            category    = category and categories.get(lib, category) and category or nil,
           })
           summary.added = summary.added + 1
+          index_sound(sound)
+          indexed_count, indexed_seq = indexed_count + 1, indexed_seq + 1
+          -- Each completed file survives cancellation of the remaining batch.
+          store.save(state.library_path, lib)
+          if options.on_sound then options.on_sound(sound) end
         end
       end
     end
   end
 
-  -- One save after the whole import (still immediate, not exit-time). The atomic
-  -- swap means the on-disk library is either the old set or the full new set.
-  if summary.added > 0 then
-    store.save(state.library_path, lib)
-  end
-
   return summary
+end
+
+-- The entry loop resumes at most one bounded copy/index step per frame. Closing
+-- the coroutine also closes any suspended copy's file handles and partial file.
+function service.start_import(state, paths, category, options)
+  options = options or {}
+  local job = { summary = { added = 0, total = #paths, duplicates = {}, skipped = {}, errors = {} } }
+  local lib, dir = state.library, state.library_dir
+  local owned_paths = {}
+  for i, path in ipairs(paths) do owned_paths[i] = path end
+  local thread = coroutine.create(function()
+    return service.import_files(state, owned_paths, category, {
+      pause = coroutine.yield, summary = job.summary, on_sound = options.on_sound,
+    })
+  end)
+  function job:cancel()
+    if self.done then return end
+    local ok, err = coroutine.close(thread)
+    self.done, self.cancelled = true, true
+    if not ok then self.error = err end
+  end
+  function job:step()
+    if self.done then return true end
+    if state.library ~= lib or state.library_dir ~= dir
+      or (options.valid and not options.valid()) then
+      self:cancel()
+      return true
+    end
+    local ok, result = coroutine.resume(thread)
+    if not ok then
+      coroutine.close(thread)
+      self.done, self.error = true, result
+    elseif coroutine.status(thread) == "dead" then
+      self.done = true
+    end
+    return self.done
+  end
+  return job
 end
 
 --------------------------------------------------------------- deleting

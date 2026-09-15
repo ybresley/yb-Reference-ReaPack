@@ -16,15 +16,15 @@ local theme = require("ui.theme")
 local icons = require("ui.icons")
 local widgets = require("ui.widgets")
 local tips = require("ui.tips")
-local popups = require("ui.popups")
 local pins = require("core.pins")
 local search = require("core.search")
-local picker_layout = require("core.picker_layout")
+local anchored_panel = require("ui.anchored_panel")
 local T = theme.tokens
 local M = theme.metrics
 
 local refpicker = {}
 local preview_owner
+local preview_bounds = {}
 
 -- Visibility is reported independently of actions so closing the list cannot
 -- lose playback cleanup when another control also acts in the same frame.
@@ -46,9 +46,13 @@ local ui = {
   query = "", query_key = "", filtered = nil, filter_version = nil, filter_list = nil,
   measured_width = nil, measured_scale = nil, opening_rows = 0,
   scroll_top = false,
-  label = "", label_id = nil, open_label = false,
+  label = "", label_original = "", label_id = nil,
+  label_focus = false, label_active = false, label_changed = false,
   drag_id = nil,        -- the pin being dragged by its handle
   drag_to = nil,        -- where it would land if released now
+  preview_bloom_id = nil,
+  preview_bloom_proj = nil,
+  preview_bloom_frame = nil,
   -- WHICH PROJECT the two id-keyed operations above belong to. Pin ids restart
   -- at p1 in every project, so a label dialog left open (or a reorder still
   -- held) while the user switches REAPER project tabs would otherwise apply to
@@ -69,6 +73,30 @@ local function claim_project(state)
   ui.owner_proj = state.pins and state.pins.proj
 end
 
+local function clear_label_edit()
+  ui.label, ui.label_original, ui.label_id = "", "", nil
+  ui.label_focus, ui.label_active, ui.label_changed = false, false, false
+end
+
+local function begin_label_edit(state, p)
+  ui.label_id = p.id
+  ui.label_original = p.label or ""
+  ui.label = ui.label_original:upper()
+  ui.label_focus, ui.label_active, ui.label_changed = true, false, false
+  claim_project(state)
+end
+
+local HAS_ENTER = reaper.ImGui_IsKeyPressed ~= nil and reaper.ImGui_Key_Enter ~= nil
+local HAS_ESCAPE = reaper.ImGui_IsKeyPressed ~= nil and reaper.ImGui_Key_Escape ~= nil
+local LABEL_INPUT_FLAGS = reaper.ImGui_InputTextFlags_CharsUppercase
+  and reaper.ImGui_InputTextFlags_CharsUppercase() or 0
+
+local function request_preview_bloom(ctx, state, id)
+  if not theme.motion.enabled then return end
+  ui.preview_bloom_id, ui.preview_bloom_proj = id, state.pins.proj
+  ui.preview_bloom_frame = reaper.ImGui_GetFrameCount(ctx)
+end
+
 -- Another control may discover that choosing a reference is the missing next
 -- step (the L button does this when clicked with no target). Keep the opening
 -- machinery here so every route uses the same anchored project-specific list.
@@ -76,18 +104,23 @@ function refpicker.request_open()
   ui.open_request = true
   ui.open_query = nil
   ui.edit_mode = false
+  clear_label_edit()
 end
 
 -- Used only by the manually opened gallery. Sample state owns the project id,
 -- and the ordinary drawers still return intent without performing any action.
 function refpicker.request_gallery(spec, state)
   ui.drag_id, ui.drag_to, ui.filtered, ui.filter_list = nil, nil, nil, nil
-  ui.open_request, ui.open_label = false, false
+  ui.open_request = false
+  clear_label_edit()
   claim_project(state)
   if spec.kind == "label" then
     ui.label_id = spec.id
-    ui.label = spec.label or spec.name or ""
-    ui.open_label = true
+    ui.label_original = spec.label or spec.name or ""
+    ui.label = ui.label_original:upper()
+    ui.label_focus = true
+    ui.edit_mode = true
+    ui.open_request = true
   else
     ui.open_request = true
     ui.open_query = spec.query or ""
@@ -165,7 +198,7 @@ end
 
 --------------------------------------------------------------- the name slot
 
--- What the slot says, as (text, is_placeholder). A labeled pin reads
+-- What the slot says, as (text, is_placeholder, label). A labeled pin reads
 -- "LABEL · name"; an unlabeled one is just its name (its name IS its filename,
 -- exactly as the tabs showed it). A library sound selected from the browser is
 -- shown by name too — the slot answers "what is armed", not "which pin".
@@ -175,7 +208,8 @@ local function slot_text(state)
   local sel = state.selected
   if sel then
     if sel.label and sel.label ~= "" then
-      return sel.label:upper() .. " \u{00B7} " .. sel.name, false
+      local label = sel.label:upper()
+      return label .. " \u{00B7} " .. sel.name, false, label
     end
     return sel.name, false
   end
@@ -205,9 +239,10 @@ function refpicker.draw_slot(ctx, state, res, w)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
   local latched = state.reference.latched
-  local text, placeholder = slot_text(state)
+  local text, placeholder, label = slot_text(state)
 
-  local clicked = reaper.ImGui_Button(ctx, "##refslot", w, ctrl)
+  local open = ui.open_request or reaper.ImGui_IsPopupOpen(ctx, "refpicker_list")
+  local clicked = widgets.panel_button_frame(ctx, "##refslot", w, ctrl, open)
   local held = reaper.ImGui_IsItemActive(ctx)
 
   local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
@@ -223,12 +258,22 @@ function refpicker.draw_slot(ctx, state, res, w)
   local chev_w = ctrl * 0.6
   local shown = ellipsize(ctx, text, (x1 - x0) - pad_x * 2 - chev_w)
   local th = select(2, reaper.ImGui_CalcTextSize(ctx, shown))
-  reaper.ImGui_DrawList_AddText(dl, x0 + pad_x, (y0 + y1) * 0.5 - th * 0.5, col, shown)
+  local text_y = (y0 + y1) * 0.5 - th * 0.5
+  if label and shown:sub(1, #label) == label then
+    local label_x, label_y = px(x0 + pad_x), px(text_y)
+    local label_w = reaper.ImGui_CalcTextSize(ctx, label)
+    reaper.ImGui_DrawList_AddText(dl, label_x, label_y, col, label)
+    reaper.ImGui_DrawList_AddText(dl, px(label_x + label_w), label_y,
+      T.TEXT_TERTIARY, shown:sub(#label + 1))
+  else
+    reaper.ImGui_DrawList_AddText(dl, x0 + pad_x, text_y, col, shown)
+  end
 
   local cx = x1 - pad_x - chev_w * 0.5
-  if not icons.paint_glyph(ctx, res and res.icon_font, "chevron-down", cx, (y0 + y1) * 0.5, col) then
+  local arrow_col = open and T.ACCENT_HOVER or col
+  if not icons.paint_glyph(ctx, res and res.icon_font, "chevron-down", cx, (y0 + y1) * 0.5, arrow_col) then
     local cw, ch = reaper.ImGui_CalcTextSize(ctx, CHEVRON_DOWN)
-    reaper.ImGui_DrawList_AddText(dl, cx - cw * 0.5, (y0 + y1) * 0.5 - ch * 0.5, col, CHEVRON_DOWN)
+    reaper.ImGui_DrawList_AddText(dl, cx - cw * 0.5, (y0 + y1) * 0.5 - ch * 0.5, arrow_col, CHEVRON_DOWN)
   end
 
   -- Pull the armed reference out: onto the REAPER timeline, or onto a category
@@ -336,11 +381,9 @@ function refpicker.draw_count(ctx, state, w)
   reaper.ImGui_Dummy(ctx, w, ctrl)
   local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
   local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
-  -- TEXT_SECONDARY since 2026-08-06 (user: "quite dark/hard to read") — the
-  -- count is a thing the user actually reads, and tokens.md reserves
-  -- QUATERNARY for what nobody has to.
+  -- The current position needs strong contrast at this small text size.
   reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx),
-    (x0 + x1) * 0.5 - tw * 0.5, (y0 + y1) * 0.5 - th * 0.5, T.TEXT_SECONDARY, text)
+    (x0 + x1) * 0.5 - tw * 0.5, (y0 + y1) * 0.5 - th * 0.5, T.TEXT_PRIMARY, text)
   if small then reaper.ImGui_PopFont(ctx) end
 end
 
@@ -353,14 +396,74 @@ end
 -- than as a fixed square, which is what makes every one of them line up.
 -- The control itself is widgets.glyph_button since the match window adopted
 -- the same look (2026-08-06) — repeated behaviour lives in ui.widgets.
-local edit_button = function(ctx, font, id, glyph, fallback, w, h, tip, hot_color)
-  return widgets.glyph_button(ctx, font, id, glyph, fallback, w, h, tip, hot_color)
+local edit_button = function(ctx, font, id, glyph, fallback, w, h, tip, hot_color, active)
+  return widgets.glyph_button(ctx, font, id, glyph, fallback, w, h, tip, hot_color, active)
 end
 
 -- Edit tools replace duration space rather than reserving another
 -- zone in normal mode. Entering edit mode may change the name's cut-off point.
 local function tools_zone_w()
   return M.PICK_TOOL_W * 2 + M.PICK_TOOL_GAP
+end
+
+-- The label is edited where it is read. The row shows the scratch text while
+-- the project keeps its saved label until the edit is finished. This lets the
+-- pencil cancel an untouched edit without manufacturing a save operation.
+local function draw_label_input(ctx, state, p, x, y, w, tools_x0, tools_x1, tools_y0, tools_y1)
+  if ui.label_focus then
+    reaper.ImGui_SetKeyboardFocusHere(ctx)
+    ui.label_focus = false
+  end
+
+  reaper.ImGui_SetCursorScreenPos(ctx, x, y)
+  reaper.ImGui_SetNextItemWidth(ctx, math.max(1, w))
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.TEXT_PRIMARY)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBg(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(), 0)
+  local color_count = 4
+  if reaper.ImGui_Col_NavHighlight then
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_NavHighlight(), 0)
+    color_count = color_count + 1
+  end
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), 0, 0)
+  local changed, value = reaper.ImGui_InputTextWithHint(ctx,
+    "##pinlabel_" .. p.id, "Type a label", ui.label, LABEL_INPUT_FLAGS)
+  reaper.ImGui_PopStyleVar(ctx, 2)
+  reaper.ImGui_PopStyleColor(ctx, color_count)
+
+  local action
+  if changed then
+    ui.label = value:upper()
+    ui.label_changed = true
+  end
+
+  local active = reaper.ImGui_IsItemActive(ctx)
+  if active then ui.label_active = true end
+  local submit = active and HAS_ENTER
+    and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter())
+  local cancel = active and HAS_ESCAPE
+    and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape())
+  local tool_click = false
+  if reaper.ImGui_IsMouseClicked(ctx, 0) then
+    local mx, my = reaper.ImGui_GetMousePos(ctx)
+    tool_click = mx >= tools_x0 and mx < tools_x1 and my >= tools_y0 and my < tools_y1
+  end
+  local deactivated = ui.label_active and not tool_click
+    and reaper.ImGui_IsItemDeactivated(ctx)
+  local clicked_elsewhere = ui.label_active and reaper.ImGui_IsMouseClicked(ctx, 0)
+    and not tool_click and not reaper.ImGui_IsItemHovered(ctx)
+
+  if cancel then
+    clear_label_edit()
+  elseif submit or deactivated or clicked_elsewhere then
+    action = ui.label_changed and same_project(state)
+      and { type = "set_pin_label", id = p.id, label = ui.label } or nil
+    clear_label_edit()
+  end
+
+  return action
 end
 
 local EMPTY_MESSAGE = "No pinned references yet. Drag an audio file here or open the Library."
@@ -390,17 +493,11 @@ local function measure_popup(ctx, list)
 end
 
 local function popup_geometry(ctx, state, res, list)
-  local nx, ny = reaper.ImGui_PointConvertNative(ctx,
-    ui.anchor_x + ui.anchor_w * 0.5, (ui.anchor_top + ui.anchor_y) * 0.5, true)
-  local left, top, right, bottom = res.monitor_work_area(nx, ny)
-  -- Convert points just inside the monitor, not on an adjacent monitor's DPI
-  -- boundary. The small inset is absorbed by the screen safety margin.
-  left, top = reaper.ImGui_PointConvertNative(ctx, left + 1, top + 1)
-  right, bottom = reaper.ImGui_PointConvertNative(ctx, right - 1, bottom - 1)
-  local work = { left = left, top = top, right = right, bottom = bottom }
-  ui.work = work
   local anchor = { left = ui.anchor_x, top = ui.anchor_top,
     right = ui.anchor_x + ui.anchor_w, bottom = ui.anchor_y }
+  local work = anchored_panel.work_area(ctx, res, anchor)
+  local left, top, right, bottom = work.left, work.top, work.right, work.bottom
+  ui.work = work
   if not ui.measured_width or ui.measured_scale ~= theme.scale then measure_popup(ctx, list) end
   local frame_h = reaper.ImGui_GetFrameHeight(ctx)
   local chrome_h = M.WINDOW_PAD * 2 + frame_h * 2 + M.ITEM_SPACING_Y * 3 + 1
@@ -414,8 +511,14 @@ local function popup_geometry(ctx, state, res, list)
     height = M.WINDOW_PAD * 2 + text_h + frame_h + M.ITEM_SPACING_Y * 2 + 4
     minimum = height
   end
-  return picker_layout.place(anchor, work, ui.measured_width, height, minimum,
-    M.PICK_ANCHOR_GAP, M.PICK_SCREEN_MARGIN)
+  return anchored_panel.place(ctx, res, anchor, {
+    work = work,
+    width = ui.measured_width,
+    height = height,
+    min_height = minimum,
+    gap = M.PICK_ANCHOR_GAP,
+    margin = M.PICK_SCREEN_MARGIN,
+  })
 end
 
 local function filtered_pins(state, list)
@@ -454,6 +557,7 @@ local function draw_row(ctx, state, res, p, w)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
   local labeled = p.label and p.label ~= ""
+  local editing_label = ui.edit_mode and ui.label_id == p.id
   local h = M.PICK_ROW_H
   local tools_w = tools_zone_w()
 
@@ -476,7 +580,8 @@ local function draw_row(ctx, state, res, p, w)
   -- call and popped straight after, the same idiom the browser's table uses.
   local spacing_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
   local preview_w = ctrl + preview_gap
-  local hit_w = ui.edit_mode and (w - tools_w - M.PICK_TOOL_LEAD) or (preview_x - x0)
+  local hit_w = editing_label and 1
+    or (ui.edit_mode and (w - tools_w - M.PICK_TOOL_LEAD) or (preview_x - x0))
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), spacing_x, 0)
   -- InvisibleButton behaves exactly like a Button: it returns true on the
   -- RELEASE of a press that started on it. That matters — a press that turns
@@ -513,6 +618,8 @@ local function draw_row(ctx, state, res, p, w)
   r.left, r.top, r.right, r.bottom, r.work = x0, y0, x1, y1, ui.work
 
   local selected = state.selected_id == p.id
+  local picker_playing = state.preview.playing and state.preview.slot == "picker"
+    and state.preview.sound_id == p.id
   local fill = selected and T.FILL_SECONDARY or (row_hovered and T.FILL_TERTIARY or nil)
   if fill then
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, fill, 4)
@@ -535,8 +642,12 @@ local function draw_row(ctx, state, res, p, w)
     if not state.picker_preview_blocked and not state.drag then
       if row_hovered and reaper.ImGui_IsMouseClicked(ctx, 1) then
         action = { type = "preview_pin", id = p.id, proj = state.pins.proj, restart = true }
+        request_preview_bloom(ctx, state, p.id)
       elseif preview_clicked then
         action = { type = "preview_pin", id = p.id, proj = state.pins.proj }
+        if not picker_playing then
+          request_preview_bloom(ctx, state, p.id)
+        end
       end
     end
     if pressed then
@@ -585,7 +696,15 @@ local function draw_row(ctx, state, res, p, w)
   if show_preview then
     reaper.ImGui_DrawList_PushClipRect(dl, x0, y0, math.max(x0, preview_x - M.PICK_TOOL_GAP), y1, true)
   end
-  if labeled then
+  if editing_label then
+    local small = theme.push_small_font(ctx)
+    local sub = ellipsize(ctx, p.name, text_w)
+    cut = sub ~= p.name
+    local _, sh = reaper.ImGui_CalcTextSize(ctx, sub)
+    widgets.draw_search_text(ctx, dl, x0 + pad_x,
+      px(y1 - h * 0.25 - sh * 0.5), T.TEXT_TERTIARY, sub, ui.query_key)
+    if small then reaper.ImGui_PopFont(ctx) end
+  elseif labeled then
     -- Two lines, each centred in its own half of the row.
     local caps = p.label:upper()
     local top = ellipsize(ctx, caps, text_w)
@@ -606,9 +725,16 @@ local function draw_row(ctx, state, res, p, w)
   end
   if show_preview then reaper.ImGui_DrawList_PopClipRect(dl) end
 
+  if editing_label then
+    local input_h = select(2, reaper.ImGui_CalcTextSize(ctx,
+      ui.label ~= "" and ui.label or "Type a label"))
+    local input_y = px(y0 + h * 0.25 - input_h * 0.5)
+    action = draw_label_input(ctx, state, p, x0 + pad_x, input_y, text_w,
+      x1 - pad_x - tools_w, x1 - pad_x, y0, y1) or action
+  end
+
   if show_preview then
-    local playing = state.preview.playing and state.preview.slot == "picker"
-      and state.preview.sound_id == p.id
+    local playing = picker_playing
     local parked = state.preview.paused and state.preview.paused.picker
     local paused = not playing and parked and parked.sound_id == p.id
     local blocked = state.picker_preview_blocked or state.drag ~= nil
@@ -617,10 +743,31 @@ local function draw_row(ctx, state, res, p, w)
     local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
     local face = not blocked and preview_hovered
       and (preview_held and T.FILL_PRIMARY or T.FILL_SECONDARY) or T.FILL_TERTIARY
+    if playing and not blocked then
+      face = preview_held and T.ACTIVE_CONTROL_HELD
+        or (preview_hovered and T.ACTIVE_CONTROL_HOVER or T.ACTIVE_CONTROL_FILL)
+    end
     local rounding = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding()))
     reaper.ImGui_DrawList_AddRectFilled(dl, px(cx - ctrl * 0.5), px(cy - ctrl * 0.5),
       px(cx + ctrl * 0.5), px(cy + ctrl * 0.5), theme.fade(face, alpha), rounding)
-    local color = playing and T.ACCENT or T.TEXT_SECONDARY
+    if playing and not blocked then
+      reaper.ImGui_DrawList_AddRect(dl, px(cx - ctrl * 0.5), px(cy - ctrl * 0.5),
+        px(cx + ctrl * 0.5), px(cy + ctrl * 0.5),
+        theme.fade(T.ACTIVE_CONTROL_BORDER, alpha), rounding, 0, 1)
+    end
+    preview_bounds.left, preview_bounds.top = px(cx - ctrl * 0.5), px(cy - ctrl * 0.5)
+    preview_bounds.right, preview_bounds.bottom = px(cx + ctrl * 0.5), px(cy + ctrl * 0.5)
+    local bloom_trigger = theme.motion.enabled and ui.preview_bloom_id == p.id
+      and ui.preview_bloom_proj == state.pins.proj
+      and ui.preview_bloom_frame + 1 == reaper.ImGui_GetFrameCount(ctx)
+      and playing and not blocked
+    widgets.play_bloom(ctx, "picker_" .. tostring(state.pins.proj) .. "_" .. p.id,
+      playing and not blocked, preview_bounds, bloom_trigger)
+    if theme.motion.enabled and ui.preview_bloom_id == p.id and ui.preview_bloom_proj == state.pins.proj
+      and ui.preview_bloom_frame < reaper.ImGui_GetFrameCount(ctx) then
+      ui.preview_bloom_id, ui.preview_bloom_proj, ui.preview_bloom_frame = nil, nil, nil
+    end
+    local color = playing and T.ACCENT_HOVER or T.TEXT_SECONDARY
     if not icons.paint_glyph(ctx, font, playing and "pause" or "play", cx, cy, color) then
       local glyph = playing and "\u{23F8}" or "\u{25B6}"
       local gw, gh = reaper.ImGui_CalcTextSize(ctx, glyph)
@@ -643,12 +790,15 @@ local function draw_row(ctx, state, res, p, w)
     -- already uses for an active value. No new token, and it keeps red meaning
     -- destructive rather than merely hovered.
     if edit_button(ctx, font, "ren_" .. p.id, "pencil", "\u{270E}", M.PICK_TOOL_W, ctrl,
-        "Add a label to this reference", T.TEXT_PRIMARY) then
-      -- Opened once we're clear of this popup (see draw_popup): one naming
-      -- dialog in the app, and rows keep their height.
-      ui.label_id, ui.label, ui.open_label = p.id, p.label or "", true
-      claim_project(state)
-      reaper.ImGui_CloseCurrentPopup(ctx)
+        "Edit this reference's label", T.TEXT_PRIMARY, editing_label) then
+      if ui.label_id == p.id then
+        if ui.label_changed and same_project(state) then
+          action = { type = "set_pin_label", id = p.id, label = ui.label }
+        end
+        clear_label_edit()
+      else
+        begin_label_edit(state, p)
+      end
     end
     reaper.ImGui_SameLine(ctx, 0, M.PICK_TOOL_GAP)
     -- The cross goes RED under the cursor: it is the only control in the picker
@@ -656,7 +806,8 @@ local function draw_row(ctx, state, res, p, w)
     if edit_button(ctx, font, "unpin_" .. p.id, "x", "\u{2715}", M.PICK_TOOL_W, ctrl,
         "Unpin this reference. Its audio stays in the project's References folder.",
         T.DANGER_RED) then
-      action = action or { type = "unpin", id = p.id }
+      if editing_label then clear_label_edit() end
+      action = { type = "unpin", id = p.id }
     end
     -- Put the cursor back below the row: the buttons were placed absolutely and
     -- are shorter than it, so ImGui's own advance would leave the next row
@@ -670,7 +821,7 @@ local function draw_row(ctx, state, res, p, w)
   -- the drag handle used to be. Emitted after everything else so it can never
   -- fight the edit buttons' own tooltips (hovering one of those means the row
   -- itself isn't hovered, since its hit area stops short of them).
-  if hovered then
+  if hovered and not editing_label then
     local tip
     if cut then
       tip = labeled and (p.label:upper() .. "\n" .. p.name) or p.name
@@ -731,15 +882,18 @@ function refpicker.draw_popup(ctx, state, res)
     reaper.ImGui_SetNextWindowSize(ctx, geometry.w, geometry.h)
   end
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), M.WINDOW_PAD, M.WINDOW_PAD)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_PopupBg(), T.BG_WINDOW)
   local opened = reaper.ImGui_BeginPopup(ctx, "refpicker_list",
     reaper.ImGui_WindowFlags_NoMove() | reaper.ImGui_WindowFlags_NoScrollbar()
       | reaper.ImGui_WindowFlags_NoScrollWithMouse())
+  reaper.ImGui_PopStyleColor(ctx, 1)
   reaper.ImGui_PopStyleVar(ctx, 1)
   if opened then
     if not same_project(state) then
       reaper.ImGui_CloseCurrentPopup(ctx)
       reaper.ImGui_EndPopup(ctx)
       ui.drag_id, ui.drag_to, ui.filtered = nil, nil, nil
+      clear_label_edit()
       return nil
     end
     local width = math.max(1, select(1, reaper.ImGui_GetContentRegionAvail(ctx)))
@@ -784,31 +938,21 @@ function refpicker.draw_popup(ctx, state, res)
       local list_h = math.max(1, select(2, reaper.ImGui_GetContentRegionAvail(ctx)) - footer_h)
 
       row_n = 0
-      -- The child's background is pushed TRANSPARENT so the rows sit on the
-      -- popup's own colour (user-reported 2026-08-06, and their words for the
-      -- fix: "the row can just be the same colour as the popup background").
-      -- The theme paints every child `BG_WINDOW` and every popup `BG_POPUP`,
-      -- which are different greys — so the list was drawing itself as a darker
-      -- rectangle inside the menu, a seam nobody chose.
-      --
-      -- Both pushes are popped the INSTANT the child has taken them: ImGui
-      -- reads WindowPadding and ChildBg once, at Begin, and left pushed across
-      -- the contents they would also land on every tooltip submitted inside.
+      -- Transparent rows keep the panel background continuous. Pop Begin-time
+      -- styles immediately so they do not affect tooltips inside the list.
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0)
       reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 0, 0)
       if ui.scroll_top then
         reaper.ImGui_SetNextWindowScroll(ctx, 0, 0)
         ui.scroll_top = false
       end
-      local open = reaper.ImGui_BeginChild(ctx, "refpicker_rows", width, list_h, 0,
-        reaper.ImGui_WindowFlags_AlwaysVerticalScrollbar())
+      local open = reaper.ImGui_BeginChild(ctx, "refpicker_rows", width, list_h, 0, 0)
       reaper.ImGui_PopStyleVar(ctx, 1)
       reaper.ImGui_PopStyleColor(ctx, 1)
       if open then
-        -- Measured INSIDE the child: once the list is long enough to scroll, a
-        -- scrollbar eats part of the width, and rows sized to the outer width
-        -- would summon a horizontal scrollbar as well.
-        local inner_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+        -- The child subtracts scrollbar space only when a scrollbar is visible.
+        local available_w = reaper.ImGui_GetContentRegionAvail(ctx)
+        local inner_w = math.max(1, available_w)
         if #visible == 0 then
           reaper.ImGui_TextWrapped(ctx, "No pinned references match this search.")
         elseif ui.edit_mode then
@@ -862,6 +1006,11 @@ function refpicker.draw_popup(ctx, state, res)
       -- Edit mode's one entrance, on the list's bottom edge. Full width so the
       -- button never changes size when its label does.
       reaper.ImGui_Separator(ctx)
+      local edit_was_active = ui.edit_mode
+      local edit_pushed = widgets.push_soft_active(ctx, edit_was_active)
+      if edit_was_active then
+        reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER)
+      end
       if reaper.ImGui_Button(ctx, (ui.edit_mode and "Done" or "Edit Pinned References") .. "##refpick_edit", width) then
         ui.edit_mode = not ui.edit_mode
         ui.drag_id, ui.drag_to = nil, nil
@@ -870,10 +1019,12 @@ function refpicker.draw_popup(ctx, state, res)
         ui.query, ui.query_key, ui.filtered = "", "", nil
         ui.scroll_top = true
       end
+      if edit_was_active then reaper.ImGui_PopStyleColor(ctx) end
+      widgets.pop_soft_active(ctx, edit_pushed)
       tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), ui.edit_mode
-        and "Finish reordering and unpinning"
-        or "Reorder, rename and unpin references")
-      if ui.edit_mode or ui.open_label or state.drag then
+        and "Finish editing pinned references"
+        or "Edit labels, reorder and unpin references")
+      if ui.edit_mode or ui.label_id or state.drag then
         preview_owner = nil
       end
     end
@@ -883,20 +1034,7 @@ function refpicker.draw_popup(ctx, state, res)
     -- reorder rather than letting it resolve against rows nobody can see.
     ui.drag_id, ui.drag_to = nil, nil
     ui.filtered, ui.filter_list = nil, nil
-  end
-
-  -- The label dialog, opened from a row's pencil once we're clear of the list
-  -- popup (OpenPopup can't run inside the popup that's closing). It's the SAME
-  -- dialog the browser uses for every other name in the app.
-  if ui.open_label then
-    reaper.ImGui_OpenPopup(ctx, "refpick_label")
-    ui.open_label = false
-  end
-  local labeled = popups.edit_popup(ctx, ui, "refpick_label", "Label", "label", { allow_empty = true })
-  if labeled ~= nil and same_project(state) then
-    -- Dropped silently when the project changed while the dialog sat open: the
-    -- remembered id names a different pin in the new project.
-    action = action or { type = "set_pin_label", id = ui.label_id, label = labeled }
+    clear_label_edit()
   end
 
   return action

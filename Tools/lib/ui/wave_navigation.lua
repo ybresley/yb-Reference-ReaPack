@@ -9,7 +9,7 @@ local T, M = theme.tokens, theme.metrics
 local navigation = {}
 local drag = {}
 
-local DRAG_LOCK = 4
+local DRAG_THRESHOLD = 4
 local MIDDLE_BUTTON = reaper.ImGui_MouseButton_Middle and reaper.ImGui_MouseButton_Middle() or 2
 local HAS_KEY_MODS = reaper.ImGui_GetKeyMods ~= nil
 local CTRL_MOD = HAS_KEY_MODS and reaper.ImGui_Mod_Ctrl and reaper.ImGui_Mod_Ctrl() or nil
@@ -36,8 +36,9 @@ local function geometry(x, y, w, h, ruler_h)
 end
 
 local function time_thumb(v, g)
-  return g.time_x + v.t0 * g.time_w, g.time_y,
-    g.time_x + v.t1 * g.time_w, g.time_y + g.rail
+  local left, right =
+    viewport.time_rail_bounds(v, g.time_w, M.WAVE_TIME_THUMB_MIN_W)
+  return g.time_x + left, g.time_y, g.time_x + right, g.time_y + g.rail
 end
 
 local function amp_thumb(v, g)
@@ -72,13 +73,13 @@ local function classify(v, mx, my, g)
   end
 end
 
-function navigation.draw_rails(dl, v, x, y, w, h, ruler_h, hot)
+function navigation.draw_rails(dl, v, x, y, w, h, ruler_h, hot, ruler_hovered)
   local g = geometry(x, y, w, h, ruler_h)
   if zoomed_amp(v) then
     reaper.ImGui_DrawList_AddRectFilled(dl, g.amp_x, g.amp_y,
       g.amp_x + g.rail, g.amp_y + g.amp_h, T.FILL_QUATERNARY, 4)
     local ax0, ay0, ax1, ay1 = amp_thumb(v, g)
-    local active = hot and hot:sub(1, 4) == "amp_"
+    local active = (hot and hot:sub(1, 4) == "amp_") or ruler_hovered
     local inset = math.max(0, (g.rail - M.SCROLL_THUMB_W) * 0.5)
     reaper.ImGui_DrawList_AddRectFilled(dl, ax0 + inset, ay0, ax1 - inset, ay1,
       active and T.SCROLL_THUMB_HOT or T.SCROLL_THUMB, 4)
@@ -87,7 +88,7 @@ function navigation.draw_rails(dl, v, x, y, w, h, ruler_h, hot)
     reaper.ImGui_DrawList_AddRectFilled(dl, g.time_x, g.time_y,
       g.time_x + g.time_w, g.time_y + g.rail, T.FILL_QUATERNARY, 4)
     local tx0, ty0, tx1, ty1 = time_thumb(v, g)
-    local active = hot and hot:sub(1, 5) == "time_"
+    local active = (hot and hot:sub(1, 5) == "time_") or ruler_hovered
     local inset = math.max(0, (g.rail - M.SCROLL_THUMB_W) * 0.5)
     reaper.ImGui_DrawList_AddRectFilled(dl, tx0, ty0 + inset, tx1, ty1 - inset,
       active and T.SCROLL_THUMB_HOT or T.SCROLL_THUMB, 4)
@@ -98,30 +99,33 @@ local function action(v, width)
   return { type = "wave_view", view = v, cols = math.max(1, math.floor(width)) }
 end
 
+function navigation.is_active(id)
+  return drag.id == id and drag.mode ~= nil
+end
+
 local function start_drag(mode, id, mx, my, v)
-  drag = { mode = mode, id = id, x = mx, y = my, view = viewport.copy(v), axis = nil }
+  drag = { mode = mode, id = id, x = mx, y = my, view = viewport.copy(v), moved = false }
 end
 
 local function drag_view(g, mx, my)
   local dx, dy = mx - drag.x, my - drag.y
   local v = viewport.copy(drag.view)
+  local time_pointer_x = drag.x - dx
   if drag.mode == "ruler" then
-    if not drag.axis and math.max(math.abs(dx), math.abs(dy)) >= DRAG_LOCK then
-      drag.axis = math.abs(dx) >= math.abs(dy) and "scroll" or "zoom"
-    end
-    if drag.axis == "scroll" then
-      viewport.pan_time(v, -dx / g.w * (drag.view.t1 - drag.view.t0))
-    elseif drag.axis == "zoom" then
-      viewport.zoom_time(v, math.exp(-dy * 0.012), drag.anchor)
-    end
+    viewport.drag_ruler(v, math.exp(-dy * 0.012), drag.anchor, (time_pointer_x - g.x) / g.w)
+  elseif drag.mode == "time_body" then
+    viewport.drag_time_thumb(v, math.exp(-dy * 0.012), drag.grab_fraction,
+      (time_pointer_x - g.time_x) / g.time_w, M.WAVE_TIME_THUMB_MIN_W / g.time_w)
   elseif drag.mode == "middle_pan" then
     viewport.pan_time(v, -dx / g.w * (drag.view.t1 - drag.view.t0))
-  elseif drag.mode == "time_body" then viewport.pan_time(v, dx / g.time_w)
   elseif drag.mode == "time_left" then viewport.set_time(v, drag.view.t0 + dx / g.time_w, drag.view.t1)
   elseif drag.mode == "time_right" then viewport.set_time(v, drag.view.t0, drag.view.t1 + dx / g.time_w)
-  elseif drag.mode == "amp_body" then viewport.pan_amp(v, -dy / g.amp_h * 2)
-  elseif drag.mode == "amp_top" then viewport.set_amp(v, drag.view.a0, drag.view.a1 - dy / g.amp_h * 2)
-  elseif drag.mode == "amp_bottom" then viewport.set_amp(v, drag.view.a0 - dy / g.amp_h * 2, drag.view.a1)
+  elseif drag.mode == "amp_body" then
+    viewport.set_amp_span(v, (drag.view.a1 - drag.view.a0) * math.exp(dy * 0.012))
+  elseif drag.mode == "amp_top" then
+    viewport.set_amp_span(v, drag.view.a1 - drag.view.a0 - dy / g.amp_h * 4)
+  elseif drag.mode == "amp_bottom" then
+    viewport.set_amp_span(v, drag.view.a1 - drag.view.a0 + dy / g.amp_h * 4)
   end
   return v
 end
@@ -140,24 +144,30 @@ function navigation.handle(ctx, id, v, x, y, w, h, ruler_h, blocked, physical_mo
       local tspan, aspan = v.t1 - v.t0, v.a1 - v.a0
       if hot == "time_page_left" then viewport.pan_time(next_view, -tspan * 0.85)
       elseif hot == "time_page_right" then viewport.pan_time(next_view, tspan * 0.85)
-      elseif hot == "amp_page_up" then viewport.pan_amp(next_view, aspan * 0.85)
-      else viewport.pan_amp(next_view, -aspan * 0.85) end
+      elseif hot == "amp_page_up" then viewport.set_amp_span(next_view, aspan * 0.85)
+      else viewport.set_amp_span(next_view, aspan / 0.85) end
       result = action(next_view, w)
     else
       start_drag(hot, id, mx, my, v)
-      drag.anchor = viewport.time_at(v, (mx - x) / w)
+      if hot == "ruler" then
+        drag.anchor = viewport.time_at(v, (mx - x) / w)
+      elseif hot == "time_body" then
+        local tx0, _, tx1 = time_thumb(v, g)
+        drag.grab_fraction = (mx - tx0) / (tx1 - tx0)
+      end
     end
   end
 
   if drag.mode and drag.id == id and drag.mode ~= "middle_pan" then
     claimed = true
     if reaper.ImGui_IsItemActive(ctx) then
-      if drag.mode ~= "ruler" or drag.axis
-        or math.max(math.abs(mx - drag.x), math.abs(my - drag.y)) >= DRAG_LOCK then
+      if (drag.mode ~= "ruler" and drag.mode ~= "time_body") or drag.moved
+        or math.max(math.abs(mx - drag.x), math.abs(my - drag.y)) >= DRAG_THRESHOLD then
+        drag.moved = true
         result = action(drag_view(g, mx, my), w)
       end
     elseif reaper.ImGui_IsItemDeactivated(ctx) then
-      if drag.mode == "ruler" and not drag.axis then
+      if drag.mode == "ruler" and not drag.moved then
         result = { type = "seek", fraction = viewport.time_at(v, (mx - x) / w) }
       end
       drag = {}
@@ -194,7 +204,9 @@ function navigation.handle(ctx, id, v, x, y, w, h, ruler_h, blocked, physical_mo
         alt = ALT_MOD and (mods & ALT_MOD) ~= 0
         shift = SHIFT_MOD and (mods & SHIFT_MOD) ~= 0
       end
-      if ctrl then
+      if hot and hot:sub(1, 4) == "amp_" then
+        viewport.set_amp_span(next_view, (v.a1 - v.a0) * math.exp(-wheel * 0.18))
+      elseif ctrl then
         viewport.zoom_time(next_view, math.exp(wheel * 0.18),
           viewport.time_at(v, (mx - x) / w))
       elseif alt then
@@ -210,10 +222,9 @@ function navigation.handle(ctx, id, v, x, y, w, h, ruler_h, blocked, physical_mo
 
   local cursor = drag.mode or hot
   if cursor then
-    if (cursor == "ruler" and drag.axis == "zoom") or cursor == "amp_top" or cursor == "amp_bottom" then
+    if cursor == "amp_top" or cursor == "amp_bottom" then
       if RESIZE_NS then reaper.ImGui_SetMouseCursor(ctx, RESIZE_NS) end
-    elseif (cursor == "ruler" and drag.axis == "scroll") or cursor == "time_left"
-      or cursor == "time_right" or cursor == "middle_pan" then
+    elseif cursor == "time_left" or cursor == "time_right" or cursor == "middle_pan" then
       if RESIZE_EW then reaper.ImGui_SetMouseCursor(ctx, RESIZE_EW) end
     elseif cursor == "time_body" or cursor == "amp_body" or cursor == "ruler" then
       if RESIZE_ALL then reaper.ImGui_SetMouseCursor(ctx, RESIZE_ALL) end

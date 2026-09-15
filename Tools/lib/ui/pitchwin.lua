@@ -1,11 +1,11 @@
--- pitchwin: the compact, persistent Pitch panel shared by the Reference View
--- and Library. It is a real window rather than an ImGui popup because the
--- user needs to leave it open while pressing the transport controls.
+-- pitchwin: compact anchored Pitch panels for Reference View and Library.
 
 local theme = require("ui.theme")
 local widgets = require("ui.widgets")
 local pitch = require("core.pitch")
 local focus = require("ui.focus")
+local anchored_panel = require("ui.anchored_panel")
+local numeric_input = require("ui.numeric_input")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -20,6 +20,8 @@ local function slot_state()
     anchor_y1 = nil,
     settle = 0,
     rect = nil,
+    geometry = nil,
+    work = nil,
     editing = false,
     edit_active = false,
     text = "0.0",
@@ -37,10 +39,6 @@ local ui = {
 local HAS_ENTER = reaper.ImGui_IsKeyPressed ~= nil and reaper.ImGui_Key_Enter ~= nil
 local HAS_ESCAPE = reaper.ImGui_IsKeyPressed ~= nil and reaper.ImGui_Key_Escape ~= nil
 local HAS_FOCUS = reaper.ImGui_IsWindowFocused ~= nil
-local HAS_VIEWPORT = reaper.ImGui_GetMainViewport ~= nil
-  and reaper.ImGui_Viewport_GetWorkPos ~= nil and reaper.ImGui_Viewport_GetWorkSize ~= nil
-local DECIMAL = reaper.ImGui_InputTextFlags_CharsDecimal
-  and reaper.ImGui_InputTextFlags_CharsDecimal() or 0
 local HAS_NAV_HIGHLIGHT = reaper.ImGui_Col_NavHighlight ~= nil
 local HINT = "Alt-drag for fine control"
 local SCALE_LABELS = {
@@ -51,13 +49,18 @@ local SCALE_LABELS = {
 local function close_slot(slot, s)
   s.open, s.open_request = false, false
   s.editing, s.edit_active, s.focus = false, false, false
-  s.rect, s.settle = nil, 0
+  s.rect, s.geometry, s.work, s.settle = nil, nil, nil, 0
   widgets.cancel_semitone_drag("pitch_value_" .. slot)
   widgets.cancel_step_slider("pitch_slider_" .. slot)
 end
 
 function pitchwin.close()
   for slot, s in pairs(ui) do close_slot(slot, s) end
+end
+
+function pitchwin.is_open(slot)
+  local s = ui[slot]
+  return s and (s.open or s.open_request) or false
 end
 
 local function begin_edit(s, value, unit)
@@ -79,11 +82,11 @@ function pitchwin.toggle_at(slot, x, y_top, y_bottom)
   end
   s.open_request = true
   s.anchor_x, s.anchor_y, s.anchor_y1 = x, y_top, y_bottom
-  s.rect, s.settle = nil, 0
+  s.rect, s.geometry, s.work, s.settle = nil, nil, nil, 0
   s.editing, s.edit_active, s.focus = false, false, false
 end
 
-local function position_opening_window(ctx, s)
+local function position_opening_window(ctx, res, s)
   if not s.anchor_x or (s.settle or 0) >= 2 then return end
 
   local width = M.PITCH_CONTENT_W + M.WINDOW_PAD * 2
@@ -94,29 +97,25 @@ local function position_opening_window(ctx, s)
   if small then reaper.ImGui_PopFont(ctx) end
   local est_h = row_h + hint_h
     + M.WINDOW_PAD * 2 + M.ITEM_SPACING_Y * 2
-  if s.rect then est_h = math.max(est_h, s.rect.h) end
-
-  local left, top, right, bottom
-  if HAS_VIEWPORT then
-    local viewport = reaper.ImGui_GetMainViewport(ctx)
-    left, top = reaper.ImGui_Viewport_GetWorkPos(viewport)
-    local vw, vh = reaper.ImGui_Viewport_GetWorkSize(viewport)
-    right, bottom = left + vw, top + vh
-  end
-
-  local x = s.anchor_x
-  if right and x + width > right then x = right - width end
-  if left and x < left then x = left end
-
-  local gap = M.PITCH_ANCHOR_GAP
-  local y = (s.anchor_y1 or s.anchor_y) + gap
-  if bottom and y + est_h > bottom and s.anchor_y - gap - est_h >= top then
-    y = s.anchor_y - gap - est_h
-  end
-  if top and y < top then y = top end
-  if bottom and y + est_h > bottom then y = bottom - est_h end
-
-  reaper.ImGui_SetNextWindowPos(ctx, x, y, reaper.ImGui_Cond_Always())
+  -- The first auto-sized frame can report only its decorations. Keep the
+  -- estimate as a floor when the second placement uses the measured height.
+  local height = math.max(est_h, (s.rect and s.rect.h) or 0)
+  local anchor = {
+    left = s.anchor_x,
+    top = s.anchor_y,
+    right = s.anchor_x,
+    bottom = s.anchor_y1 or s.anchor_y,
+  }
+  local geometry, work = anchored_panel.place(ctx, res, anchor, {
+    width = width,
+    height = height,
+    min_height = height,
+    gap = M.PANEL_ANCHOR_GAP,
+    margin = M.PICK_SCREEN_MARGIN,
+  })
+  s.geometry, s.work = geometry, work
+  reaper.ImGui_SetNextWindowPos(ctx, s.geometry.x, s.geometry.y,
+    reaper.ImGui_Cond_Always())
 end
 
 local function draw_edit_frame(ctx, value_w)
@@ -157,8 +156,8 @@ local function draw_value(ctx, slot, s, value, unit)
     reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
     reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(),
       centred_pad_x, frame_pad_y)
-    local changed, text = reaper.ImGui_InputText(ctx,
-      "##pitch_exact_" .. slot, s.text, DECIMAL)
+    local changed, text = numeric_input.text(ctx,
+      "##pitch_exact_" .. slot, s.text, "signed_decimal")
     reaper.ImGui_PopStyleVar(ctx, 2)
     reaper.ImGui_PopStyleColor(ctx, color_count)
     if changed then
@@ -230,11 +229,12 @@ local function draw_value(ctx, slot, s, value, unit)
   return action, escaped_edit
 end
 
-local function draw_slot(ctx, state, slot)
+local function draw_slot(ctx, state, res, slot)
   local s = ui[slot]
   if s.open_request then
     s.open_request = false
     s.open = true
+    s.rect, s.geometry, s.work = nil, nil, nil
     s.settle = 0
   end
 
@@ -255,7 +255,16 @@ local function draw_slot(ctx, state, slot)
     s.sound_id, s.unit = sound.id, unit
   end
 
-  position_opening_window(ctx, s)
+  position_opening_window(ctx, res, s)
+  if s.settle >= 2 and s.scale and s.scale ~= theme.scale and s.rect then
+    local r = s.rect
+    local rect = { left = r.x, top = r.y, right = r.x + r.w, bottom = r.y + r.h }
+    s.geometry, s.work = anchored_panel.resize(ctx, res, rect,
+      M.PITCH_CONTENT_W + M.WINDOW_PAD * 2, r.h * theme.scale / s.scale,
+      M.PICK_SCREEN_MARGIN)
+    reaper.ImGui_SetNextWindowPos(ctx, s.geometry.x, s.geometry.y, reaper.ImGui_Cond_Always())
+  end
+  s.scale = theme.scale
 
   local flags = reaper.ImGui_WindowFlags_NoTitleBar()
     | reaper.ImGui_WindowFlags_NoCollapse()
@@ -265,15 +274,30 @@ local function draw_slot(ctx, state, slot)
     flags = flags | reaper.ImGui_WindowFlags_NoDocking()
   end
 
+  local width = M.PITCH_CONTENT_W + M.WINDOW_PAD * 2
+  -- A vertical scrollbar also consumes content width. Allow horizontal scrolling
+  -- whenever the fixed-width controls overflow, even on a wide monitor.
+  if reaper.ImGui_WindowFlags_HorizontalScrollbar then
+    flags = flags | reaper.ImGui_WindowFlags_HorizontalScrollbar()
+  end
+  if s.geometry then
+    -- Ordinary dragging keeps its placement; a UI size change contains it again.
+    width = math.min(width, anchored_panel.available_width(s.work, M.PICK_SCREEN_MARGIN))
+    local max_height = anchored_panel.available_height(
+      s.work, s.geometry.y, M.PICK_SCREEN_MARGIN)
+    reaper.ImGui_SetNextWindowSizeConstraints(ctx,
+      width, 0, width, max_height)
+  else
+    reaper.ImGui_SetNextWindowSizeConstraints(ctx, width, 0, width, 10000)
+  end
+
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), T.BG_POPUP)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.STROKE_PRIMARY)
   local visible = reaper.ImGui_Begin(ctx, "##yb_pitch_" .. slot, nil, flags)
   reaper.ImGui_PopStyleColor(ctx, 2)
-  if not visible then
-    reaper.ImGui_End(ctx)
-    return nil
-  end
+  if not visible then return nil end
 
+  local dismiss = anchored_panel.dismissed(ctx, s)
   local wx, wy = reaper.ImGui_GetWindowPos(ctx)
   local ww, wh = reaper.ImGui_GetWindowSize(ctx)
   s.rect = { x = wx, y = wy, w = ww, h = wh }
@@ -336,6 +360,7 @@ local function draw_slot(ctx, state, slot)
   reaper.ImGui_PopTextWrapPos(ctx)
   if small then reaper.ImGui_PopFont(ctx) end
 
+  if dismiss then close_slot(slot, s) end
   local focused = HAS_FOCUS and reaper.ImGui_IsWindowFocused(ctx)
   if focused and not escaped_edit and not s.editing and HAS_ESCAPE
     and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then
@@ -347,11 +372,11 @@ local function draw_slot(ctx, state, slot)
   return action
 end
 
-function pitchwin.draw(ctx, state)
+function pitchwin.draw(ctx, state, res)
   local action
-  local main_action = draw_slot(ctx, state, "main")
+  local main_action = draw_slot(ctx, state, res, "main")
   action = action or main_action
-  local browse_action = draw_slot(ctx, state, "browse")
+  local browse_action = draw_slot(ctx, state, res, "browse")
   action = action or browse_action
   return action
 end
