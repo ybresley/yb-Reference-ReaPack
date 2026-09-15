@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="yb-Reference" commit="d412c5f674e97191e1a9f03c3cdb577ca62388e3">
+<index version="1" name="yb-Reference Release Test" commit="d412c5f674e97191e1a9f03c3cdb577ca62388e3">
   <category name="Tools">
     <reapack name="yb-Reference.lua" type="script" desc="yb-Reference">
       <metadata>
