@@ -1,0 +1,990 @@
+desc:yb-Reference Monitoring Filter
+author:Yoni Bresley
+tags:filter analysis utility
+options:gmem=yb_reference_monitor_filter_v1 no_meter
+
+slider1:protocol=6<1,6,1>-Protocol
+slider2:filter_active=0<0,1,1{Off,On}>-Active
+slider3:reserved_mode=1<0,2,1>-Reserved
+slider4:low_hz=700<10,20000,1>-Lower boundary
+slider5:high_hz=3000<10,20000,1>-Upper boundary
+slider6:slope_index=1<0,3,1{12 dB/oct,24 dB/oct,36 dB/oct,48 dB/oct}>-Slope
+slider7:heartbeat=0<0,999999,1>-Controller heartbeat
+
+in_pin:Channel 1
+in_pin:Channel 2
+in_pin:Channel 3
+in_pin:Channel 4
+in_pin:Channel 5
+in_pin:Channel 6
+in_pin:Channel 7
+in_pin:Channel 8
+out_pin:Channel 1
+out_pin:Channel 2
+out_pin:Channel 3
+out_pin:Channel 4
+out_pin:Channel 5
+out_pin:Channel 6
+out_pin:Channel 7
+out_pin:Channel 8
+
+@init
+
+ext_noinit = 1;
+
+FILTER_COEFF = 0;
+COEFF_SCENE_STRIDE = 40;
+FILTER_STATE = 128;
+STATE_SCENE_STRIDE = 128;
+SCENE_STAGES = 400;
+SCENE_LOW = 404;
+SCENE_HIGH = 408;
+SCENE_SLOPE = 412;
+BIQUADS_PER_SCENE = 8;
+COEFFS_PER_BIQUAD = 5;
+MAX_CHANNELS = 8;
+LEASE_TIMEOUT = 0.75;
+ACTIVATION_FADE_SECONDS = 0.020;
+CONFIG_FADE_SECONDS = 0.040;
+BAND_WARMUP_SECONDS = 0.025;
+
+function clear_scene(scene) local(i, state_base)
+(
+  state_base = FILTER_STATE + scene * STATE_SCENE_STRIDE;
+  i = 0;
+  loop(STATE_SCENE_STRIDE,
+    state_base[i] = 0;
+    i += 1;
+  );
+);
+
+// kind: 0 = high-pass, 1 = low-pass. Coefficients use the standard
+// bilinear-transform biquad form, normalised by a0.
+function set_filter_coeff(scene, biquad, kind, frequency, q)
+  local(w0, cosine, sine, alpha, a0, base)
+(
+  w0 = 2 * $pi * frequency / srate;
+  cosine = cos(w0);
+  sine = sin(w0);
+  alpha = sine / (2 * q);
+  a0 = 1 + alpha;
+  base = FILTER_COEFF + scene * COEFF_SCENE_STRIDE
+    + biquad * COEFFS_PER_BIQUAD;
+
+  kind == 1 ? (
+    base[0] = (1 - cosine) * 0.5 / a0;
+    base[1] = (1 - cosine) / a0;
+    base[2] = base[0];
+  ) : (
+    base[0] = (1 + cosine) * 0.5 / a0;
+    base[1] = -(1 + cosine) / a0;
+    base[2] = base[0];
+  );
+  base[3] = -2 * cosine / a0;
+  base[4] = (1 - alpha) / a0;
+);
+
+function configure_scene(scene, lower, upper, slope)
+  local(stage, stages, order, q)
+(
+  stages = slope + 1;
+  order = stages * 2;
+  stage = 0;
+  loop(stages,
+    q = 1 / (2 * cos($pi * (2 * (stage + 1) - 1) / (2 * order)));
+    set_filter_coeff(scene, stage, 0, lower, q);
+    set_filter_coeff(scene, 4 + stage, 1, upper, q);
+    stage += 1;
+  );
+  SCENE_STAGES[scene] = stages;
+  SCENE_LOW[scene] = lower;
+  SCENE_HIGH[scene] = upper;
+  SCENE_SLOPE[scene] = slope;
+  clear_scene(scene);
+);
+
+function process_biquad(sample, scene, biquad, channel)
+  local(coeff, state, output)
+(
+  coeff = FILTER_COEFF + scene * COEFF_SCENE_STRIDE
+    + biquad * COEFFS_PER_BIQUAD;
+  state = FILTER_STATE + scene * STATE_SCENE_STRIDE
+    + (channel * BIQUADS_PER_SCENE + biquad) * 2;
+  output = coeff[0] * sample + state[0];
+  state[0] = coeff[1] * sample - coeff[3] * output + state[1];
+  state[1] = coeff[2] * sample - coeff[4] * output;
+  output;
+);
+
+function process_scene(sample, scene, channel)
+  local(stage, stages, output)
+(
+  output = sample;
+  stages = SCENE_STAGES[scene];
+  stage = 0;
+  loop(stages,
+    output = process_biquad(output, scene, stage, channel);
+    stage += 1;
+  );
+  stage = 0;
+  loop(stages,
+    output = process_biquad(output, scene, 4 + stage, channel);
+    stage += 1;
+  );
+  output;
+);
+
+function same_config(scene, lower, upper, slope)
+(
+  abs(SCENE_LOW[scene] - lower) < 0.001
+    && abs(SCENE_HIGH[scene] - upper) < 0.001
+    && SCENE_SLOPE[scene] == slope;
+);
+
+function start_transition(lower, upper, slope)
+  local(overlap_low, overlap_high, overlap_width, old_width, new_width,
+    overlap_ratio, band_change)
+(
+  fade_to = 1 - active_scene;
+  configure_scene(fade_to, lower, upper, slope);
+
+  band_change = abs(SCENE_LOW[active_scene] - lower) >= 0.001
+    || abs(SCENE_HIGH[active_scene] - upper) >= 0.001;
+  transition_equal_power = 0;
+  band_change ? (
+    overlap_low = max(SCENE_LOW[active_scene], lower);
+    overlap_high = min(SCENE_HIGH[active_scene], upper);
+    overlap_width = overlap_high > overlap_low
+      ? log(overlap_high / overlap_low)
+      : 0;
+    old_width = log(SCENE_HIGH[active_scene] / SCENE_LOW[active_scene]);
+    new_width = log(upper / lower);
+    overlap_ratio = 2 * overlap_width / max(0.000001, old_width + new_width);
+    transition_equal_power = overlap_ratio < 0.5;
+  );
+
+  warmup_position = 0;
+  transition_position = 0;
+  // A changed band begins with an inaudible settling period. A slope-only
+  // change reuses the already audible range and can crossfade immediately.
+  transition_phase = band_change ? 1 : 2;
+);
+
+function smoothstep(value)
+(
+  value * value * (3 - 2 * value);
+);
+
+configure_scene(0, 700, 3000, 1);
+active_scene = 0;
+fade_to = 1;
+transition_phase = 0;
+transition_equal_power = 0;
+warmup_position = 0;
+transition_position = 0;
+desired_valid = 0;
+accepted_heartbeat = -1;
+accepted_revision = -1;
+accepted_active = 0;
+response_sequence = 0;
+control_protocol = 0;
+control_heartbeat = -1;
+seen_heartbeat = gmem[6];
+lease_time = -1000;
+activation_position = 0;
+last_filtering = 0;
+last_srate = srate;
+
+// Spectrum data uses slots 32–1087; filter controls and replies use slots 0–10.
+// FFT buffers begin after 65536, outside the filter scenes.
+MAGIC = 260826.1;
+CONTRACT_VERSION = 6;
+DATA_OFFSET = 64;
+AVERAGE_DATA_OFFSET = 576;
+
+DEFAULT_FFT_SIZE = 4096;
+DISPLAY_BINS = 512;
+MIN_HZ = 10;
+MAX_HZ = 22050;
+
+RING_L = 65536;
+RING_R = 73728;
+FFT_L = 81920;
+FFT_R = 98304;
+WINDOW = 114688;
+POWER = 122880;
+DISPLAY_POWER = 126976;
+DISPLAY_DB = 127488;
+AVERAGE_POWER = 128000;
+FINAL_LIVE_DB = 130560;
+LN2 = log(2);
+LN10 = log(10);
+LN100 = log(100);
+FLOOR_POWER = exp(-180 * LN10 / 10);
+TONE_CONTRAST_START_DB = 12;
+TONE_CONTRAST_FULL_DB = 18;
+
+write_pos = 0;
+since_hop = 0;
+samples_filled = 0;
+frame_ready = 0;
+sample_peak = 0;
+sequence = 0;
+capture_state = 0;
+history_epoch = -1;
+average_seconds = 0;
+average_ready = 0;
+average_elapsed_samples = 0;
+history_samples = 0;
+idle_seconds = 0;
+applied_idle_seconds = 0;
+source_samples = 0;
+pending_samples = 0;
+last_published_peak = -180;
+last_capture_active = 0;
+has_publication = 0;
+
+function reset_capture() local(i)
+(
+  // Half a silent window before the first source sample places the onset near
+  // the Hann window centre instead of its zero-valued edge.
+  write_pos = FFT_SIZE / 2;
+  since_hop = 0;
+  samples_filled = FFT_SIZE / 2;
+  frame_ready = 0;
+  drain_active = 0;
+  drain_pass = 0;
+  sample_peak = 0;
+  source_samples = 0;
+  pending_samples = 0;
+  capture_frames = 0;
+  i = 0;
+  loop(FFT_SIZE,
+    RING_L[i] = 0;
+    RING_R[i] = 0;
+    i += 1;
+  );
+);
+
+function reset_average() local(i)
+(
+  average_ready = 0;
+  average_elapsed_samples = 0;
+  i = 0;
+  loop(DISPLAY_BINS,
+    AVERAGE_POWER[i] = FLOOR_POWER;
+    i += 1;
+  );
+);
+
+function reset_history()
+(
+  reset_average();
+  history_samples = 0;
+);
+
+function configure_fft(next_size) local(window_i, window_value)
+(
+  FFT_SIZE = next_size;
+  HOP_SIZE = FFT_SIZE / 4;
+  WINDOW_SUM = 0;
+  WINDOW_SQUARE_SUM = 0;
+
+  window_i = 0;
+  loop(FFT_SIZE,
+    window_value = 0.5 - 0.5 * cos(2 * $pi * window_i / (FFT_SIZE - 1));
+    WINDOW[window_i] = window_value;
+    WINDOW_SUM += window_value;
+    WINDOW_SQUARE_SUM += window_value * window_value;
+    window_i += 1;
+  );
+  WINDOW_ENBW = FFT_SIZE * WINDOW_SQUARE_SUM / (WINDOW_SUM * WINDOW_SUM);
+  reset_capture();
+);
+
+configure_fft(DEFAULT_FFT_SIZE);
+reset_history();
+i = 0;
+loop(DISPLAY_BINS,
+  DISPLAY_DB[i] = -180;
+  i += 1;
+);
+
+gmem[32] = MAGIC;
+gmem[33] = CONTRACT_VERSION;
+gmem[34] = 0;
+gmem[35] = srate;
+gmem[36] = DISPLAY_BINS;
+gmem[44] = 0;
+gmem[40] = MIN_HZ;
+gmem[41] = min(MAX_HZ, srate * 0.5);
+gmem[42] = FFT_SIZE;
+gmem[43] = HOP_SIZE;
+spectrum_epoch = -1;
+spectrum_session = -1;
+spectrum_srate = srate;
+spectrum_config_revision = -1;
+smoothing_octaves = 1 / 12;
+
+function power_to_db(power)
+(
+  power <= 0.000000000000000001
+    ? -180
+    : max(-180, min(36, 10 * log(power) / LN10));
+);
+
+// Bounded cubic interpolation fills the space between real FFT measurements
+// without creating peaks outside the neighbouring values.
+function interpolated_power(position) local(left, right, p0, p1, p2, p3,
+    before, across, after, left_slope, right_slope, t, t2, t3, value)
+(
+  position = max(1, min(BIN_LIMIT, position));
+  position >= BIN_LIMIT ? POWER[BIN_LIMIT] : (
+    left = floor(position);
+    right = left + 1;
+    p0 = POWER[max(1, left - 1)];
+    p1 = POWER[left];
+    p2 = POWER[right];
+    p3 = POWER[min(BIN_LIMIT, right + 1)];
+    before = p1 - p0;
+    across = p2 - p1;
+    after = p3 - p2;
+    left_slope = before * across <= 0 ? 0 : 2 * before * across / (before + across);
+    right_slope = across * after <= 0 ? 0 : 2 * across * after / (across + after);
+    t = position - left;
+    t2 = t * t;
+    t3 = t2 * t;
+    value = (2 * t3 - 3 * t2 + 1) * p1
+      + (t3 - 2 * t2 + t) * left_slope
+      + (-2 * t3 + 3 * t2) * p2
+      + (t3 - t2) * right_slope;
+    max(0, min(max(p1, p2), max(min(p1, p2), value)));
+  );
+);
+
+function band_mean_power(lower_hz, upper_hz, center_hz) local(first_bin,
+    last_bin, fft_bin, bin_lower_hz, bin_upper_hz, overlap_hz,
+    weighted_power, covered_hz)
+(
+  // Interpolation avoids repeated bass values where a display cell is narrower
+  // than one raw FFT interval.
+  upper_hz - lower_hz < BIN_HZ
+    ? interpolated_power(center_hz / BIN_HZ)
+    : (
+      first_bin = max(1, ceil(lower_hz / BIN_HZ - 0.5));
+      last_bin = min(BIN_LIMIT, floor(upper_hz / BIN_HZ + 0.5));
+      fft_bin = first_bin;
+      weighted_power = 0;
+      covered_hz = 0;
+      loop(max(0, last_bin - first_bin + 1),
+        bin_lower_hz = max(lower_hz, (fft_bin - 0.5) * BIN_HZ);
+        bin_upper_hz = min(upper_hz, (fft_bin + 0.5) * BIN_HZ);
+        overlap_hz = max(0, bin_upper_hz - bin_lower_hz);
+        weighted_power += POWER[fft_bin] * overlap_hz;
+        covered_hz += overlap_hz;
+        fft_bin += 1;
+      );
+      covered_hz > 0
+        ? weighted_power / covered_hz
+        : interpolated_power(center_hz / BIN_HZ);
+    );
+);
+
+function tone_cluster_power(fft_bin) local(first_bin, last_bin, source_bin,
+    cluster_power)
+(
+  first_bin = max(1, fft_bin - 1);
+  last_bin = min(BIN_LIMIT, fft_bin + 1);
+  source_bin = first_bin;
+  cluster_power = 0;
+  loop(last_bin - first_bin + 1,
+    cluster_power += POWER[source_bin];
+    source_bin += 1;
+  );
+  cluster_power / WINDOW_ENBW;
+);
+
+function tone_background_power(fft_bin) local(offset, source_bin,
+    background_power, background_count)
+(
+  background_power = 0;
+  background_count = 0;
+  offset = -4;
+  loop(3,
+    source_bin = fft_bin + offset;
+    source_bin >= 1 && source_bin <= BIN_LIMIT ? (
+      background_power += POWER[source_bin];
+      background_count += 1;
+    );
+    offset += 1;
+  );
+  offset = 2;
+  loop(3,
+    source_bin = fft_bin + offset;
+    source_bin >= 1 && source_bin <= BIN_LIMIT ? (
+      background_power += POWER[source_bin];
+      background_count += 1;
+    );
+    offset += 1;
+  );
+  background_count > 0 ? background_power / background_count : 0;
+);
+
+function smoothstep01(value)
+(
+  value = max(0, min(1, value));
+  value * value * (3 - 2 * value);
+);
+
+// Average broadband energy across each logarithmic cell so wider treble cells
+// do not rise simply because they contain more random peaks. A clearly
+// concentrated three-bin Hann cluster is restored to its calibrated tone level.
+function band_display_power(lower_hz, upper_hz, center_hz) local(first_bin,
+    last_bin, fft_bin, baseline_power, display_power, cluster_power,
+    background_power, contrast_db, tone_weight, candidate_power)
+(
+  baseline_power = band_mean_power(lower_hz, upper_hz, center_hz);
+  display_power = baseline_power;
+  first_bin = max(1, ceil(lower_hz / BIN_HZ));
+  last_bin = min(BIN_LIMIT, floor(upper_hz / BIN_HZ));
+  fft_bin = first_bin;
+  loop(max(0, last_bin - first_bin + 1),
+    cluster_power = tone_cluster_power(fft_bin);
+    background_power = tone_background_power(fft_bin);
+    contrast_db = cluster_power > 0 ? 180 : 0;
+    background_power > 0.000000000000000000000000000001 ? (
+      contrast_db = 10 * log(cluster_power / background_power) / LN10;
+    );
+    tone_weight = smoothstep01((contrast_db - TONE_CONTRAST_START_DB)
+      / (TONE_CONTRAST_FULL_DB - TONE_CONTRAST_START_DB));
+    candidate_power = baseline_power
+      + (cluster_power - baseline_power) * tone_weight;
+    display_power = max(display_power, candidate_power);
+    fft_bin += 1;
+  );
+  display_power;
+);
+
+// Integral of a unit-height triangular kernel from its centre to x. Integrating
+// over each finite display cell keeps octave smoothing consistent from bass to
+// treble, including 1/24 octave widths that are close to one display cell.
+function triangle_integral(x, half_width)
+(
+  x <= -half_width ? -half_width * 0.5 :
+  x < 0 ? x + x * x / (2 * half_width) :
+  x < half_width ? x - x * x / (2 * half_width) :
+  half_width * 0.5;
+);
+
+function smoothed_display_power(index, width_octaves, step_octaves) local(
+    half_width, first_band, last_band, source_band, distance,
+    lower_distance, upper_distance, weight, weighted_power, weight_total)
+(
+  width_octaves <= 0 ? DISPLAY_POWER[index] : (
+    half_width = width_octaves * 0.5;
+    first_band = max(0, ceil(index - half_width / step_octaves - 0.5));
+    last_band = min(DISPLAY_BINS - 1,
+      floor(index + half_width / step_octaves + 0.5));
+    source_band = first_band;
+    weighted_power = 0;
+    weight_total = 0;
+    loop(max(0, last_band - first_band + 1),
+      distance = (source_band - index) * step_octaves;
+      lower_distance = distance - step_octaves * 0.5;
+      upper_distance = distance + step_octaves * 0.5;
+      weight = triangle_integral(upper_distance, half_width)
+        - triangle_integral(lower_distance, half_width);
+      weight > 0 ? (
+        weighted_power += DISPLAY_POWER[source_band] * weight;
+        weight_total += weight;
+      );
+      source_band += 1;
+    );
+    weight_total > 0 ? weighted_power / weight_total : DISPLAY_POWER[index];
+  );
+);
+
+function refresh_smoothed_display() local(band, step_octaves)
+(
+  step_octaves = log(min(MAX_HZ, srate * 0.5) / MIN_HZ) / LN2 / DISPLAY_BINS;
+  band = 0;
+  loop(DISPLAY_BINS,
+    DISPLAY_DB[band] = power_to_db(smoothed_display_power(
+      band, smoothing_octaves, step_octaves));
+    band += 1;
+  );
+);
+
+function apply_idle_decay(seconds) local(i, amount)
+(
+  seconds > 0 && average_ready && average_seconds > 0 ? (
+    amount = 1 - exp(-seconds * LN100 / average_seconds);
+    i = 0;
+    loop(DISPLAY_BINS,
+      AVERAGE_POWER[i] += (FLOOR_POWER - AVERAGE_POWER[i]) * amount;
+      i += 1;
+    );
+  );
+);
+
+function update_histories(measured_samples) local(i, target_power,
+    elapsed, amount, current)
+(
+  measured_samples > 0 ? (
+    average_seconds != 0 ? (
+      average_ready ? (
+        average_seconds < 0 ? (
+          elapsed = average_elapsed_samples + measured_samples;
+          amount = measured_samples / max(1, elapsed);
+        ) : (
+          amount = 1 - exp(-measured_samples / srate * LN100 / average_seconds);
+          elapsed = average_elapsed_samples + measured_samples;
+        );
+        i = 0;
+        loop(DISPLAY_BINS,
+          target_power = exp(DISPLAY_DB[i] * LN10 / 10);
+          current = AVERAGE_POWER[i];
+          AVERAGE_POWER[i] = current + (target_power - current) * amount;
+          i += 1;
+        );
+        average_elapsed_samples = elapsed;
+      ) : (
+        i = 0;
+        loop(DISPLAY_BINS,
+          AVERAGE_POWER[i] = exp(DISPLAY_DB[i] * LN10 / 10);
+          i += 1;
+        );
+        average_ready = 1;
+        average_elapsed_samples = measured_samples;
+      );
+    );
+  );
+);
+
+function prepare_live_fft() local(i, source_index)
+(
+  i = 0;
+  loop(FFT_SIZE,
+    source_index = (write_pos + i) % FFT_SIZE;
+    FFT_L[i] = RING_L[source_index] * WINDOW[i];
+    FFT_R[i] = RING_R[source_index] * WINDOW[i];
+    i += 1;
+  );
+);
+
+function prepare_final_fft(anchor, available) local(i, source_index,
+    target_start, target_index)
+(
+  i = 0;
+  loop(FFT_SIZE,
+    FFT_L[i] = 0;
+    FFT_R[i] = 0;
+    i += 1;
+  );
+
+  source_index = (write_pos - available + FFT_SIZE) % FFT_SIZE;
+  target_start = floor(FFT_SIZE / 2 - anchor);
+  i = 0;
+  loop(available,
+    target_index = target_start + i;
+    target_index >= 0 && target_index < FFT_SIZE ? (
+      FFT_L[target_index] = RING_L[source_index] * WINDOW[target_index];
+      FFT_R[target_index] = RING_R[source_index] * WINDOW[target_index];
+    );
+    source_index = (source_index + 1) % FFT_SIZE;
+    i += 1;
+  );
+);
+
+function analyse_prepared_fft(measured_samples)
+(
+  fft_real(FFT_L, FFT_SIZE);
+  fft_permute(FFT_L, FFT_SIZE / 2);
+  fft_real(FFT_R, FFT_SIZE);
+  fft_permute(FFT_R, FFT_SIZE / 2);
+
+  max_hz = min(MAX_HZ, srate * 0.5);
+  normalise = 1 / WINDOW_SUM;
+  normalise_power = normalise * normalise;
+  BIN_LIMIT = FFT_SIZE / 2 - 1;
+  BIN_HZ = srate / FFT_SIZE;
+
+  fft_bin = 1;
+  loop(BIN_LIMIT,
+    offset = fft_bin * 2;
+    l_re = FFT_L[offset];
+    l_im = FFT_L[offset + 1];
+    r_re = FFT_R[offset];
+    r_im = FFT_R[offset + 1];
+    POWER[fft_bin] = ((l_re * l_re + l_im * l_im)
+      + (r_re * r_re + r_im * r_im)) * 0.5 * normalise_power;
+    fft_bin += 1;
+  );
+
+  display_step_octaves = log(max_hz / MIN_HZ) / LN2 / DISPLAY_BINS;
+  band_ratio = exp(LN2 * display_step_octaves);
+  lower_hz = MIN_HZ;
+  band = 0;
+  loop(DISPLAY_BINS,
+    upper_hz = lower_hz * band_ratio;
+    center_hz = sqrt(lower_hz * upper_hz);
+    DISPLAY_POWER[band] = band_display_power(lower_hz, upper_hz, center_hz);
+    lower_hz = upper_hz;
+    band += 1;
+  );
+
+  refresh_smoothed_display();
+  update_histories(measured_samples);
+);
+
+function publish_snapshot(final_marker) local(band)
+(
+  sequence += 1;
+  gmem[34] = sequence; // odd means a frame is being written
+
+  band = 0;
+  loop(DISPLAY_BINS,
+    gmem[DATA_OFFSET + band] = DISPLAY_DB[band];
+    gmem[AVERAGE_DATA_OFFSET + band] = power_to_db(AVERAGE_POWER[band]);
+    band += 1;
+  );
+
+  gmem[32] = MAGIC;
+  gmem[33] = CONTRACT_VERSION;
+  gmem[35] = srate;
+  gmem[36] = DISPLAY_BINS;
+  gmem[37] = time_precise();
+  gmem[38] = last_published_peak;
+  gmem[40] = MIN_HZ;
+  gmem[41] = min(MAX_HZ, srate * 0.5);
+  gmem[42] = FFT_SIZE;
+  gmem[43] = HOP_SIZE;
+  gmem[39] = spectrum_epoch;
+  gmem[45] = smoothing_octaves;
+  gmem[46] = spectrum_config_revision;
+  gmem[48] = final_marker;
+  gmem[49] = average_ready;
+  gmem[51] = history_samples;
+  gmem[52] = spectrum_session;
+
+  sequence += 1;
+  gmem[34] = sequence; // even means the frame is complete
+  has_publication = 1;
+);
+
+
+@block
+
+// Odd/even publication rejects a partial shape without interrupting the last
+// accepted filter. Active off remains an immediate, independent dry command.
+control_revision = gmem[9];
+control_revision >= 0 && control_revision == floor(control_revision)
+    && control_revision % 2 == 0 ? (
+  next_protocol = gmem[0];
+  next_active = gmem[1];
+  next_mode = gmem[2];
+  next_low = gmem[3];
+  next_high = gmem[4];
+  next_slope = gmem[5];
+  next_heartbeat = gmem[6];
+  control_revision == gmem[9] ? (
+    control_protocol = next_protocol;
+    control_heartbeat = next_heartbeat;
+    accepted_active = next_active;
+    heartbeat_changed = control_heartbeat != seen_heartbeat;
+    heartbeat_changed ? (
+      seen_heartbeat = control_heartbeat;
+      lease_time = time_precise();
+    );
+    control_revision != accepted_revision || srate != last_srate ? (
+      accepted_revision = control_revision;
+      desired_valid = control_protocol == 6 && next_mode == 1
+        && next_low >= 10 && next_low <= 20000
+        && next_high >= next_low + 1 && next_high <= min(20000, floor(srate * 0.49))
+        && next_slope >= 0 && next_slope <= 3 && next_slope == floor(next_slope);
+      desired_valid ? (
+        desired_low = next_low;
+        desired_high = next_high;
+        desired_slope = next_slope;
+      );
+    );
+    accepted_heartbeat = control_heartbeat;
+  );
+);
+
+controller_alive = time_precise() - lease_time < LEASE_TIMEOUT;
+// Recheck the device limit even while a configuration is being published.
+should_filter = accepted_active >= 0.5 && gmem[1] >= 0.5
+  && control_protocol == 6 && controller_alive && desired_valid
+  && desired_high <= min(20000, floor(srate * 0.49));
+
+should_filter && (!last_filtering || srate != last_srate) ? (
+  active_scene = 0;
+  configure_scene(active_scene, desired_low, desired_high, desired_slope);
+  transition_phase = 0;
+  warmup_position = 0;
+  transition_position = 0;
+  activation_position = 0;
+) : should_filter && transition_phase == 1
+    && !same_config(fade_to, desired_low, desired_high, desired_slope) ? (
+  // The standby path is still silent, so a faster second choice can safely
+  // replace it instead of making the listener wait through an obsolete band.
+  start_transition(desired_low, desired_high, desired_slope);
+) : should_filter && transition_phase == 0
+    && !same_config(active_scene, desired_low, desired_high, desired_slope) ? (
+  start_transition(desired_low, desired_high, desired_slope);
+);
+
+last_srate = srate;
+last_filtering = should_filter;
+
+filtering_now = should_filter;
+activation_step = 1 / max(1, ACTIVATION_FADE_SECONDS * srate);
+warmup_step = 1 / max(1, BAND_WARMUP_SECONDS * srate);
+transition_step = 1 / max(1, CONFIG_FADE_SECONDS * srate);
+
+// Report what this audio-processing instance actually accepted. The controller
+// does not call the filter audible until every acknowledgement matches.
+response_sequence += 1;
+gmem[10] = response_sequence;
+gmem[7] = accepted_heartbeat;
+gmem[8] = filtering_now;
+gmem[47] = srate;
+response_sequence += 1;
+gmem[10] = response_sequence;
+
+
+spectrum_revision = gmem[20];
+spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
+  spectrum_config_changed = spectrum_revision != spectrum_config_revision;
+  requested_fft = floor(gmem[16] + 0.5);
+  requested_fft != 2048 && requested_fft != 4096 && requested_fft != 8192 ? (
+    requested_fft = DEFAULT_FFT_SIZE;
+  );
+  next_epoch = gmem[18];
+  next_session = gmem[25];
+  next_smoothing = gmem[17];
+  next_capture_state = gmem[19];
+  next_average_seconds = gmem[21];
+  next_history_epoch = gmem[23];
+  next_idle_seconds = gmem[24];
+  valid_spectrum_config = next_epoch == floor(next_epoch)
+    && next_epoch >= 0 && next_epoch <= 1000000000
+    && next_session == floor(next_session) && next_session > 0 && next_session <= 1000000000
+    && next_capture_state == floor(next_capture_state)
+    && next_capture_state >= 0 && next_capture_state <= 2
+    && (next_average_seconds == 0 || next_average_seconds == 1
+      || next_average_seconds == 3 || next_average_seconds == -1)
+    && next_history_epoch == floor(next_history_epoch)
+    && next_history_epoch >= 0 && next_history_epoch <= 1000000000
+    && next_idle_seconds >= 0 && next_idle_seconds <= 1000000000;
+  spectrum_revision == gmem[20] && valid_spectrum_config ? (
+    fft_changed = requested_fft != FFT_SIZE;
+    rate_changed = srate != spectrum_srate;
+    fft_or_rate_changed = fft_changed || rate_changed;
+    smoothing_changed = next_smoothing != smoothing_octaves;
+    session_changed = next_session != spectrum_session;
+    epoch_changed = next_epoch != spectrum_epoch || session_changed;
+    same_retiring_epoch = !epoch_changed;
+
+    fft_or_rate_changed ? (
+      configure_fft(requested_fft);
+      // Display bands and calibration remain compatible across FFT sizes.
+      // Preserve their history; a device-rate change still resets sample-based
+      // ages and averages because their timing would otherwise be wrong.
+      rate_changed ? reset_history();
+    ) : epoch_changed ? reset_capture();
+    history_changed = next_history_epoch != history_epoch || session_changed;
+    (smoothing_changed || history_changed) ? reset_history();
+    next_average_seconds != average_seconds ? reset_average();
+
+    final_requested = 0;
+    next_capture_state == 1 && capture_state != 1 ? reset_capture();
+    next_capture_state == 2 && capture_state == 1 && same_retiring_epoch ? (
+      final_requested = 1;
+      drain_active = 1;
+      drain_available = min(source_samples, FFT_SIZE);
+      drain_measured_samples = pending_samples;
+      drain_start = capture_frames == 0 ? 0
+        : max(0, drain_available - min(drain_available,
+          FFT_SIZE / 2 + pending_samples));
+      drain_span = max(0, drain_available - drain_start);
+      drain_passes = drain_span > 0
+        ? min(5, ceil(max(0, drain_span - 1) / HOP_SIZE) + 1)
+        : 0;
+      drain_pass = 0;
+      frame_ready = 0;
+      band = 0;
+      loop(DISPLAY_BINS,
+        FINAL_LIVE_DB[band] = -180;
+        band += 1;
+      );
+    ) : next_capture_state != 1 && capture_state == 1 ? reset_capture();
+
+    spectrum_epoch = next_epoch;
+    spectrum_session = next_session;
+    spectrum_srate = srate;
+    smoothing_octaves = max(0, min(1, next_smoothing));
+    capture_state = next_capture_state;
+    average_seconds = next_average_seconds;
+    history_epoch = next_history_epoch;
+    idle_seconds = next_idle_seconds;
+    history_changed ? (
+      applied_idle_seconds = idle_seconds;
+    ) : (
+      idle_delta = max(0, idle_seconds - applied_idle_seconds);
+      apply_idle_decay(idle_delta);
+      applied_idle_seconds = max(applied_idle_seconds, idle_seconds);
+    );
+    spectrum_config_revision = spectrum_revision;
+
+    smoothing_changed && has_publication && same_retiring_epoch
+        && !fft_or_rate_changed ? (
+      // Smoothing is applied after the FFT, so the most recent unsmoothed
+      // bands can update Live immediately without waiting for more audio.
+      refresh_smoothed_display();
+      publish_snapshot(next_capture_state == 1 ? 0 : 1);
+    ) : spectrum_config_changed && has_publication && same_retiring_epoch
+        && !fft_or_rate_changed && !smoothing_changed
+        && next_capture_state != 1 && !final_requested && !drain_active ? (
+      // Publish option/reset changes while idle so a retained sibling history
+      // cannot be replaced later by arrays from before the reset.
+      publish_snapshot(1);
+    );
+  );
+);
+// The block callback can publish one FFT snapshot per audio block. Do not claim
+// a smaller hop than the host can actually deliver.
+HOP_SIZE = max(FFT_SIZE / 4, samplesblock);
+
+
+now = time_precise();
+active = controller_alive && control_protocol == 6 && capture_state == 1
+  && gmem[19] == 1
+  && spectrum_config_revision == gmem[20];
+gmem[44] = active;
+!active && last_capture_active && !drain_active ? reset_capture();
+last_capture_active = active;
+
+// Finalisation is staged one FFT per callback so Detailed mode cannot perform
+// five expensive transforms in one real-time block. The source ring is frozen.
+drain_active ? (
+  drain_passes == 0 ? (
+    publish_snapshot(1);
+    drain_active = 0;
+  ) : (
+    drain_passes == 1
+      ? drain_anchor = max(0, drain_available - 1)
+      : drain_anchor = drain_start
+        + (drain_available - 1 - drain_start) * drain_pass / (drain_passes - 1);
+    prepare_final_fft(drain_anchor, drain_available);
+    drain_base_samples = floor(drain_measured_samples / drain_passes);
+    drain_remainder = drain_measured_samples - drain_base_samples * drain_passes;
+    drain_sample_weight = drain_base_samples + (drain_pass < drain_remainder);
+    analyse_prepared_fft(drain_sample_weight);
+    band = 0;
+    loop(DISPLAY_BINS,
+      FINAL_LIVE_DB[band] = max(FINAL_LIVE_DB[band], DISPLAY_DB[band]);
+      band += 1;
+    );
+    drain_pass += 1;
+    drain_pass >= drain_passes ? (
+      history_samples += drain_measured_samples;
+      drain_measured_samples > 0
+        ? last_published_peak = power_to_db(sample_peak * sample_peak);
+      band = 0;
+      loop(DISPLAY_BINS,
+        DISPLAY_DB[band] = FINAL_LIVE_DB[band];
+        band += 1;
+      );
+      publish_snapshot(1);
+      sample_peak = 0;
+      pending_samples = 0;
+      drain_active = 0;
+    );
+  );
+) : frame_ready && active ? (
+  frame_ready = 0;
+  measured_samples = pending_samples;
+  prepare_live_fft();
+  analyse_prepared_fft(measured_samples);
+  history_samples += measured_samples;
+  measured_samples > 0 ? last_published_peak = power_to_db(sample_peak * sample_peak);
+  publish_snapshot(0);
+  capture_frames += 1;
+  sample_peak = 0;
+  pending_samples = 0;
+);
+
+
+@sample
+
+// Capture the original stereo pair before any monitoring filter writes spl().
+active ? (
+RING_L[write_pos] = spl0;
+RING_R[write_pos] = spl1;
+sample_peak = max(sample_peak, max(abs(spl0), abs(spl1)));
+
+write_pos = (write_pos + 1) % FFT_SIZE;
+samples_filled = min(FFT_SIZE, samples_filled + 1);
+source_samples += 1;
+pending_samples += 1;
+since_hop += 1;
+since_hop >= HOP_SIZE ? (
+  since_hop -= HOP_SIZE;
+  samples_filled >= FFT_SIZE ? (
+    frame_ready = 1;
+  );
+);
+
+);
+
+
+filtering_now ? (
+  activation_blend = smoothstep(min(1, activation_position));
+  transition_blend = transition_phase == 2
+    ? smoothstep(min(1, transition_position))
+    : 0;
+  transition_equal_power && transition_phase == 2 ? (
+    old_gain = cos(transition_blend * $pi * 0.5);
+    new_gain = sin(transition_blend * $pi * 0.5);
+  ) : (
+    old_gain = 1 - transition_blend;
+    new_gain = transition_blend;
+  );
+
+  channel = 0;
+  channels_to_process = min(num_ch, MAX_CHANNELS);
+  loop(channels_to_process,
+    dry_sample = spl(channel);
+    filtered_sample = process_scene(dry_sample, active_scene, channel);
+    transition_phase > 0 ? (
+      target_sample = process_scene(dry_sample, fade_to, channel);
+      transition_phase == 2 ? (
+        filtered_sample = filtered_sample * old_gain + target_sample * new_gain;
+      );
+    );
+    spl(channel) = dry_sample
+      + (filtered_sample - dry_sample) * activation_blend;
+    channel += 1;
+  );
+
+  activation_position = min(1, activation_position + activation_step);
+  transition_phase == 1 ? (
+    warmup_position = min(1, warmup_position + warmup_step);
+    warmup_position >= 1 ? (
+      transition_phase = 2;
+      transition_position = 0;
+    );
+  ) : transition_phase == 2 ? (
+    transition_position = min(1, transition_position + transition_step);
+    transition_position >= 1 ? (
+      active_scene = fade_to;
+      transition_phase = 0;
+    );
+  );
+) : (
+  // Leaving spl() untouched is REAPER's exact pass-through path. Inactive,
+  // expired states must never depend on filtered samples.
+  activation_position = 0;
+);

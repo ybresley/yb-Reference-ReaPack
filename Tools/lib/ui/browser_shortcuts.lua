@@ -1,5 +1,6 @@
 -- Pane-local selection shortcuts. Return intent only; the browser owns warnings.
 local focus = require("ui.focus")
+local selection = require("core.selection")
 local shortcuts = {}
 
 function shortcuts.read(ctx, state, pane, file_drag_active)
@@ -26,36 +27,24 @@ function shortcuts.read(ctx, state, pane, file_drag_active)
   if not select_all and not delete then return nil end
 
   if pane == "sidebar" then
-    local ids, selected = {}, {}
     local view = state.view
-    for _, cat in ipairs(state.library.categories) do
-      if select_all or (view.scope == "category" and view.id == cat.id)
-        or (view.scope == "categories" and view.ids[cat.id]) then
-        ids[#ids + 1] = cat.id
-        selected[cat.id] = true
-      end
+    if delete then
+      local ids = selection.selected_categories(state.library.categories, view)
+      if #ids == 0 then return nil end
+      return { type = "request_delete_categories", ids = ids }
     end
-    if #ids == 0 then return nil end
-    if delete then return { type = "request_delete_categories", ids = ids } end
-    local anchor = view.scope == "categories" and view.anchor or view.id
-    return { type = "select_view", view = {
-      scope = "categories", ids = selected,
-      anchor = selected[anchor] and anchor or ids[1],
-    } }
+    local next_view = selection.all_categories(state.library.categories, view)
+    return next_view and { type = "select_view", view = next_view } or nil
   end
 
-  local ids, selected, first = {}, {}, nil
-  for _, sound in ipairs(state.visible_sounds) do
-    if select_all or (state.browse_ids and state.browse_ids[sound.id]) then
-      ids[#ids + 1] = sound.id
-      selected[sound.id] = true
-      first = first or sound
-    end
+  if delete then
+    local ids, first = selection.selected_sounds(state.visible_sounds, state.browse_ids)
+    if not first then return nil end
+    return { type = "request_delete_sounds", ids = ids, name = first.name }
   end
-  if not first then return nil end
-  if delete then return { type = "request_delete_sounds", ids = ids, name = first.name } end
-  return { type = "select_browse_sounds", ids = selected,
-    anchor = selected[state.browse_anchor_id] and state.browse_anchor_id or first.id }
+  local selected = selection.all_sounds(state.visible_sounds, state.browse_anchor_id)
+  return selected and { type = "select_browse_sounds",
+    ids = selected.ids, anchor = selected.anchor } or nil
 end
 
 return shortcuts

@@ -72,7 +72,8 @@ function popups.fit_width(ctx, heading, body, min_content_w)
 end
 
 -- Returns the entered text on submit, else nil. Focuses the field when the
--- popup first opens and submits on the OK button. `opts.allow_empty` lets an
+-- popup first opens and submits on OK or, with `opts.submit_on_enter`, Enter.
+-- `opts.allow_empty` lets an
 -- empty string through (a pin's label popup uses this: empty clears the label,
 -- rather than "" being read as "nothing typed yet, cancel").
 function popups.edit_popup(ctx, edit, id, title, key, opts)
@@ -94,8 +95,14 @@ function popups.edit_popup(ctx, edit, id, title, key, opts)
     -- current text, so it accumulates correctly and OK can read it.
     local _, val = reaper.ImGui_InputText(ctx, "##" .. id, edit[key] or "")
     edit[key] = val
+    -- Read Enter separately so typing continues to update the saved buffer
+    -- every frame, including when the user submits by clicking OK.
+    local enter = opts.submit_on_enter and reaper.ImGui_IsWindowFocused(ctx)
+      and (reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter(), false)
+        or (reaper.ImGui_Key_KeypadEnter
+          and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_KeypadEnter(), false)))
     local cancel, ok = widgets.action_pair(ctx, "Cancel", "OK")
-    if ok and (opts.allow_empty or edit[key] ~= "") then
+    if not cancel and (ok or enter) and (opts.allow_empty or edit[key] ~= "") then
       submitted = edit[key]
       reaper.ImGui_CloseCurrentPopup(ctx)
     elseif cancel then

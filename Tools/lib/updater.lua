@@ -70,6 +70,7 @@ local REPORT_TITLE   = "Transaction report"
 --                    disabled our repo in ReaPack — respected, not overridden)
 --   installed        the version ReaPack's registry says is installed
 --   available        a strictly newer catalog version, or nil (nil = no badge)
+--   available_notes  every newer release's catalog text, newest first
 --   pinned           the package is pinned in ReaPack (updates stand down)
 --   phase            nil | "reopen" (the transaction was launched; SWS is
 --                    watching its report, with no more ReaPack calls) |
@@ -79,7 +80,7 @@ local REPORT_TITLE   = "Transaction report"
 --                    "failed_manual" (launch refused)
 local S = {
   enabled = false, disabled_reason = nil,
-  installed = nil, available = nil, pinned = false,
+  installed = nil, available = nil, available_notes = {}, pinned = false,
   phase = nil,
 }
 updater.state = S
@@ -93,6 +94,17 @@ local P = {
   tmp = nil, vbs = nil,
   report_hwnd = nil, report_deadline = 0, report_closed_at = nil,
 }
+
+local function discard_installed_notes(installed)
+  local kept = {}
+  for _, release in ipairs(S.available_notes) do
+    if update_check.compare(release.version, installed) > 0 then
+      kept[#kept + 1] = release
+    end
+  end
+  S.available_notes = kept
+  S.available = kept[1] and kept[1].version or nil
+end
 
 local function can_watch_report()
   return reaper.BR_Win32_FindWindowEx ~= nil
@@ -375,11 +387,14 @@ function updater.tick()
         if reg then
           P.repo, P.category, P.package, P.desc = reg.repo, reg.category, reg.package, reg.desc
           S.installed, S.pinned = reg.version, reg.pinned
-          S.available = update_check.newer_available(content, P.package, P.category, reg.version)
+          S.available_notes = update_check.newer_releases(
+            content, P.package, P.category, reg.version)
+          S.available = S.available_notes[1] and S.available_notes[1].version or nil
         else
           -- No owner any more: the package was uninstalled while the tool ran.
           -- Stand the whole feature down, the dev-copy way.
           S.enabled, S.disabled_reason, S.available = false, "dev", nil
+          S.available_notes = {}
         end
         P.next_check = now + CHECK_EVERY
         return
@@ -427,10 +442,12 @@ function updater.refresh_registry()
   local reg = read_registry(P.own_path)
   if not reg then
     S.enabled, S.disabled_reason, S.available = false, "dev", nil
+    S.available_notes = {}
     return
   end
   P.repo, P.category, P.package, P.desc = reg.repo, reg.category, reg.package, reg.desc
   S.installed, S.pinned = reg.version, reg.pinned
+  discard_installed_notes(reg.version)
 end
 
 -- The Settings button. Runs the U3-proven single-repo sync trick:
@@ -478,6 +495,7 @@ function updater.start_update()
     local c_ok, c = pcall(reaper.ReaPack_CompareVersions, S.available, reg.version)
     if c_ok and type(c) == "number" and c <= 0 then
       S.available = nil
+      S.available_notes = {}
       S.phase = "done"
       return
     end

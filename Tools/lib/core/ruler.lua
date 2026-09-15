@@ -55,6 +55,7 @@ local LABEL_PAD_PX = 12
 local EPS = 1e-9
 
 local function format_major(t, duration_sec, is_last)
+  if math.abs(t) <= EPS then return "0" end
   local label
   if duration_sec < 1 then
     label = tostring(math.floor(t * 1000 + 0.5))
@@ -69,7 +70,8 @@ local function format_major(t, duration_sec, is_last)
     local total = math.floor(t + 0.5)
     local mm = math.floor(total / 60)
     local ss = total - mm * 60
-    label = string.format("%d:%02d", mm, ss) -- colon formats: no suffix, ever
+    label = string.format("%d:%02d", mm, ss)
+    if is_last then label = label .. " m" end
   else
     local total = math.floor(t + 0.5)
     local hh = math.floor(total / 3600)
@@ -77,6 +79,7 @@ local function format_major(t, duration_sec, is_last)
     local mm = math.floor(rem / 60)
     local ss = rem - mm * 60
     label = string.format("%d:%02d:%02d", hh, mm, ss)
+    if is_last then label = label .. " h" end
   end
   return label
 end

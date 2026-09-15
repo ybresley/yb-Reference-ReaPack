@@ -44,6 +44,12 @@ icons.NAMES = {
   ["pencil"]        = 0xE1F9, -- edit mode's rename (opens the shared Label dialog)
   ["x"]             = 0xE1B2, -- edit mode's unpin
   ["target"]        = 0xE180, -- the match window's button (loudness tools, 2026-08-06)
+  ["activity"] = 0xE038,
+  ["chart-no-axes-column"] = 0xE068,
+  ["rotate-ccw"] = 0xE148,
+  ["sliders-horizontal"] = 0xE29A,
+  ["arrow-left-right"] = 0xE24A,
+  ["arrow-up-down"] = 0xE37D,
 }
 
 -- Vector fallback, used ONLY when the Lucide font couldn't be loaded (a ReaImGui
@@ -70,6 +76,68 @@ end
 function icons.draw_plus(dl, cx, cy, col)
   reaper.ImGui_DrawList_AddLine(dl, cx - 5, cy, cx + 5, cy, col, STROKE)
   reaper.ImGui_DrawList_AddLine(dl, cx, cy - 5, cx, cy + 5, col, STROKE)
+end
+
+function icons.draw_pencil(dl, cx, cy, col)
+  reaper.ImGui_DrawList_AddQuad(dl, cx - 5, cy + 3, cx + 3, cy - 5,
+    cx + 5, cy - 3, cx - 3, cy + 5, col, STROKE)
+  reaper.ImGui_DrawList_AddLine(dl, cx - 5, cy + 3, cx - 6, cy + 6, col, STROKE)
+end
+
+function icons.draw_wave(dl, cx, cy, col)
+  local s = theme.scale
+  local last_x, last_y = cx - 7 * s, cy
+  for i = 1, 5 do
+    local x = cx + (-7 + i * 2.8) * s
+    local y = cy + (i == 5 and 0 or (i % 2 == 0 and 5 or -5) * s)
+    reaper.ImGui_DrawList_AddLine(dl, last_x, last_y, x, y, col, s)
+    last_x, last_y = x, y
+  end
+end
+
+function icons.draw_spectrum(dl, cx, cy, col)
+  local s = theme.scale
+  for i = 0, 4 do
+    local x = cx + (i * 3 - 6) * s
+    reaper.ImGui_DrawList_AddLine(dl, x, cy + 5 * s, x,
+      cy - (5 - i * 1.5) * s, col, s)
+  end
+end
+
+local function draw_swap(dl, cx, cy, col, vertical)
+  local s = theme.scale
+  local function line(x0, y0, x1, y1)
+    if vertical then x0, y0, x1, y1 = y0, x0, y1, x1 end
+    reaper.ImGui_DrawList_AddLine(dl, cx + x0 * s, cy + y0 * s,
+      cx + x1 * s, cy + y1 * s, col, s)
+  end
+  line(-5, -2, 5, -2)
+  line(2, -5, 5, -2)
+  line(2, 1, 5, -2)
+  line(5, 2, -5, 2)
+  line(-2, -1, -5, 2)
+  line(-2, 5, -5, 2)
+end
+
+function icons.draw_swap_horizontal(dl, cx, cy, col)
+  draw_swap(dl, cx, cy, col, false)
+end
+
+function icons.draw_swap_vertical(dl, cx, cy, col)
+  draw_swap(dl, cx, cy, col, true)
+end
+
+function icons.draw_reset(dl, cx, cy, col)
+  local s = theme.scale
+  local px, py
+  for i = 0, 16 do
+    local a = -math.pi * 0.8 + i / 16 * math.pi * 1.65
+    local x, y = cx + math.cos(a) * 5 * s, cy + math.sin(a) * 5 * s
+    if px then reaper.ImGui_DrawList_AddLine(dl, px, py, x, y, col, s) end
+    px, py = x, y
+  end
+  reaper.ImGui_DrawList_AddLine(dl, cx - 5 * s, cy - 5 * s, cx - 5 * s, cy, col, s)
+  reaper.ImGui_DrawList_AddLine(dl, cx - 5 * s, cy, cx, cy, col, s)
 end
 
 -- Magnifier fallback for the search field's embedded glyph.

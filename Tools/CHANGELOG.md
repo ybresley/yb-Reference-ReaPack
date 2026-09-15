@@ -1,9 +1,11 @@
 # Changelog
 
 <!--
-This is the single source of truth for release notes. The script header,
-GitHub release notes, What's New card, and Settings > Updates history are
-generated from it. Do not write release notes elsewhere.
+This is the single source of truth for full release notes. The script header,
+GitHub release notes, Full Release Notes view, and Settings > Updates history
+are generated from it. Illustrated introductions use separate, curated feature
+and topic copy; see
+.claude/skills/changelog-release/references/illustrated-updates.md.
 
 It intentionally starts empty: 0.3.0 was the beta release, not an update for
 existing testers. The first entry is the first post-beta update. Until then,
@@ -23,6 +25,34 @@ Groups use those names and that order. `changelog-release` owns the detailed
 workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
+
+## 0.4.0 — 2026-09-15
+
+This update brings a new high-quality frequency spectrum analyser, an improved waveform display and new interface animations, alongside smaller improvements and bug fixes.
+
+### Highlights
+
+- **Spectrum Analyser** — A new high-quality frequency spectrum analyser shows the frequency balance of reference playback, Library auditioning and the Reaper project. It includes detailed frequency readouts and adjustable listening bands, so you can inspect and hear specific parts of a sound.
+- **Improved Waveform** — The waveform now shows finer detail down to individual samples, with combined time navigation and zoom, plus independent waveform height adjustment.
+- **Panel Layout** — The waveform and spectrum now arrange themselves to fit the available space, with Side by Side and Stacked options in Settings and a swap button to change their order.
+- **UI Animations** — Buttons, switches and colour changes now have subtle animations, adding motion to everyday controls. Interface Animations in Settings → Appearance turns them on or off.
+
+### Changes
+
+- **Reference Picker** — Pinned-reference labels can now be edited in place without closing the dropdown.
+- **Reference Playback** — Reference View and Library volume readouts now accept exact typed values and reset with right-click.
+- **Updates** — What's New can now present substantial release features with silent guided demonstrations while keeping the full release notes available.
+- **Library** — New categories can now be confirmed with Enter.
+
+### Fixes
+
+- **Library** — Library waveforms now continue loading after a sound file cannot be read.
+- **Waveform** — Start and end markers now match in size and stay aligned to the waveform.
+- **Reference Playback** — Library Pitch changes now apply reliably during audition.
+- **Reference Playback** — Pitch panels now stay on the current monitor and remain scrollable when screen space is limited.
+- **Reference Playback** — Volume readouts now show rounded zero consistently while keeping the sign of nonzero values.
+- **Loudness** — The Loudness panel now stays on the current monitor, opens clear of its button and keeps all controls reachable.
+- **Reference Picker** — Dropdown rows now keep consistent widths, and the scrollbar appears only when needed.
 
 ## 0.3.2 — 2026-09-04
 

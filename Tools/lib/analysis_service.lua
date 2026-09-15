@@ -1,5 +1,5 @@
--- Owns the destination of each measurement. A local id is not sufficient when
--- projects and libraries can change while a file is being measured.
+-- Owns queued work, progress placement and the destination of each measurement.
+-- A local id is not sufficient when projects and libraries can change mid-job.
 local analysis = require("core.analysis")
 local loudness = require("loudness")
 local pins_service = require("pins_service")
@@ -14,7 +14,7 @@ local progress_at, progress_state
 
 -- One queue has one display destination. A later add moves its feedback to the
 -- view the user just acted in, without restarting any measurement.
-function service.set_progress_view(state, view)
+local function set_progress_view(state, view)
   assert(view == "main" or view == "browse", "Unknown measurement progress view")
   state.analysis_progress_view = view
   if state.analysis_progress then state.analysis_progress.view = view end
@@ -22,6 +22,46 @@ end
 
 local function is_pin(id)
   return type(id) == "string" and id:sub(1, 1) == "p"
+end
+
+-- A newly loaded Library has its own ids, so an old in-flight id must not be
+-- excluded. advance validates the actual record before accepting any result.
+function service.library_loaded(state)
+  local available = loudness.available()
+  state.analysis_queue = available and analysis.queue(state.library) or {}
+  return available
+end
+
+-- Imports rebuild in Library order, including previous failures. A deduplicated
+-- import still retries unfinished work but does not claim the progress panel.
+function service.library_changed(state, view)
+  if view then set_progress_view(state, view) end
+  if loudness.available() then
+    state.analysis_queue = analysis.queue(state.library, loudness.current())
+  end
+end
+
+-- Pins refresh from their project's markers in advance; adopting a sound into
+-- the Library rebuilds that queue. Already measured copies do not move progress.
+function service.added(state, record, view)
+  if not record then return end
+  if is_pin(record.id) then
+    if analysis.pin_needs(record) then set_progress_view(state, view) end
+  elseif loudness.available() then
+    service.library_changed(state, analysis.needs(record) and view or nil)
+  end
+end
+
+function service.forget(state, id)
+  for i = #state.analysis_queue, 1, -1 do
+    if state.analysis_queue[i] == id then table.remove(state.analysis_queue, i) end
+  end
+end
+
+-- A refused removal restores interrupted work at the front. Pins deliberately
+-- use this retry path too, bypassing the automatic queue's attempted-pin filter.
+function service.restore(state, id)
+  table.insert(state.analysis_queue, 1, id)
 end
 
 local function valid(state, callbacks, job)

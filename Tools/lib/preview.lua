@@ -173,7 +173,7 @@ end
 -- the Play calls widens the gap between players of the same file, and the two
 -- mono parts carry the same signal to opposite speakers — an offset there combs
 -- when they meet in the room.
-local function start(path, db, loop, position, semitones, channels)
+local function start(path, db, loop, position, semitones, channels, before_start)
   release()
   channels = math.max(1, math.floor(tonumber(channels) or 2))
   live.db = db or 0
@@ -213,6 +213,15 @@ local function start(path, db, loop, position, semitones, channels)
     end
     built[i] = { handle = h, src = src, route = route, path = path }
   end
+  -- Give the analyser one last chance to arm its source token after the old
+  -- preview is gone, but before any route of this preview can enter audio.
+  if before_start then
+    local ok, err = pcall(before_start)
+    if not ok then
+      discard(built)
+      error(err, 0)
+    end
+  end
   for i = 1, #built do reaper.CF_Preview_Play(built[i].handle) end
 
   live.parts = built
@@ -222,11 +231,14 @@ end
 
 -- Start previewing a file. Stops and releases any current preview FIRST, so there
 -- is never more than one sound playing. opts: { db, loop, position, pitch,
--- channels }. Unknown channel counts retain the established stereo behaviour.
+-- channels, before_start }. Unknown channel counts retain the established stereo
+-- behaviour. before_start runs after any prior preview is released and before
+-- this preview can enter audio.
 -- Returns true on success, false if the file couldn't be opened as audio.
 function preview.play(path, opts)
   opts = opts or {}
-  return start(path, opts.db, opts.loop, opts.position, opts.pitch, opts.channels)
+  return start(path, opts.db, opts.loop, opts.position, opts.pitch, opts.channels,
+    opts.before_start)
 end
 
 function preview.stop()

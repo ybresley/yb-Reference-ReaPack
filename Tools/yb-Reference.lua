@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.3.2
+-- @version 0.4.0
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -18,47 +18,54 @@
 --   [nomain] assets/windows/folder_picker.ps1
 --   [nomain] assets/windows/folder_picker.vbs
 --   [nomain] CHANGELOG.md
+--   [effect] yb-Reference Monitoring Filter.jsfx
 --   [main] yb-Reference_ToggleReferenceMode.lua
 -- @changelog
---   This update focuses on reference browsing and playback, alongside Library
+--   This update brings a new high-quality frequency spectrum analyser, an
+--   improved waveform display and new interface animations, alongside smaller
 --   improvements and bug fixes.
 --    
+--   Highlights
+--     • Spectrum Analyser: A new high-quality frequency spectrum analyser
+--       shows the frequency balance of reference playback, Library auditioning
+--       and the Reaper project. It includes detailed frequency readouts and
+--       adjustable listening bands, so you can inspect and hear specific parts
+--       of a sound.
+--     • Improved Waveform: The waveform now shows finer detail down to
+--       individual samples, with combined time navigation and zoom, plus
+--       independent waveform height adjustment.
+--     • Panel Layout: The waveform and spectrum now arrange themselves to fit
+--       the available space, with Side by Side and Stacked options in Settings
+--       and a swap button to change their order.
+--     • UI Animations: Buttons, switches and colour changes now have subtle
+--       animations, adding motion to everyday controls. Interface Animations
+--       in Settings → Appearance turns them on or off.
+--    
 --   Changes
---     • Waveform: The Reference View waveform can now be zoomed and panned,
---       with a time ruler that adapts to the zoom level.
---     • Waveform: Waveforms now show finer detail when zoomed in, with
---       continuous outlines and more consistent thickness.
---     • Waveform: Clicking the Reference View waveform now starts playback
---       from that position.
---     • Reference Picker: References can now be previewed from the dropdown
---       without changing the selected reference.
---     • Reference Picker: Pinned references can now be searched by filename or
---       label.
---     • Reference Picker: The dropdown now sizes to its contents and available
---       screen space.
---     • Loudness: Pending pinned references now take priority, and measurement
---       pauses between steps during recording.
---     • Loudness: A progress panel now shows measurement status and the number
---       of sounds remaining.
---     • Reference Playback: Pitch controls now include a slider and a choice
---       of semitone or percentage units.
---     • Library: Category deletion now asks for confirmation only when sounds
---       would become Uncategorised.
---     • Library: Category counts now reflect search results, and active
---       searches highlight the search icon.
---     • Hotkeys: Ctrl+A and Delete now work in the Library’s category and
---       sound lists.
---     • Dialogs: Small dialogs now fit their contents and use consistent
---       button layouts. Deletion prompts no longer dim surrounding windows.
---     • Latch Mode: The Latch button now uses a chain-link icon.
+--     • Reference Picker: Pinned-reference labels can now be edited in place
+--       without closing the dropdown.
+--     • Reference Playback: Reference View and Library volume readouts now
+--       accept exact typed values and reset with right-click.
+--     • Updates: What's New can now present substantial release features with
+--       silent guided demonstrations while keeping the full release notes
+--       available.
+--     • Library: New categories can now be confirmed with Enter.
 --    
 --   Fixes
---     • Reference Playback: The playhead, seeking and start/end points now
---       stay aligned with the sound when Pitch changes.
---     • Reference Playback: Changing the selected reference now stops the
---       previous reference’s playback.
---     • Loudness: References pinned before measurement finishes now receive
---       their missing readings.
+--     • Library: Library waveforms now continue loading after a sound file
+--       cannot be read.
+--     • Waveform: Start and end markers now match in size and stay aligned to
+--       the waveform.
+--     • Reference Playback: Library Pitch changes now apply reliably during
+--       audition.
+--     • Reference Playback: Pitch panels now stay on the current monitor and
+--       remain scrollable when screen space is limited.
+--     • Reference Playback: Volume readouts now show rounded zero consistently
+--       while keeping the sign of nonzero values.
+--     • Loudness: The Loudness panel now stays on the current monitor, opens
+--       clear of its button and keeps all controls reachable.
+--     • Reference Picker: Dropdown rows now keep consistent widths, and the
+--       scrollbar appears only when needed.
 --
 -- RELEASE NOTES ARE GENERATED — never hand-write them here. CHANGELOG.md is the
 -- single source of truth (2026-08-08); `lua scripts/gen_header.lua` writes the
@@ -188,6 +195,20 @@ if not deps.imgui then
   return
 end
 
+-- Numeric controls use ReaImGui's character-filter callback. Without it a
+-- number box could appear to reject text while its active edit buffer still
+-- accepts it, so this version is a required dependency rather than a fallback.
+if not (reaper.ImGui_CreateFunctionFromEEL
+    and reaper.ImGui_InputTextFlags_CallbackCharFilter
+    and reaper.ImGui_Attach) then
+  reaper_api.message(
+    "yb-Reference needs a newer ReaImGui extension to edit numeric values.\n\n" ..
+    "Update ReaImGui through ReaPack, restart Reaper, then run this again.\n\n" ..
+    "Support: yoni.ybtools@gmail.com",
+    "yb-Reference · ReaImGui Update Needed")
+  return
+end
+
 -- SWS supplies the preview engine and the Windows integration behind the tool's
 -- core listening workflow. Library-only reduced mode is not a supported product
 -- mode, so explain the missing requirement and stop before the UI opens.
@@ -208,6 +229,7 @@ end
 local theme = require("ui.theme")
 local ui_scale = theme.set_scale(reaper_api.get_ui_scale())
 local accent_colour = theme.set_accent(reaper_api.get_accent_colour())
+local ui_animations = theme.set_animations(reaper_api.get_ui_animations())
 
 -- Loaded before the library so its one public support address is also available
 -- to the serious startup failures below. Loading the adapter has no side effects;
@@ -522,29 +544,34 @@ local service    = require("library_service")
 local library_delete = require("library_delete")
 local categories = require("core.categories")
 local search     = require("core.search")
+local library_selection = require("core.selection")
 local browser_memory = require("core.browser_memory")
 local analysis   = require("core.analysis") -- what still needs measuring
 local match      = require("core.match")    -- match-to-target trim arithmetic
 local span       = require("core.span")     -- start/end points: clamping + effective range
 local pitch      = require("core.pitch")    -- semitone limits and playback-rate conversion
+local monitor_filter_core = require("core.monitor_filter") -- listening-range rules and remembered shape
+local spectrum_core = require("core.spectrum")
+local spectrum = require("spectrum")
 local wave_view  = require("core.wave_view") -- Reference View waveform pan and zoom range
 local techfacts  = require("core.techfacts") -- the armed sound's tech line for the bar
 local preview    = require("preview")  -- SWS audio-preview adapter (playback)
 local peaks      = require("peaks")    -- waveform envelope reader
 local wave_detail = require("wave_detail") -- selected waveform's visible-range detail reader
+local wave = require("wave_coordinator")
 local loudness   = require("loudness") -- background loudness measurement
 local analysis_service = require("analysis_service") -- Library and project measurement ownership
 local holders    = require("holders")  -- what is holding a sound, and letting go of all of it at once
 local picker_preview = require("picker_preview") -- independent dropdown playback and pause ownership
+local playback_coordinator = require("playback_coordinator")
 local dragout    = require("dragout")  -- dropping a sound onto the arrange view
-local importer     = require("core.importer") -- dedup lookup for import-and-pin
 local pins_core    = require("core.pins")     -- per-project pin records (pure)
 local pins_service = require("pins_service")  -- pin/unpin/adopt + project switch handling
 local updater      = require("updater")       -- in-app update check + one-button update
+local monitoring_filter = require("monitor_filter") -- permanent fail-open Monitoring FX helper
 local changelog    = require("core.changelog") -- CHANGELOG.md -> the What's New card + Settings history
 local fb_core      = require("core.feedback")  -- report payload building (pure)
 local walkthrough  = require("core.walkthrough") -- first-open walkthrough state machine (pure)
-local demo         = require("core.demo")        -- the walkthrough's stand-in sound (pure, drawing data only)
 local walkthrough_ui = require("ui.walkthrough")  -- asked ONE question here: can its card draw on this ReaImGui
 local app = require("ui.app")
 local ctx = app.create_context(icon_font_path, CONTEXT_NAME, reaper_api.monitor_work_area)
@@ -564,6 +591,15 @@ if saved_browser.sound_id and not stored_browser.sound_id then
   reaper_api.set_browser_sound(nil)
 end
 local open_library_on_startup = reaper_api.get_open_library_on_startup()
+local stored_monitor_filter, stored_spectrum = spectrum.load()
+
+-- Released copies receive the helper through ReaPack's [effect] package entry.
+-- DEV/Main copies also keep a source beside the script, so the adapter mirrors
+-- it into Reaper's Effects folder before trying to insert the Monitoring FX.
+monitoring_filter.init({
+  dev_copy = copy_label ~= nil,
+  source_path = table.concat({ root, "yb-Reference Monitoring Filter.jsfx" }, SEP),
+})
 
 -- Where the title bar's "Dock window in Docker" sends the window, asked once:
 -- REAPER's dockers are a property of the user's layout, not ours.
@@ -605,8 +641,10 @@ feedback.state.email = reaper_api.get_feedback_email()
 -- same facts; they are read fresh at the moment of a send below.)
 
 local state = {
+  dev_copy = copy_label ~= nil,
   deps           = deps,
   ui_scale       = ui_scale,
+  ui_animations  = ui_animations,
   accent_colour  = accent_colour,
   library        = library,
   library_dir    = library_dir,
@@ -636,6 +674,10 @@ local state = {
   -- (ui/browser.lua clamps it to the window each frame, so a value saved on a
   -- big screen can't crush the sound list on a small one).
   browser_wave_h = reaper_api.get_browser_wave_h(),
+  -- The vertical Reference View divider. It is an app preference rather than
+  -- spectrum data, so compatible DEV builds can keep sharing their spectrum JSON.
+  reference_stack_split = reaper_api.get_reference_stack_split(),
+  reference_layout = reaper_api.get_reference_layout(),
   visible_sounds = {},                           -- library sounds for the view (filtered + sorted, cached)
   -- Playback (Phase 3). auto_audition on by default = clicking a sound plays it.
   auto_audition  = true,
@@ -650,6 +692,26 @@ local state = {
   -- selected sound changes, so browsing never disturbs the armed reference.
   pitch          = { main = 0, browse = 0 },
   pitch_unit     = pitch.unit(reaper_api.get_pitch_unit()),
+  -- One global listening filter because both the timeline and yb-Reference
+  -- preview paths meet in Reaper's Monitoring FX chain. The shape is remembered,
+  -- but `on` always starts false (core.monitor_filter owns that load rule).
+  monitor_filter = {
+    on = stored_monitor_filter.on,
+    low_hz = stored_monitor_filter.low_hz,
+    high_hz = stored_monitor_filter.high_hz,
+    slope = stored_monitor_filter.slope,
+    presets = stored_monitor_filter.presets,
+    selected_id = nil,
+    preference_error = stored_monitor_filter.preference_error,
+    system = {
+      phase = "settling",
+      available = false,
+      audible = false,
+      can_restore = false,
+      message = "Setting up the Monitoring Filter…",
+    },
+  },
+  spectrum = stored_spectrum,
   master_db      = math.max(-60, math.min(0, reaper_api.get_master_db())), -- preview level, clamped to -60..0 dB
 
   -- The browser's own selection (Phase 5.9 — independent browsing): a LIBRARY
@@ -779,7 +841,9 @@ if running_version then
   if not seen then
     reaper_api.set_seen_version(running_version)
   else
-    local missed = changelog.since(state.changelog, seen)
+    -- Upcoming Release can display a draft without marking it read before release.
+    local missed = changelog.since(state.changelog, seen,
+      state.dev_copy and running_version or nil)
     if #missed > 0 then
       state.whatsnew = { list = missed, version = running_version }
       -- The mark is written NOW, at show time — not when the card is dismissed
@@ -807,6 +871,7 @@ end
 -- case, so a later ReaImGui update still gets its first open.
 if not reaper_api.walkthrough_seen() and walkthrough_ui.can_draw() then
   walkthrough.begin_welcome(state.walkthrough)
+  state.browser_open = true
   reaper_api.set_walkthrough_seen()
 end
 
@@ -828,14 +893,9 @@ local function refresh_view()
   state.counts = categories.counts(state.library)
   state.sidebar_counts = state.query == "" and state.counts
     or categories.counts(state.library, state.query)
-  local visible = {}
-  for _, sound in ipairs(state.visible_sounds) do visible[sound.id] = true end
-  for id in pairs(state.browse_ids) do
-    if not visible[id] then state.browse_ids[id] = nil end
-  end
-  if state.browse_anchor_id and not visible[state.browse_anchor_id] then
-    state.browse_anchor_id = nil
-  end
+  local pruned = library_selection.prune_sounds(state.visible_sounds,
+    state.browse_ids, state.browse_anchor_id)
+  state.browse_ids, state.browse_anchor_id = pruned.ids, pruned.anchor
 end
 refresh_view()
 
@@ -904,132 +964,19 @@ local function sound_path(s)
   return reaper_api.join(state.library_dir, s.filename)
 end
 
--- Start previewing a sound at its recorded level plus its remembered trim and the
--- master preview volume. A numeric `position` is an exact start in seconds;
--- nil means an ordinary start and follows the sound's start point.
--- `slot` names the surface asking ("main", "browse", or "picker") and decides
--- whether the sound's own trim applies: the browser is a neutral comparison
--- surface, so only the preview level colours what you hear
--- there (decided 2026-07-30). `loop` overrides the loop toggle for this one
--- playback (reference mode always loops); leave it nil to follow the user's setting.
-local function play_sound(s, position, slot, loop)
-  if loop == nil then loop = state.loop end
-  -- A fresh start in the Reference View or picker begins at the sound's start
-  -- point. An explicit position — a
-  -- parked playhead, a resume, a browse click-from-there — is the user's own
-  -- and is honoured as given; the end point is enforced in the frame loop.
-  if (slot == "main" or slot == "picker") and position == nil
-    and type(s.span_start) == "number" and s.span_start > 0 then
-    position = s.span_start
-  end
-  local trim_db = (slot == "browse") and 0 or (s.trim_db or 0)
-  local ok = preview.play(sound_path(s), {
-    db       = trim_db + state.master_db,
-    loop     = loop,
-    position = position,
-    pitch    = state.pitch[slot] or 0,
-    channels = s.channels,
-  })
-  -- Multichannel preview has no verified fold-down path, so preview.play turns
-  -- Mono off before it starts. Keep the visible session state with the engine.
-  state.mono = preview.is_mono()
-  state.preview.playing  = ok
-  state.preview.sound_id = ok and s.id or nil
-  state.preview.slot     = ok and slot or nil
-  state.preview.trim_db  = ok and trim_db or 0
-  state.preview.channels = ok and preview.channels() or 0
-  -- The REAL length of what is playing, not the record's stored duration — the two
-  -- disagree when a file was replaced on disk, and the playhead must scale to the
-  -- audio actually sounding.
-  state.preview.length   = ok and preview.length() or 0
-  state.preview.position = ok and (position or 0) or 0
-  -- Say so. The usual cause is a file deleted or moved outside the tool, and the
-  -- row gives nothing away — same name, and the loudness from when it last WAS
-  -- readable. Without this, clicking it just silently does nothing.
-  if not ok then
-    local folder = is_pin_id(s.id)
-      and "the project's References folder" or "the Library folder"
-    state.status = string.format(
-      "\"%s\" couldn't be played. Its audio file is missing or can't be read from %s.", s.name, folder)
-  end
-  return ok -- callers must know: reference mode may not claim a playback that failed
-end
-
--- Pause: preview.lua has no pause primitive (an SWS preview is play-or-nothing),
--- so pausing is really "remember exactly where we were, then stop like normal" —
--- everything else (sound_id/length/position/playing) resets exactly like a full
--- stop; only the slot's own remembered pause survives, tagged to the sound that
--- was actually playing. The memory is written BEFORE the audio is stopped,
--- because stopping is what makes the live position unreadable.
---
--- `slot` says whose pause this is: the Reference View's transport pauses "main",
--- the Library's pauses "browse", and neither can reach the other's memory (see
--- the state init comment and holders.lua).
-local function pause_playback(slot, id)
-  return holders.pause_playback(state, slot, id)
-end
-
--- Resume: play_sound already accepts a start position, so resuming is just a
--- fresh play from the remembered spot — trim/master volume/loop are re-applied
--- exactly like any other play, which is correct (they may have changed while
--- paused).
-local function resume_playback(slot, s)
-  if not s then return end
-  local p = holders.pause_of(state, slot)
-  if play_sound(s, p and p.at or 0, slot) then holders.clear_pause(state, slot) end
-end
-
-local function refresh_wave_detail()
-  if not state.selected_id or not state.wave_cols then return end
-  if state.waveform.sound_id ~= state.selected_id then return end
-  -- Peak columns are capped; width keeps the drawing tied to its panel size.
-  local cols = wave_detail.columns(state.wave_cols)
-  local current = state.wave_detail
-  if current.sound_id == state.selected_id and current.cols == cols
-    and current.t0 == state.wave_view.t0 and current.t1 == state.wave_view.t1 then
-    current.width = state.wave_cols
-    return
-  end
-  -- A refused removal keeps the finished envelope but releases its file reader.
-  -- Reopen here so detail does not depend on another envelope build completing.
-  local channels, count, read_error
-  if wave_detail.current() ~= state.selected_id
-    and not wave_detail.open(state.selected_id, sound_path(state.selected)) then
-    read_error = "Waveform detail couldn't be opened."
-  else
-    channels, count, read_error = wave_detail.read(state.selected_id,
-      state.wave_view.t0, state.wave_view.t1, cols)
-  end
-  if channels then
-    state.wave_detail = { sound_id = state.selected_id, channels = channels, count = count,
-      cols = cols, width = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
-  else
-    -- Remember this failed request so the defer loop does not hammer the same
-    -- host read every frame. The viewer rejects the empty detail and keeps the
-    -- valid whole-file envelope on screen.
-    state.wave_detail = { sound_id = state.selected_id, channels = {}, count = 0,
-      cols = cols, width = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
-    if read_error then state.status = read_error .. " Showing the overview instead." end
-  end
-end
-
--- Hand a finished envelope to every slot that wants that sound, so the Reference
--- View and the browser looking at the same file cost one build, not two.
-local function deliver_wave(wid, chans)
-  if not wid then return end
-  if wid == state.selected_id then
-    state.waveform = { sound_id = wid, channels = chans }
-    refresh_wave_detail()
-  end
-  if wid == state.browse_id then state.browse_waveform = { sound_id = wid, channels = chans } end
-end
+local playback = playback_coordinator.new(state, {
+  find = find_sound, path = sound_path,
+  before_start = function(slot, sound_id)
+    return spectrum.prepare_preview(state, slot, sound_id)
+  end,
+}, reference_alerted)
 
 -- Select a sound: remember it, kick off its waveform build in the background, and
 -- — when auto-audition is on — start playing it from the top immediately. Playback
 -- never waits on the waveform; the envelope fills in over the next frames.
 --
 -- While reference mode is latched the REAPER transport is the trigger, so auto-audition
--- stands down: sync_reference below picks up the new selection instead (switching the
+-- stands down: the playback coordinator picks up the new selection instead (switching the
 -- reference live if the transport is already rolling). Without this, selecting a sound
 -- mid-play would start it twice in one frame.
 -- `quiet` selects without auto-auditioning — used when restoring a project's
@@ -1059,29 +1006,10 @@ local function select_sound(id, quiet)
   -- The bar's tech-facts line (horizontal-layout brief, 2026-08-07), formatted
   -- ONCE per selection — the bar draws this string every frame and must never
   -- probe the file or format it itself (ui reads state; frame-allocation rule).
-  state.selected_tech = techfacts.format(reaper_api.source_info(sound_path(state.selected)))
-  -- The envelope itself is fetched by the defer loop (see the "asked" marks
-  -- there): there is only ONE peaks job, so whichever slot asked last would
-  -- starve the other. Clearing the "asked" mark makes a deliberate re-pick
-  -- retry a sound whose file was missing when it was first tried.
-  holders.forget_wave("main")
-  -- ...except where the answer is already sitting on disk, which is the case for
-  -- every file the tool has drawn once (REAPER writes a .reapeaks sidecar). Ask
-  -- for it RIGHT HERE instead of waiting for the loop to notice: the round trip
-  -- through the loop cost two frames with nothing to draw, and that gap was the
-  -- blank flash the user saw every time they changed reference (2026-08-07).
-  -- A file with no sidecar yet still returns nothing here and builds a slice per
-  -- frame as before, with the "reading waveform…" hint — that wait is real work,
-  -- not plumbing.
-  --
-  -- Only while peaks is IDLE. Taking over a live job would cancel it, and a
-  -- cancelled browse build is never re-queued (its browse mark is already set),
-  -- leaving that slot waiting on an envelope nobody is making.
-  if not peaks.pending() then
-    peaks.request(id, sound_path(state.selected))
-    holders.mark_wave("main", id) -- asked, whether or not it answered on the spot
-    deliver_wave(peaks.advance())
-  end
+  local source_info = reaper_api.source_info(sound_path(state.selected))
+  state.selected_tech = techfacts.format(source_info)
+  wave_view.configure(state.wave_view, state.selected.duration, source_info and source_info.rate)
+  wave.selected(state, sound_path)
   -- A deliberate re-pick clears the "this one wouldn't play" mark, so the user can
   -- retry a sound whose file was missing once they've put it back.
   state.reference.failed_id = nil
@@ -1091,21 +1019,7 @@ local function select_sound(id, quiet)
   -- to a library sound CLEARS the memory: restoring an older pin later would
   -- claim it was the last reference when it wasn't.
   pins_service.remember_selected(state, is_pin_id(id) and id or nil)
-  if not quiet and state.auto_audition and not state.reference.latched then play_sound(state.selected, nil, "main") end
-end
-
--- Reference mode re-asserts its own preview every frame (sync_reference below),
--- so a browse audition sounding at the same time would fight it — refused here
--- rather than silently losing the fight to sync_reference one frame later.
-local REF_PLAYING_MSG = "Reference mode is playing. Stop the transport to audition here."
-
-local function audition_browse_sound()
-  if not state.browse then return end
-  if state.reference.active then
-    state.status = REF_PLAYING_MSG
-    return
-  end
-  if state.auto_audition then play_sound(state.browse, 0, "browse") end
+  if not quiet and state.auto_audition and not state.reference.latched then playback.play(state.selected, nil, "main") end
 end
 
 -- Browse a LIBRARY sound in the browser popup: entirely separate from
@@ -1121,6 +1035,7 @@ local function browse_sound(id, quiet, selection)
   if not holders.paused_on(state, "browse", id) then holders.clear_pause(state, "browse") end
   if state.browse_id ~= id then state.pitch.browse = 0 end
   state.browse_id = id
+  state.browse_detail = nil
   if selection then
     state.browse_ids = selection.ids or {}
     state.browse_anchor_id = selection.anchor
@@ -1144,7 +1059,7 @@ local function browse_sound(id, quiet, selection)
   state.browse_info = reaper_api.source_info(sound_path(state.browse))
   holders.forget_wave("browse") -- same as select_sound: the loop fetches, a re-pick retries
   if quiet then return end
-  audition_browse_sound()
+  playback.audition_browse()
 end
 
 -- Search text and raw scroll height deliberately start fresh. A remembered
@@ -1199,39 +1114,6 @@ local function show_in_library(pin_id)
   -- scrolls — the browser acts on each new number exactly once.
   state.reveal_id = sound_id
   state.reveal_seq = (state.reveal_seq or 0) + 1
-end
-
--- A waveform click seeks audio already playing in this view. In the Reference
--- View it starts stopped or paused audio from the clicked position; the Library
--- keeps its existing pause behaviour. Each view calls this on its own sound
--- (see the `seek` action handler below). New playback is positioned against the
--- REAL audio length because a record's stored duration can go stale when its
--- file is replaced on disk.
-local function seek_sound(s, fraction, slot)
-  local parked = holders.paused_on(state, slot, s.id)
-  if state.preview.playing and state.preview.slot == slot
-    and state.preview.sound_id == s.id then
-    local pos = fraction * (state.preview.length or 0)
-    preview.seek(pos)
-    state.preview.position = pos
-  elseif slot == "main" then
-    local requested = fraction * (s.duration or 0)
-    if play_sound(s, requested, slot) then
-      local pos = fraction * (state.preview.length or 0)
-      preview.seek(pos)
-      state.preview.position = pos
-      holders.clear_pause(state, slot)
-    end
-  elseif parked then
-    -- A real pause keeps its own length snapshot (live audio's number) — the
-    -- click just moves the remembered position within it.
-    parked.at = fraction * (parked.length or 0)
-  elseif play_sound(s, 0, slot) then
-    -- The browser strip keeps click-auditions-from-there: browsing is listening.
-    local pos = fraction * (state.preview.length or 0)
-    if pos > 0 then preview.seek(pos) end
-    state.preview.position = pos
-  end
 end
 
 -- The project in front of the user changed (tab switch, open, Save As): `r` is
@@ -1358,9 +1240,7 @@ local function delete_sound(id, batch)
 
   -- Gone for good: drop it from the measuring queue too (it holds nothing open, so
   -- it only needed clearing once the delete actually happened).
-  for i = #state.analysis_queue, 1, -1 do
-    if state.analysis_queue[i] == id then table.remove(state.analysis_queue, i) end
-  end
+  analysis_service.forget(state, id)
 
   -- The row is gone, so neither view may still be pointing at it.
   holders.forget_selection(state, mine)
@@ -1452,12 +1332,7 @@ local function save_pin_to_library(id, dest)
   end
   if ok and (added or dest) then
     refresh_view()
-    if added and loudness.available() then
-      if analysis.needs(find_sound(sound_id)) then
-        analysis_service.set_progress_view(state, "browse")
-      end
-      state.analysis_queue = analysis.queue(state.library, loudness.current())
-    end
+    if added then analysis_service.added(state, find_sound(sound_id), "browse") end
   end
 end
 
@@ -1474,112 +1349,11 @@ local function step_analysis()
   analysis_service.advance(state, analysis_callbacks)
 end
 
--- Reference mode, once per frame. The project is muted while latched, so the REAPER
--- transport drives the reference instead: rolling the transport plays the selected
--- sound, stopping it goes silent again. The reference always loops (independent of the
--- loop toggle) so a short reference keeps going for as long as you play — that is the
--- A/B this whole feature exists for.
---
--- Stopping is guarded on `active`: only a preview THIS started may be stopped here, so
--- an audition the user kicked off by hand isn't cut off the moment the transport idles.
--- `active` is only claimed when playback actually STARTED — a failed one must never be
--- recorded as playing, or every later frame would think the reference is running and
--- leave a muted project sitting in silence.
-local function sync_reference()
-  local ref = state.reference
-  local wanted = ref.latched and reference.transport_preview_wanted() or false
-  picker_preview.set_reference_running(state, wanted)
-  if not ref.latched then return end
-
-  if wanted and state.selected then
-    local id = state.selected.id
-    -- failed_id stops a broken file being re-opened on every single frame (that would
-    -- hammer the disk inside the frame loop); the user picking a sound clears it.
-    if ref.failed_id ~= id and (not ref.active or ref.sound_id ~= id) then
-      -- From a paused playhead, not always from the top. The pause is NOT
-      -- consumed: stopping and rolling again re-triggers from the same spot.
-      local parked = holders.paused_on(state, "main", id)
-      local from = parked and parked.at or nil
-      if play_sound(state.selected, from, "main", true) then
-        ref.active, ref.sound_id, ref.failed_id = true, id, nil
-      else
-        ref.active, ref.sound_id, ref.failed_id = false, nil, id
-        state.status = "That reference couldn't be played. Its audio file may be missing or unreadable."
-      end
-    end
-  elseif ref.active or ref.failed_id then
-    -- Transport stopped: drop the reference AND the "wouldn't play" mark, so pressing
-    -- play again is a fresh attempt. Without clearing it, one transient failure would
-    -- suppress every later play until the user re-picked the sound.
-    if ref.active then holders.stop_playback(state, "main") end
-    ref.active, ref.sound_id, ref.failed_id = false, nil, nil
-  end
-end
-
--- Turn reference mode on/off. Playback is stopped on BOTH edges: latching should begin
--- from real silence, and un-latching must not leave a preview playing over a project
--- that is audible again.
-local function toggle_reference()
-  local ref = state.reference
-  picker_preview.stop(state)
-  -- The Reference View's slot: latching is that view's act. A Library audition
-  -- still stops (the audio is shared), but where the Library was paused is not
-  -- this button's to forget.
-  holders.stop_playback(state, "main")
-  ref.active, ref.sound_id, ref.failed_id = false, nil, nil
-
-  if ref.latched then
-    ref.latched = false
-    if reference.latch_off() then
-      ref.live, ref.pending, ref.owner_name = false, false, nil
-      state.status = "Reference mode is off. Your project plays normally again."
-    else
-      local view, recovered, urgent = reference.refresh()
-      ref.latched, ref.live, ref.pending = view.latched, view.live, view.pending
-      ref.owner_name, ref.queued_count = view.owner_name, view.queued_count
-      local message = recovered or reference.pending()
-      if message then
-        state.status = message
-        if (urgent or view.pending) and message ~= reference_alerted then
-          reaper_api.message(message, "yb-Reference · Reference Mode Needs Attention")
-          reference_alerted = message
-        end
-      end
-    end
-  else
-    -- Refuse an empty latch: muting the project with nothing armed buys silence
-    -- for nothing, and "press play, hear nothing" reads as broken. (Losing the
-    -- armed reference LATER, while latched, is different — then we stay latched
-    -- at NO TARGET, because auto-unlatching would surprise-blast project audio.)
-    if not state.selected then
-      state.status = "Select a reference first. Choose a sound or pin, then turn on the Latch button."
-      return
-    end
-    -- Refusing to latch is the only safe answer when its records can't be laid down
-    -- first or a genuine recovery failure is outstanding. Closed projects with
-    -- verified records are ordinary queue entries and do not block this project.
-    local ok, reason = reference.latch_on()
-    if ok then
-      local view = reference.refresh()
-      ref.latched, ref.live, ref.pending = view.latched, view.live, view.pending
-      ref.owner_name, ref.queued_count = view.owner_name, view.queued_count
-      state.status = "Reference mode is on for " .. (view.owner_name or "this project") ..
-        ". Its master is muted. Press Play in Reaper to hear the selected reference."
-    else
-      state.status = reason
-      reaper_api.message(reason, "yb-Reference · Reference Mode")
-      if reference.pending() then reference_alerted = reason end
-    end
-  end
-end
-
 -- Queue everything unmeasured: freshly imported sounds, and anything a previous run
 -- was interrupted part-way through. Sounds marked "failed" are included deliberately
 -- — the usual cause is a file that was missing at the time, so putting it back and
 -- reopening the tool simply measures it.
-if loudness.available() then
-  state.analysis_queue = analysis.queue(state.library)
-else
+if not analysis_service.library_loaded(state) then
   state.status = "Loudness measurements aren't available in this version of Reaper. Everything else works normally."
 end
 
@@ -1641,43 +1415,81 @@ local function summarize(sum)
   return table.concat(parts, "  \u{00B7}  ")
 end
 
-local function do_import(paths, category, progress_view)
+local import_job
+local function do_import(paths, category, progress_view, pin_after)
   if not paths or #paths == 0 then return end
-  local sounds_before = #state.library.sounds
-  -- pcall: the one raise left in here is the library save at the very end. By then
-  -- every copied sound is already in the in-memory list, so the tool must keep
-  -- running — the next successful save writes the complete library anyway.
-  local ok, sum = pcall(service.import_files, state, paths, category)
+  if import_job then
+    state.status = "Sounds are still being added. Wait for this import to finish, then add more."
+    return
+  end
+  local ps = state.pins
+  local pin_data, pin_dir = ps and ps.data, ps and ps.dir
+  local first_pin
+  import_job = service.start_import(state, paths, category, {
+    valid = pin_after and function()
+      return state.pins == ps and ps.data == pin_data and ps.dir == pin_dir
+        and not pins_service.can_pin(state)
+    end or nil,
+    on_sound = pin_after and function(sound)
+      local ok, message, pid = pins_service.pin_sound(state, sound, function(src, dest)
+        return reaper_api.copy_file(src, dest, coroutine.yield)
+      end)
+      if not ok and not pid then
+        table.insert(import_job.pin_errors, message)
+      end
+      if pid and not first_pin then
+        first_pin = pid
+        select_sound(pid, true)
+        walkthrough.event(state.walkthrough, "sound_pinned")
+      end
+    end or nil,
+  })
+  import_job.pin_errors = {}
+  import_job.progress_view = progress_view or "browse"
+  state.status = "Adding sounds…"
+end
+
+local function step_import()
+  if not import_job then return end
+  -- A frame gets at most 2 ms / 16 small steps. Individual disk and host calls
+  -- still take as long as the operating system needs to return.
+  local deadline = reaper_api.now() + 0.002
+  for _ = 1, 16 do
+    if import_job:step() or reaper_api.now() >= deadline then break end
+  end
+  local job, sum = import_job, import_job.summary
+  if not job.done then
+    state.status = string.format("Adding sounds… %d of %d", sum.current or 0, sum.total or 0)
+    return
+  end
+  import_job = nil
   refresh_view()
-  -- Walkthrough stop 2 advances the moment files really land ("real actions
-  -- advance where natural"). Counted, not assumed, so a pick that dedups to
-  -- nothing doesn't claim an add that didn't happen — and it fires even on a
-  -- failed SAVE, because the sounds are in the list either way.
-  if #state.library.sounds > sounds_before then
-    analysis_service.set_progress_view(state, progress_view or "browse")
+  -- Only a real addition advances the walkthrough; duplicates do not.
+  local added = sum.added > 0
+  if added then
     walkthrough.event(state.walkthrough, "files_added")
   end
-  -- Rebuild rather than append: this picks up the new sounds AND anything still
-  -- unmeasured from before, and skips the one being measured right now so it can't
-  -- be queued twice.
-  if loudness.available() then
-    state.analysis_queue = analysis.queue(state.library, loudness.current())
-  end
-  if not ok then
-    state.status = "The sounds were added, but the Library couldn't be saved. They remain in the Library, and yb-Reference will try again when you make another change."
+  analysis_service.library_changed(state, added and job.progress_view or nil)
+  if job.error then
+    state.status = "Adding sounds stopped before finishing. Check the Library before trying again."
     reaper_api.message(
       product_error.with_details(
-        "The sounds were added, but the Library couldn't be saved. They remain in the Library.", sum) ..
+        state.status, job.error) ..
       "\n\nyb-Reference will try to save everything again when you make another change.",
       "yb-Reference · Add Sounds")
     return
   end
   state.status = summarize(sum)
+  if #job.pin_errors > 0 then state.status = state.status .. " · " .. #job.pin_errors .. " couldn't be pinned" end
+  if job.cancelled then
+    state.status = "Adding sounds stopped because the destination changed. " .. state.status
+  end
   -- Skips/errors are real problems the user should see spelled out — surface them
   -- in a dialog (duplicates are benign and stay in the status line only).
   local detail = {}
   for _, d in ipairs(sum.skipped) do detail[#detail + 1] = d end
   for _, e in ipairs(sum.errors) do detail[#detail + 1] = e end
+  for _, e in ipairs(job.pin_errors) do detail[#detail + 1] = e end
   if #detail > 0 then
     reaper_api.message(state.status .. "\n\n" .. table.concat(detail, "\n"), "yb-Reference · Add Sounds")
   end
@@ -1700,23 +1512,7 @@ end
 -- Drop category ids that a deletion removed. Keep any valid rows selected
 -- instead of throwing the whole view back to All.
 local function prune_category_view()
-  local view = state.view
-  if view.scope == "category" then
-    if not categories.get(state.library, view.id) then state.view = { scope = "all" } end
-    return
-  end
-  if view.scope ~= "categories" then return end
-
-  local kept = {}
-  for id, selected in pairs(view.ids or {}) do
-    if selected and categories.get(state.library, id) then kept[id] = true end
-  end
-  if next(kept) == nil then
-    state.view = { scope = "all" }
-  else
-    state.view = { scope = "categories", ids = kept,
-      anchor = kept[view.anchor] and view.anchor or next(kept) }
-  end
+  state.view = library_selection.prune_category_view(state.library, state.view)
 end
 
 --------------------------------------------------------------- library location
@@ -1725,6 +1521,10 @@ end
 -- empty folder starts a new one; anything else is refused. Nothing moves or
 -- copies sounds, and the current library stays on disk.
 local function switch_library(new_dir)
+  if import_job then
+    state.status = "Sounds are still being added. Wait for this import to finish, then change Library folders."
+    return
+  end
   -- Trailing separators would make the same folder look like a different one
   -- (and double up inside joined paths). A bare drive keeps its slash.
   new_dir = new_dir:gsub("[\\/]+$", "")
@@ -1817,7 +1617,7 @@ local function switch_library(new_dir)
   reaper_api.set_browser_view(state.view)
   reaper_api.set_browser_sound(nil)
   refresh_view()
-  state.analysis_queue = loudness.available() and analysis.queue(state.library) or {}
+  analysis_service.library_loaded(state)
   -- The pin markers point into the library, so they're re-derived against the new one.
   if state.pins then pins_service.rebuild_markers(state) end
 
@@ -1876,6 +1676,17 @@ local function close_browser()
   holders.stop_browse_audition(state)
 end
 
+local function replace_monitor_filter(next_value, save)
+  next_value.system = state.monitor_filter.system
+  next_value.preference_error = state.monitor_filter.preference_error
+  state.monitor_filter = next_value
+  if save then
+    local ok, err = spectrum.save_filter(next_value)
+    if not ok then state.status = err end
+  end
+end
+
+local actions = require("core.actions")
 local function handle_action(a)
   if a.type == "pick" then
     do_import(reaper_api.pick_files(), a.category)
@@ -2028,8 +1839,38 @@ local function handle_action(a)
       state.browser_wave_h = h
       reaper_api.set_browser_wave_h(h)
     end
+  elseif a.type == "set_reference_layout" then
+    local previous = state.reference_layout[a.key]
+    if previous ~= a.value and reaper_api.set_reference_layout(a.key, a.value) then
+      state.reference_layout[a.key] = a.value
+      -- Divider shares were historically stored against the waveform. Reverse
+      -- the matching share when content order changes so the two frames and the
+      -- gap stay in place while only their contents trade sides.
+      if a.key == "horizontal_first" then
+        local ok, err = spectrum_core.set_preference(
+          state.spectrum, "split", 1 - state.spectrum.prefs.split)
+        if ok then ok, err = spectrum.save(state.spectrum) end
+        if not ok then state.status = err end
+      elseif a.key == "vertical_first" then
+        state.reference_stack_split = 1 - state.reference_stack_split
+        reaper_api.set_reference_stack_split(state.reference_stack_split)
+      end
+    end
+  elseif a.type == "set_reference_stack_split" then
+    -- Drag frames update the view immediately without writing preferences. The
+    -- release action omits commit=false and always writes, including when the
+    -- last drag frame already put this exact value in state.
+    local value = a.value
+    local valid = type(value) == "number" and value == value
+      and math.abs(value) < math.huge and value >= 0.2 and value <= 0.8
+    if valid then
+      state.reference_stack_split = value
+      if a.commit ~= false then
+        reaper_api.set_reference_stack_split(value)
+      end
+    end
   elseif a.type == "preview_pin" then
-    local ok, message = picker_preview.play(state, a.id, a.proj, a.restart == true, play_sound)
+    local ok, message = picker_preview.play(state, a.id, a.proj, a.restart == true, playback.play)
     if not ok and message then
       state.status = message
       -- The Library's status line may be hidden while the picker is in use.
@@ -2049,112 +1890,83 @@ local function handle_action(a)
   elseif a.type == "audition_browse_sound" then
     -- The browser selects on mouse-down, then sends this only when the gesture
     -- finishes as a click. A drag never reaches this path.
-    if state.browse_id == a.id then audition_browse_sound() end
+    if state.browse_id == a.id then playback.audition_browse() end
   elseif a.type == "show_in_library" then
     show_in_library(a.id)
   elseif a.type == "toggle_play" then
-    -- Play <-> pause, for whichever window's transport reported it: `target`
-    -- names the slot, exactly the way the browser tags its seek (untagged = the
-    -- Reference View). Gated on THAT slot's own sound actually being what's
-    -- sounding or paused — there is one live preview and two windows that can
-    -- speak, so a Library audition must never answer the Reference View's button
-    -- (or the other way round) even when both are pointed at the same sound.
-    local slot = (a.target == "browse") and "browse" or "main"
-    local s  = (slot == "browse") and state.browse or state.selected
-    local id = (slot == "browse") and state.browse_id or state.selected_id
-    if state.preview.playing and state.preview.slot == slot
-      and state.preview.sound_id ~= nil and state.preview.sound_id == id then
-      pause_playback(slot, id)
-    elseif slot == "browse" and state.reference.active then
-      -- Same refusal browse_sound and the strip's seek make: sync_reference
-      -- re-asserts its own preview every frame, so an audition started here
-      -- would just lose the fight one frame later.
-      state.status = REF_PLAYING_MSG
-    elseif s and holders.paused_on(state, slot, id) then
-      resume_playback(slot, s)
-    elseif s then
-      play_sound(s, nil, slot)
-    end
+    playback.toggle_play(a.target == "browse" and "browse" or "main")
   elseif a.type == "stop_play" then
-    -- The separate Stop button: back to the start, no remembered position. It
-    -- acts on the SLOT — whatever this window has going — rather than on the
-    -- sound the window is pointed at, so a selection that moved on while the
-    -- audio kept running can still be stopped (see the note by draw_stop).
-    --
-    -- The audio is only stopped when it is THIS window's: with a park of our own
-    -- but the other window sounding, all we may do is forget the park. Stopping
-    -- there would silence the other view's reference from a button that speaks
-    -- for this one.
-    local slot = (a.target == "browse") and "browse" or "main"
-    if state.preview.playing and state.preview.slot == slot then
-      holders.stop_playback(state, slot)
-    else
-      holders.clear_pause(state, slot)
-    end
+    playback.stop(a.target == "browse" and "browse" or "main")
   elseif a.type == "toggle_loop" then
-    state.loop = not state.loop
-    -- Affect the current preview live — but never a transport-driven reference. That
-    -- one is forced to loop for as long as the transport rolls; switching looping off
-    -- underneath it would end the reference and leave a muted project in silence.
-    if not state.reference.active then preview.set_loop(state.loop) end
+    playback.toggle_loop()
   elseif a.type == "toggle_auto" then
     state.auto_audition = not state.auto_audition
   elseif a.type == "toggle_mono" then
-    -- Match the control's availability exactly. While either view is playing,
-    -- Mono applies to that live sound; otherwise the Reference View selection is
-    -- the sound the control describes.
-    local mono_channels = state.preview.playing and (tonumber(state.preview.channels) or 0)
-      or (state.selected and (tonumber(state.selected.channels) or 0) or 0)
-    if mono_channels > 2 then return end
-    local wanted = not state.mono
-    -- Applies to whatever is sounding right now, reference mode included: it is
-    -- the same preview path, and a mono check you have to restart the sound to
-    -- hear would be useless for the thing it exists for — flicking between mono
-    -- and stereo while listening.
-    --
-    -- Nothing restarts: every routing is already playing and set_mono only
-    -- changes which are above silence (see the preview.lua header). Rebuilding
-    -- here is what caused the click the user reported on 2026-08-07 — do not
-    -- reintroduce it.
-    preview.set_mono(wanted)
-    state.mono = preview.is_mono()
+    playback.toggle_mono()
   elseif a.type == "set_pitch" then
-    local slot = (a.target == "browse") and "browse" or "main"
-    local value = pitch.clamp(a.value)
-    state.pitch[slot] = value
-    local id = (slot == "browse") and state.browse_id or state.selected_id
-    -- A quiet selection can leave the old sound finishing in this slot. Only
-    -- retune audio that belongs to the sound this control currently describes.
-    if state.preview.playing and state.preview.slot == slot
-      and state.preview.sound_id == id then
-      preview.set_pitch(value)
-    end
+    playback.set_pitch(a.target == "browse" and "browse" or "main", a.value)
   elseif a.type == "set_pitch_unit" then
     state.pitch_unit = pitch.unit(a.value)
     reaper_api.set_pitch_unit(state.pitch_unit)
-  elseif a.type == "toggle_reference" then
-    toggle_reference()
-  elseif a.type == "seek" then
-    -- Waveform position click. The browser's audition strip tags its own action with
-    -- target="browse" (ui/browser.lua) so it lands on the BROWSED sound, never
-    -- the armed reference; the Reference View's waveform is untagged and acts on
-    -- `selected` as before. Same reference-mode refusal as browse_sound: a
-    -- click meant to audition must not fight sync_reference's own preview.
-    if a.target == "browse" then
-      if state.reference.active then
-        state.status = REF_PLAYING_MSG
-      elseif state.browse then
-        seek_sound(state.browse, a.fraction, "browse")
-      end
-    elseif state.selected then
-      seek_sound(state.selected, a.fraction, "main")
+  elseif a.type == "toggle_monitor_filter" then
+    if state.monitor_filter.system.available then
+      state.monitor_filter.on = not state.monitor_filter.on
+    else
+      state.monitor_filter.on = false
+      state.status = state.monitor_filter.system.message
     end
+  elseif a.type == "set_monitor_filter_boundary" then
+    if not state.monitor_filter.system.available then return end
+    local next_value = monitor_filter_core.set_boundary(state.monitor_filter,
+      a.boundary, a.hz)
+    replace_monitor_filter(next_value, a.commit == true)
+  elseif a.type == "apply_monitor_filter_preset" then
+    if not state.monitor_filter.system.available then return end
+    replace_monitor_filter(
+      monitor_filter_core.apply_preset(state.monitor_filter, a.id), true)
+  elseif a.type == "set_monitor_filter_slope" then
+    local next_value = monitor_filter_core.normalise(state.monitor_filter)
+    next_value.slope = a.slope
+    next_value = monitor_filter_core.normalise(next_value)
+    replace_monitor_filter(next_value, true)
+  elseif a.type == "monitor_filter_full_range" then
+    monitoring_filter.dismiss_range_error()
+    replace_monitor_filter(monitor_filter_core.full(state.monitor_filter), false)
+  elseif a.type == "set_monitor_filter_range" then
+    if not state.monitor_filter.system.available then return end
+    local value, err = monitor_filter_core.set_range(state.monitor_filter, a.low_hz, a.high_hz)
+    if value then replace_monitor_filter(value, true) else state.status = err end
+  elseif a.type == "edit_monitor_filter_preset" or a.type == "restore_monitor_filter_preset" then
+    local value, err
+    if a.type == "edit_monitor_filter_preset" then
+      value, err = monitor_filter_core.edit_preset(state.monitor_filter, a.id, a.low_hz, a.high_hz)
+    else value, err = monitor_filter_core.restore_preset(state.monitor_filter, a.id) end
+    if value then replace_monitor_filter(value, true) else state.status = err end
+  elseif a.type == "set_spectrum_preference" then
+    local ok, err = spectrum_core.set_preference(state.spectrum, a.key, a.value)
+    if ok and a.commit ~= false then ok, err = spectrum.save(state.spectrum) end
+    if not ok then state.status = err end
+  elseif a.type == "reset_spectrum_history" then
+    spectrum_core.reset_history(state.spectrum)
+  elseif a.type == "restore_monitor_filter" or a.type == "enable_monitor_filter" then
+    state.monitor_filter.on, state.monitor_filter.selected_id = false, nil
+    local recover = a.type == "enable_monitor_filter" and monitoring_filter.enable or monitoring_filter.restore
+    if recover() then
+      state.monitor_filter.system = {
+        phase = "settling", available = false, audible = false,
+        can_restore = false, message = "Connecting the spectrum and filter helper…",
+      }
+    end
+  elseif a.type == "toggle_reference" then
+    playback.toggle_reference()
+  elseif a.type == "seek" then
+    playback.seek(a.fraction, a.target == "browse" and "browse" or "main")
   elseif a.type == "wave_view" then
     -- Presentation state only. The UI returns a complete, already-clamped view;
     -- this owner stores it and asks the adapter for only the newly visible slice.
     if type(a.view) == "table" then state.wave_view = a.view end
     if type(a.cols) == "number" then state.wave_cols = a.cols end
-    refresh_wave_detail()
+    wave.refresh_detail(state, sound_path)
   elseif a.type == "set_trim" then
     -- Per-sound trim. A library sound's trim is library data; a pin's trim is its
     -- project-specific snapshot, stored with the project — deliberately separate
@@ -2174,14 +1986,7 @@ local function handle_action(a)
           commit()
         end
       end
-      -- Only a "main" playback wears a trim. Matching the id alone isn't enough: the
-      -- one live preview may be a BROWSE audition of this very sound, which is
-      -- deliberately untrimmed, and riding this fader must not colour it.
-      if state.preview.playing and state.preview.slot == "main"
-        and state.preview.sound_id == state.selected.id then
-        state.preview.trim_db = state.selected.trim_db
-        preview.set_volume_db(state.selected.trim_db + state.master_db)
-      end
+      playback.trim_changed(state.selected)
     end
   elseif a.type == "match_trim" then
     -- The match window's headline act: set the armed sound's trim by arithmetic
@@ -2228,27 +2033,8 @@ local function handle_action(a)
         end
       end
 
-      -- Keep LIVE playback inside the edited frame: the loop's end-point rule
-      -- only reacts to a CROSSING, so an end handle dragged behind the rolling
-      -- playhead (or a start handle dragged ahead of it) would otherwise leave
-      -- audio sounding outside the span the handles claim to control. Pulled
-      -- to the start point the moment the edit strands it — while dragging the
-      -- start handle rightwards past the playhead this re-triggers each frame,
-      -- which usefully reads as scrubbing the start point.
-      --
-      -- Runs AFTER the commit (Codex, 2026-08-12): a refused store puts the
-      -- handles back to what the project holds, and enforcing against the
-      -- pre-rollback span would leave audio sounding outside the restored one.
-      -- The trim does the same thing for the same reason.
-      if state.preview.playing and state.preview.slot == "main"
-        and state.preview.sound_id == sel.id then
-        local s0, s1 = span.range(sel, state.preview.length)
-        local pos = state.preview.position
-        if s1 > 0 and (pos >= s1 or pos < s0) then
-          preview.seek(s0)
-          state.preview.position = s0
-        end
-      end
+      -- Persistence may have restored the saved span after a refused edit.
+      playback.span_changed(sel)
     end
   elseif a.type == "add_match_preset" then
     if #state.match.presets < match.PRESET_MAX then
@@ -2301,9 +2087,7 @@ local function handle_action(a)
         if s then
           local _, msg, pid = pins_service.pin_sound(state, s)
           state.status = msg
-          if pid and analysis.pin_needs(find_sound(pid)) then
-            analysis_service.set_progress_view(state, a.progress_view or "browse")
-          end
+          if pid then analysis_service.added(state, find_sound(pid), a.progress_view or "browse") end
           first_pin = first_pin or pid
         end
       end
@@ -2364,12 +2148,8 @@ local function handle_action(a)
     -- imported into the library (Uncategorised) and pinned to this project in
     -- one motion instead of two.
     --
-    -- Refused OUTRIGHT when pinning can't happen (unsaved project, damaged pin
-    -- data) — checked BEFORE anything is imported. Importing first would
-    -- strand a half-done drop: the sounds land in the library but stay
-    -- unpinned, and retrying the same drop after fixing things would dedup to
-    -- "already in library" and never pin them. All-or-nothing keeps the retry
-    -- honest: fix the cause, drop again, everything happens.
+    -- Check the project before importing. Each completed source, including an
+    -- existing Library duplicate, is then pinned in the same background job.
     local refusal = pins_service.can_pin(state)
     if refusal then
       state.status = refusal .. " Nothing was imported."
@@ -2377,43 +2157,7 @@ local function handle_action(a)
         reaper_api.message(state.status, "yb-Reference · Save Project First")
       end
     else
-      -- Dropped files the library ALREADY holds never come back from the import
-      -- (dedup skips them), so resolve them up front and pin the existing
-      -- records too: dropping on the reference row means "I want this pinned",
-      -- whether or not the library knows the file. This is also what keeps a
-      -- RETRY honest — if a pin failed last time, the same drop now dedups to
-      -- "already in library" and still pins it (Codex, 2026-07-28 review).
-      local existing = {}
-      for _, src in ipairs(a.paths) do
-        local dup = importer.find_duplicate(state.library,
-          importer.basename(src), reaper_api.file_size(src))
-        if dup then existing[#existing + 1] = dup end
-      end
-      local before = #state.library.sounds
-      do_import(a.paths, nil, "main")
-      -- The FIRST pin this drop produces arms itself (user's call, 2026-08-07:
-      -- dropping on the Reference View means "I want to hear this"). First, not
-      -- last, so a multi-file drop arms the one at the top of what arrived
-      -- rather than whichever happened to import last.
-      local first_pin
-      for _, s in ipairs(existing) do
-        -- Third return = the pin it already has; only a REAL refusal is news.
-        local ok, msg, pid = pins_service.pin_sound(state, s)
-        if not ok and not pid then state.status = msg end
-        if pid and analysis.pin_needs(find_sound(pid)) then
-          analysis_service.set_progress_view(state, "main")
-        end
-        first_pin = first_pin or pid
-      end
-      for i = before + 1, #state.library.sounds do
-        local ok, msg, pid = pins_service.pin_sound(state, state.library.sounds[i])
-        if not ok then state.status = msg end
-        first_pin = first_pin or pid
-      end
-      if first_pin then
-        select_sound(first_pin, true)
-        walkthrough.event(state.walkthrough, "sound_pinned")
-      end
+      do_import(a.paths, nil, "main", true)
     end
   elseif a.type == "walkthrough" then
     -- Card presses, plus Settings' Show row. "next" covers Start and Done too:
@@ -2426,6 +2170,7 @@ local function handle_action(a)
       walkthrough.next(state.walkthrough)
     elseif a.ev == "show" then
       walkthrough.begin_stops(state.walkthrough)
+      state.browser_open = true
     else
       -- Anything else is a REAL-ACTION report the card noticed itself (today:
       -- the match window standing open) — it goes to the state machine as the
@@ -2460,8 +2205,11 @@ local function handle_action(a)
     app.request_ui_scale(state.ui_scale, next_scale)
     state.ui_scale = theme.set_scale(next_scale)
     reaper_api.set_ui_scale(state.ui_scale)
+  elseif a.type == "set_ui_animations" then
+    state.ui_animations = theme.set_animations(a.enabled)
+    reaper_api.set_ui_animations(state.ui_animations)
   elseif a.type == "set_accent_colour" then
-    state.accent_colour = theme.set_accent(a.colour)
+    state.accent_colour = theme.set_accent(a.colour, true, reaper.ImGui_GetTime(ctx))
     reaper_api.set_accent_colour(state.accent_colour)
   elseif a.type == "start_update" then
     -- Settings' Update-now button. The updater owns everything from here:
@@ -2496,14 +2244,7 @@ local function handle_action(a)
   elseif a.type == "set_master" then
     -- Master preview volume is an app pref. Live audio now; save to ExtState only
     -- on release (a.commit) — never write ExtState every drag frame.
-    state.master_db = a.db
-    -- The trim on top is the one recorded when this playback STARTED, not whatever
-    -- the sound record says now: a browse audition of a trimmed sound is running at
-    -- no trim, so looking the record up again (as this did before 2026-07-30) would
-    -- re-apply a trim that isn't in force.
-    if state.preview.playing then
-      preview.set_volume_db(state.preview.trim_db + state.master_db)
-    end
+    playback.set_master(a.db)
     if a.commit then reaper_api.set_master_db(a.db) end
   elseif a.type == "add_category" then
     try(function() categories.add(state.library, a.name) end, refresh_view, "yb-Reference · Add Category")
@@ -2555,7 +2296,9 @@ end
 -- added here (and to the window-closed branch at the end of the loop) as well.
 reaper_api.mark_action_running(CMD_ID, true)
 reaper.atexit(function()
-  reference.cleanup(); preview.stop(); peaks.cancel(); wave_detail.close(); loudness.cancel()
+  reference.cleanup(); pcall(monitoring_filter.shutdown)
+  if import_job then import_job:cancel() end
+  preview.stop(); peaks.cancel(); wave_detail.close(); loudness.cancel()
   reaper_api.cancel_folder_picker()
   dragout.hide_tag() -- a drag in flight when the script is closed leaves no label behind
   -- ...and no throwaway item behind either. This runs on every way the script
@@ -2580,6 +2323,7 @@ local walk_pos_was = nil
 -- REAPER accepts the command but leaves the old loop alive, turn the status
 -- into a manual fallback instead of claiming that reopening is still underway.
 local update_restart_fallback_at = nil
+local monitor_filter_phase_was = state.monitor_filter.system.phase
 
 local function loop()
   -- The modern Windows folder dialog runs in a helper process. Polling its tiny
@@ -2593,22 +2337,7 @@ local function loop()
     reaper_api.message(delete_error, "yb-Reference · Delete Sounds")
   end
 
-  -- Reference mode is shown from the project in front: another tab may own the
-  -- one live latch, while this tab's L button stays off and usable. A queued
-  -- project restoring here never disturbs a different live owner.
-  local ref = state.reference
-  local was_current_latched = ref.latched
-  local ref_view, ref_recovery, ref_urgent, ref_event = reference.refresh()
-  ref.latched, ref.live, ref.pending = ref_view.latched, ref_view.live, ref_view.pending
-  ref.owner_name, ref.queued_count = ref_view.owner_name, ref_view.queued_count
-
-  -- Leaving the live owner's tab stops its reference preview. The project stays
-  -- muted and latched; returning to it can resume from its own remembered pin.
-  -- A closed owner also ends the live slot and becomes a queued recovery.
-  if (was_current_latched and not ref.latched) or ref_event.live_ended then
-    holders.stop_playback(state, "main")
-    ref.active, ref.sound_id, ref.failed_id = false, nil, nil
-  end
+  playback.refresh_reference()
 
   -- "This Project" follows the project in front of the user: switching tabs,
   -- opening a project, or Save As re-reads that project's pins (two cheap REAPER
@@ -2619,22 +2348,7 @@ local function loop()
     pins_warning = apply_pins_refresh(pin_refresh)
   end
 
-  if ref_recovery then
-    state.status = ref_recovery
-    if ref_urgent and ref_recovery ~= reference_alerted then
-      reaper_api.message(ref_recovery, "yb-Reference · Reference Mode Needs Attention")
-      reference_alerted = ref_recovery
-    end
-  elseif pins_warning then
-    state.status = pins_warning
-  end
-  if not ref_urgent then reference_alerted = nil end
-
-  -- The hotkey companion action leaves a note rather than acting itself, so exactly
-  -- one script owns the latch. Pick it up here and treat it as the same intent the
-  -- REF button reports.
-  if reference.take_toggle_request() then handle_action({ type = "toggle_reference" }) end
-  sync_reference()
+  playback.sync_reference(pins_warning)
 
   -- A list ordered BY the pin column has to follow the pins, which live outside
   -- the library — pinning, unpinning and switching project all change the order
@@ -2645,96 +2359,22 @@ local function loop()
     refresh_view()
   end
 
-  -- Advance playback bookkeeping before drawing so the waveform shows this frame's
-  -- position. poll() reports a non-looping preview that just ended on its own.
-  local preview_ended = preview.poll()
-  if state.preview.playing then
-    if preview_ended then
-      state.preview.playing = false
-      state.preview.sound_id = nil
-      state.preview.slot = nil
-      state.preview.trim_db = 0
-      state.preview.channels = 0
-      state.preview.position = 0
-      -- NOT `preview.paused`: this is whatever the ONE shared preview was just
-      -- sounding (either slot's), which is independent of the per-slot pause
-      -- memories (see the preview state init comment) — a sound running out is
-      -- not a reason for either window to lose the place it parked.
-      -- If that was the transport-driven reference dying on us, forget it — and mark
-      -- the sound failed. A reference always loops, so a healthy one never ends on
-      -- its own: this death is abnormal (decoder or device trouble), and without the
-      -- mark sync_reference would reopen the file every frame for as long as the
-      -- transport rolls. Marked, it is retried on the next transport stop/start or
-      -- re-selection instead of sixty times a second.
-      if state.reference.active then
-        state.reference.failed_id = state.reference.sound_id
-      end
-      state.reference.active = false
-      state.reference.sound_id = nil
-    else
-      local pos = preview.position()
-      if pos then
-        local prev = state.preview.position
-        state.preview.position = pos
-        -- The end point, enforced here because the engine has no "stop at"
-        -- (loudness tools, 2026-08-06): the Reference View's playback runs
-        -- start -> end. Crossing-only — playback the user started PAST the
-        -- end point plays out to the file's edge rather than being cut the
-        -- instant it starts (their seek was explicit).
-        if state.preview.slot == "main" or state.preview.slot == "picker" then
-          local s = find_sound(state.preview.sound_id)
-          if s and (s.span_start or s.span_end) then
-            local s0, s1 = span.range(s, state.preview.length)
-            if s1 > 0 and prev < s1 and pos >= s1 then
-              -- References always loop; otherwise follow the loop toggle.
-              if state.reference.active or state.loop then
-                preview.seek(s0)
-                state.preview.position = s0
-              else
-                -- End only the playback surface that owns this pin's preview.
-                holders.stop_playback(state, state.preview.slot)
-              end
-            elseif s0 > 0 and pos < prev and pos < s0 then
-              -- The engine's own loop wrapped to the file's start (an end
-              -- point at the file's edge never trips the crossing above):
-              -- pull the new pass up to the start point.
-              preview.seek(s0)
-              state.preview.position = s0
-            end
-          end
-        end
-      end
+  playback.advance()
+
+  -- Playback transitions are settled before requesting a fresh analysis window.
+  local filter_view = spectrum.tick(state)
+  if filter_view.phase ~= monitor_filter_phase_was then
+    if filter_view.phase ~= "ready" and filter_view.phase ~= "settling" then
+      state.status = filter_view.message
     end
+    monitor_filter_phase_was = filter_view.phase
   end
 
-  -- Build a waveform a slice per frame (never blocks); deliver_wave hands the
-  -- finished envelope to every slot that wants that sound.
-  state.wave_loading = peaks.pending()
-  deliver_wave(peaks.advance())
-
-  -- Hand out the next build. peaks owns exactly ONE job (it holds a live PCM
-  -- source across frames), so requesting is done HERE rather than at the moment
-  -- a selection changes: with two independent selections, whichever asked last
-  -- would cancel the other's job and that slot would then wait forever for an
-  -- envelope nobody was building. Queuing here, one at a time, means both slots
-  -- always converge. The "asked" mark (holders) stops a file that won't open from
-  -- being retried every frame; a deliberate re-pick, or a release, clears it.
-  if not peaks.pending() then
-    local want, path, slot
-    if state.selected and state.waveform.sound_id ~= state.selected_id then
-      want, path, slot = state.selected_id, sound_path(state.selected), "main"
-    elseif state.browse and state.browse_waveform.sound_id ~= state.browse_id then
-      want, path, slot = state.browse_id, sound_path(state.browse), "browse"
-    end
-    if want and holders.wave_asked(slot) ~= want then
-      holders.mark_wave(slot, want)
-      peaks.request(want, path)
-    end
-  end
+  wave.step(state, sound_path)
 
   -- Measure one blocking pass per update. A new job publishes its progress for
   -- drawing first and runs its first pass on the following update.
-  step_analysis()
+  if not import_job then step_analysis() end
 
   -- The update feature's heartbeat. During an update it makes no ReaPack calls:
   -- SWS watches the native transaction report, then asks this defer-level owner
@@ -2824,16 +2464,6 @@ local function loop()
       state.browser_open and "browser_opened" or "browser_closed")
   end
 
-  -- The walkthrough's stand-in numbers, decided ONCE here and read as a plain
-  -- flag by the match window (core/demo.lua owns the conditions: the finale,
-  -- and a user with nothing of their own).
-  -- Derived per frame rather than remembered, so the moment a real sound lands
-  -- the demo is gone with it.
-  state.demo = demo.active(state.walkthrough,
-    #state.library.sounds > 0,
-    (state.pins and state.pins.data and #state.pins.data.pins or 0) > 0,
-    state.selected ~= nil)
-
   -- ReaImGui reports a false mouse release when an OS file drag crosses between
   -- our two native windows. js_ReaScriptAPI supplies the physical button truth;
   -- app.frame uses it only if the normal target fails to hover. Polling cannot
@@ -2845,14 +2475,15 @@ local function loop()
   end
   state.mouse_modifiers = reaper_api.mouse_modifiers()
   local open, action, over_target, give_focus, forward_keys, feedback_visible,
-    wave_id, wave_cols, picker_owner = app.frame(
+    wave_id, wave_cols, picker_owner, browse_wave_id, browse_wave_cols = app.frame(
     ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   picker_preview.set_context(state, picker_owner)
-  if action then handle_action(action) end
+  actions.dispatch(action, handle_action)
   if wave_id and wave_id == state.selected_id then
     state.wave_cols = wave_cols
-    refresh_wave_detail()
+    wave.refresh_detail(state, sound_path)
   end
+  wave.refresh_browse_detail(state, sound_path, browse_wave_id, browse_wave_cols)
 
   -- The pane's own fixed red line is enough while the user can see it. In every
   -- other case, use REAPER's native message box: feedback failure is an outcome
@@ -2878,7 +2509,7 @@ local function loop()
   if state.walkthrough.active then
     if walk_pos_was ~= state.walkthrough.pos then
       local cur = walkthrough.current(state.walkthrough)
-      if walk_pos_was and type(cur) == "table" then
+      if type(cur) == "table" then
         if cur.window == "main" and state.browser_open then
           close_browser()
         elseif cur.window == "browser" and not state.browser_open then
@@ -2929,12 +2560,15 @@ local function loop()
     dragout.forget_arrange()
   end
   if open then
+    step_import()
     reaper.defer(loop)
   else
     -- Same order and the same reasoning as the atexit handler above (which is
     -- also why this isn't a holders.release): the un-mute leads, everything else
     -- follows.
     reference.cleanup() -- window closed: never leave the project muted behind us
+    pcall(monitoring_filter.shutdown) -- return Monitoring FX to exact dry immediately
+    if import_job then import_job:cancel() end
     preview.stop()      -- then stop any sound still playing
     peaks.cancel()      -- and free any half-finished waveform build
     wave_detail.close() -- plus the selected waveform's visible-range reader

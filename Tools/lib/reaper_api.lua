@@ -140,6 +140,7 @@ local EXT_MASTER  = "master_db"
 local EXT_LOUD    = "loud_unit"
 local EXT_BROWSER_GEOM = "browser_geom"
 local EXT_WAVE_H  = "browser_wave_h"
+local EXT_REFERENCE_STACK_SPLIT = "reference_stack_split"
 local EXT_MATCH_PRESETS = "match_presets"
 local EXT_MATCH_TARGET  = "match_target"
 local EXT_SEEN_VERSION  = "seen_version"
@@ -148,6 +149,7 @@ local EXT_WALKTHROUGH   = "walkthrough_seen"
 local EXT_COL_GEN       = "col_gen"
 local EXT_UI_SCALE      = "ui_scale"
 local EXT_ACCENT_COLOUR = "accent_colour"
+local EXT_UI_ANIMATIONS = "ui_animations"
 local EXT_OPEN_LIBRARY  = "open_library_on_startup"
 local EXT_BROWSER_VIEW  = "browser_view"
 local EXT_BROWSER_CATEGORIES = "browser_categories"
@@ -410,6 +412,14 @@ function reaper_api.set_accent_colour(colour)
   reaper.SetExtState(EXT_SECTION, EXT_ACCENT_COLOUR, tostring(colour), true)
 end
 
+function reaper_api.get_ui_animations()
+  return reaper.GetExtState(EXT_SECTION, EXT_UI_ANIMATIONS) ~= "0"
+end
+
+function reaper_api.set_ui_animations(enabled)
+  reaper.SetExtState(EXT_SECTION, EXT_UI_ANIMATIONS, enabled and "1" or "0", true)
+end
+
 -- Whether the separate Library window should open with the tool. Off is both
 -- the first-run default and the safe interpretation of any unknown value.
 function reaper_api.get_open_library_on_startup()
@@ -608,6 +618,49 @@ function reaper_api.set_browser_wave_h(h)
   else
     reaper.DeleteExtState(EXT_SECTION, EXT_WAVE_H, true)
   end
+end
+
+-- The Reference View's vertical divider as a share of its available height.
+-- This is a display preference, deliberately separate from the spectrum JSON so
+-- copies with different spectrum preference formats can continue to coexist.
+local function valid_reference_stack_split(value)
+  return type(value) == "number" and value == value
+    and math.abs(value) < math.huge and value >= 0.2 and value <= 0.8
+end
+
+function reaper_api.get_reference_stack_split()
+  local value = tonumber(reaper.GetExtState(EXT_SECTION, EXT_REFERENCE_STACK_SPLIT))
+  return valid_reference_stack_split(value) and value or 0.4
+end
+
+function reaper_api.set_reference_stack_split(value)
+  if not valid_reference_stack_split(value) then return false end
+  reaper.SetExtState(EXT_SECTION, EXT_REFERENCE_STACK_SPLIT, tostring(value), true)
+  return true
+end
+
+-- Separate scalar preferences survive visits to older development copies, which
+-- save their own spectrum JSON without knowing about Reference View layout.
+local reference_layout_values = {
+  mode = { auto = true, horizontal = true, vertical = true },
+  horizontal_first = { waveform = true, spectrum = true },
+  vertical_first = { waveform = true, spectrum = true },
+}
+
+function reaper_api.get_reference_layout()
+  local prefs = {}
+  for key, allowed in pairs(reference_layout_values) do
+    local value = reaper.GetExtState(EXT_SECTION, "reference_layout_" .. key)
+    prefs[key] = allowed[value] and value or (key == "mode" and "auto" or "waveform")
+  end
+  return prefs
+end
+
+function reaper_api.set_reference_layout(key, value)
+  local allowed = reference_layout_values[key]
+  if not allowed or not allowed[value] then return false end
+  reaper.SetExtState(EXT_SECTION, "reference_layout_" .. key, value, true)
+  return true
 end
 
 -- How many times the sound table's columns have been reset to their defaults.
@@ -820,7 +873,7 @@ end
 -- fresh instance from disk, with no "already running" prompt? REAPER 7's
 -- set_action_options is the mechanism, live-proven by the update harness's
 -- restart probe (yb-reapack-test tests/10_restart_probe.lua, 2026-08-05).
-function reaper_api.can_restart()
+local function can_restart()
   return reaper.set_action_options ~= nil and reaper.Main_OnCommand ~= nil
 end
 
@@ -833,7 +886,7 @@ end
 -- probe proved. Returns false when the mechanism or command id is missing, so
 -- the caller can show its manual fallback.
 function reaper_api.restart_self(cmd_id)
-  if not reaper_api.can_restart() then return false end
+  if not can_restart() then return false end
   if not cmd_id or cmd_id == 0 then return false end
   reaper.set_action_options(1 | 2)
   reaper.Main_OnCommand(cmd_id, 0)
@@ -879,16 +932,16 @@ function reaper_api.file_size(path)
 end
 
 -- Copy a file byte-for-byte. Streamed in chunks so a large sound doesn't load
--- whole into memory. Returns true, or false + message. On any failure the partial
--- destination is removed so a crash mid-copy can't leave a truncated sound the
--- record would later point at (the record is only written AFTER a clean copy).
+-- whole into memory. Returns true, or false + message. Partial files have a
+-- non-audio extension and are removed on failure or cancellation. After a hard
+-- crash they may remain, but cannot be mistaken for a completed audio file.
 --
 -- Refuses an existing destination outright. Every caller has already chosen a
 -- collision-free name, so anything found here is a name the collision check could
 -- not see — two names Windows folds to the same file (its Unicode case rules go
 -- far beyond Lua's byte-wise lower()) — and opening it "wb" would empty the
 -- victim before a single byte arrived. A refusal loses nothing.
-function reaper_api.copy_file(src, dest)
+function reaper_api.copy_file(src, dest, pause)
   if reaper_api.path_exists(dest) then
     return false, "Couldn't copy the file because a file that Windows considers the same name " ..
       "already exists at the destination: " .. dest .. "."
@@ -897,36 +950,64 @@ function reaper_api.copy_file(src, dest)
   if not inp then
     return false, product_error.with_details("Couldn't read the source file.", ierr)
   end
-  local out, oerr = io.open(dest, "wb")
+  -- A suspended or interrupted copy must never look like finished audio.
+  local partial = dest .. ".yb-part"
+  local suffix = 1
+  while reaper_api.path_exists(partial) do
+    suffix = suffix + 1
+    partial = dest .. ".yb-part-" .. suffix
+  end
+  local out, oerr = io.open(partial, "wb")
   if not out then
     inp:close()
     return false, product_error.with_details("Couldn't create the destination file.", oerr)
   end
+  -- Lua closes this guard on return, error, or coroutine.close at shutdown.
+  local handles <close> = setmetatable({}, { __close = function()
+    if inp then inp:close() end
+    if out then out:close() end
+    os.remove(partial)
+  end })
   while true do
     -- A read returns nil at the end of the file AND on a read error, so the two
     -- have to be told apart: treating a failed read as "finished" would leave a
     -- truncated copy that every later step reports as a success.
-    local chunk, rerr = inp:read(1024 * 1024)
+    local chunk, rerr = inp:read(256 * 1024)
     if not chunk then
       if rerr then
-        inp:close(); out:close(); os.remove(dest)
         return false, product_error.with_details("Couldn't finish reading the source file.", rerr)
       end
       break
     end
     local ok, werr = out:write(chunk)
     if not ok then
-      inp:close(); out:close(); os.remove(dest)
       return false, product_error.with_details("Couldn't write the destination file.", werr)
     end
+    if pause then pause() end
   end
-  inp:close()
+  inp:close(); inp = nil
   local closed, cerr = out:close() -- close is where a full disk actually surfaces
+  out = nil
   if not closed then
-    os.remove(dest)
     return false, product_error.with_details(
       "Couldn't finish writing the destination file. The drive may be full.", cerr)
   end
+  -- A just-closed file can remain unavailable to rename for hundreds of
+  -- milliseconds on Windows. Retry on a real-time schedule: coroutine yields may
+  -- otherwise all be resumed inside one frame. The UI stays responsive while a
+  -- temporary filesystem hold clears, and a permanent refusal still surfaces.
+  local promoted, perr = reaper_api.move_file(partial, dest)
+  if not promoted and pause then
+    local deadline = reaper_api.now() + 2
+    local next_attempt = reaper_api.now() + 0.05
+    while not promoted and reaper_api.now() < deadline do
+      while reaper_api.now() < next_attempt do pause() end
+      promoted, perr = reaper_api.move_file(partial, dest)
+      if promoted or reaper_api.path_exists(dest) then break end
+      next_attempt = reaper_api.now() + 0.05
+    end
+  end
+  if not promoted then return false, perr end
   return true
 end
 
@@ -989,7 +1070,7 @@ end
 
 -- Every file directly inside a folder (non-recursive, no sub-folders). Returns
 -- filenames, not full paths.
-function reaper_api.list_files(dir)
+function reaper_api.list_files(dir, pause)
   local out = {}
   local i = 0
   while true do
@@ -997,14 +1078,15 @@ function reaper_api.list_files(dir)
     if not name then break end
     out[#out + 1] = name
     i = i + 1
+    if pause and i % 256 == 0 then pause() end
   end
   return out
 end
 
 -- Just the audio ones (the library keeps sounds flat in its folder).
-function reaper_api.list_audio_files(dir)
+function reaper_api.list_audio_files(dir, pause)
   local out = {}
-  for _, name in ipairs(reaper_api.list_files(dir)) do
+  for _, name in ipairs(reaper_api.list_files(dir, pause)) do
     if reaper_api.is_audio_file(name) then out[#out + 1] = name end
   end
   return out

@@ -144,11 +144,13 @@ end
 -- first-ever run: it returns NOTHING, deliberately — a new user has no history
 -- to catch up on, and greeting them with the notes for versions they never had
 -- would read as a fault.
-function changelog.since(releases, seen)
+-- `through` lets development copies keep future drafts out of automatic notices.
+function changelog.since(releases, seen, through)
   local out = {}
   if type(seen) ~= "string" or seen == "" then return out end
   for _, r in ipairs(releases or {}) do
-    if r.version and update_check.compare(r.version, seen) > 0 then
+    if r.version and update_check.compare(r.version, seen) > 0
+        and (not through or update_check.compare(r.version, through) <= 0) then
       out[#out + 1] = r
     end
   end
@@ -204,8 +206,8 @@ end
 
 -- One release as structured plain text for ReaPack's transaction report.
 -- ReaPack adds the version, author and date itself, so this contains only the
--- overview, headings and entries. Detail lines stay in the full release notes; the
--- compact native report gets the short first line of each entry.
+-- overview, headings and entries. Keep detail lines because the catalogue also
+-- supplies the complete text users can read before installing an update.
 function changelog.reapack_lines(release, width)
   if not release then return {} end
 
@@ -233,11 +235,54 @@ function changelog.reapack_lines(release, width)
         for i, line in ipairs(changelog.wrap(text, entry_width)) do
           out[#out + 1] = (i == 1 and (indent .. "• ") or (indent .. indent)) .. line
         end
+        if e.detail then
+          -- A deeper indent distinguishes details from wrapped bullet text.
+          for _, line in ipairs(changelog.wrap(e.detail, math.max(1, entry_width - 2))) do
+            out[#out + 1] = indent .. indent .. indent .. line
+          end
+        end
       end
     end
   end
 
   return out
+end
+
+-- Reconstruct the catalogue's wrapped plain text for the shared notes renderer.
+-- Continuations are joined so the window, rather than the export width, wraps them.
+function changelog.from_catalog(record)
+  local release = { version = record.version, date = record.date, groups = {} }
+  local group, entry
+  for line in ((record.text or "") .. "\n"):gmatch("(.-)\r?\n") do
+    local normalized = line:gsub("\u{00A0}", " ")
+    local leading, clean = normalized:match("^(%s*)(.-)%s*$")
+    if clean ~= "" then
+      local heading
+      for _, name in ipairs(changelog.GROUP_ORDER) do
+        if #leading == 0 and clean:lower() == name:lower() then heading = name; break end
+      end
+      local bullet = clean:match("^•%s*(.*)$") or clean:match("^[%-%*]%s+(.*)$")
+      if entry and #leading >= 6 then
+        entry.detail = entry.detail and (entry.detail .. " " .. clean) or clean
+      elseif heading then
+        group = { name = heading, entries = {} }
+        release.groups[#release.groups + 1] = group
+        entry = nil
+      elseif bullet and group then
+        local area, body = bullet:match("^([^:]+):%s*(.*)$")
+        entry = { area = area, text = body or bullet }
+        group.entries[#group.entries + 1] = entry
+      elseif entry then
+        entry.text = entry.text .. " " .. clean
+      elseif group then
+        entry = { text = clean }
+        group.entries[#group.entries + 1] = entry
+      else
+        release.overview = release.overview and (release.overview .. " " .. clean) or clean
+      end
+    end
+  end
+  return release
 end
 
 return changelog

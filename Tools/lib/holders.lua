@@ -26,6 +26,7 @@ local peaks    = require("peaks")
 local loudness = require("loudness")
 local wave_detail = require("wave_detail")
 local copies   = require("analysis_copies")
+local analysis_service = require("analysis_service")
 
 local holders = {}
 
@@ -326,7 +327,7 @@ end
 function holders.restore(state, token, path_of)
   if not token then return end
   wave_asked.main, wave_asked.browse = token.wave.main, token.wave.browse
-  if token.measuring then table.insert(state.analysis_queue, 1, token.measuring) end
+  if token.measuring then analysis_service.restore(state, token.measuring) end
   if token.drawing then
     local path = path_of and path_of(token.drawing)
     if path then peaks.request(token.drawing, path) end

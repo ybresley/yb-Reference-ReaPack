@@ -38,8 +38,6 @@ local settings = {}
 -- button — cosmetic, so the row still draws rather than being dropped.
 local HAS_ALIGN_TEXT = reaper.ImGui_AlignTextToFramePadding ~= nil
 local HAS_CHILD_PAD  = reaper.ImGui_ChildFlags_AlwaysUseWindowPadding ~= nil
-local HAS_GROUP_CHILD = reaper.ImGui_ChildFlags_AutoResizeY ~= nil
-  and reaper.ImGui_Col_Border ~= nil
 local HAS_WRAP_POS   = reaper.ImGui_PushTextWrapPos ~= nil and reaper.ImGui_PopTextWrapPos ~= nil
 local HAS_ESCAPE     = reaper.ImGui_IsKeyPressed ~= nil and reaper.ImGui_Key_Escape ~= nil
 -- The Help composer's conveniences, each optional: without multiline the box
@@ -143,48 +141,15 @@ end
 -- A category heading sits outside its filled subject panel. This keeps the
 -- navigation name, category and individual setting labels in three distinct
 -- places without needing a third text size.
-local function begin_settings_group(ctx, id, title, fill_height)
-  if not first_group then
-    reaper.ImGui_SetCursorPosY(ctx,
-      reaper.ImGui_GetCursorPosY(ctx) + M.ITEM_SPACING_Y)
-  end
+local function begin_settings_group(ctx, id, title, fill_height, inset)
+  local opened, child = widgets.begin_settings_group(ctx, "settings_group_" .. id,
+    title, first_group, fill_height, inset)
   first_group = false
-
-  local bold = theme.push_bold_font(ctx)
-  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, title:upper())
-  if bold then reaper.ImGui_PopFont(ctx) end
-
-  if not HAS_GROUP_CHILD then
-    first_row = true
-    return true, false
-  end
-
-  local child_flags = fill_height and 0 or reaper.ImGui_ChildFlags_AutoResizeY()
-  if reaper.ImGui_ChildFlags_Borders then
-    child_flags = child_flags | reaper.ImGui_ChildFlags_Borders()
-  elseif HAS_CHILD_PAD then
-    child_flags = child_flags | reaper.ImGui_ChildFlags_AlwaysUseWindowPadding()
-  end
-
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), T.SET_GROUP_BG)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.STROKE_SECONDARY)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), M.WINDOW_PAD, M.WINDOW_PAD)
-  local win_flags = reaper.ImGui_WindowFlags_NoScrollbar()
-    | reaper.ImGui_WindowFlags_NoScrollWithMouse()
-  local opened = reaper.ImGui_BeginChild(ctx, "settings_group_" .. id, 0, 0,
-    child_flags, win_flags)
-  reaper.ImGui_PopStyleVar(ctx)
-  reaper.ImGui_PopStyleColor(ctx, 2)
-
-  if opened then
-    first_row = true
-  end
-  return opened, true
+  if opened then first_row = true end
+  return opened, child
 end
 
-local function end_settings_group(ctx, child)
-  if child then reaper.ImGui_EndChild(ctx) end
-end
+local end_settings_group = widgets.end_settings_group
 
 local function row(ctx, label, value, opts)
   opts = opts or {}
@@ -351,7 +316,9 @@ local function row(ctx, label, value, opts)
     else
       reaper.ImGui_SameLine(ctx)
     end
-    clicked = widgets.switch(ctx, "settings_" .. label, opts.switch, opts.switch_tip) or clicked
+    clicked = widgets.switch(ctx, "settings_" .. label,
+      opts.switch, opts.switch_tip,
+      nil, opts.switch_owns_disabled_motion) or clicked
   end
 
   -- The lines under the row sit at the NAME's own left edge, taking the full
@@ -521,9 +488,12 @@ end
 -- One fixed-width Settings button with a colour chip and hand-painted label.
 -- The whole face is clickable; the chip is not a second tiny target.
 local function accent_button(ctx, option, selected, width)
-  if selected then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.ACCENT) end
+  local pushed = widgets.push_soft_active(ctx, selected)
   local clicked = reaper.ImGui_Button(ctx, "##accent_" .. option.id, width or M.SET_ACTION_W)
-  if selected then reaper.ImGui_PopStyleColor(ctx) end
+  widgets.pop_soft_active(ctx, pushed)
+
+  widgets.button_bloom(ctx, "accent_" .. option.id, selected or clicked,
+    option.color, clicked, true)
 
   local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
   local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
@@ -537,8 +507,157 @@ local function accent_button(ctx, option, selected, width)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
   reaper.ImGui_DrawList_AddRectFilled(dl, sx, sy, sx + chip, sy + chip, option.color, 3)
   reaper.ImGui_DrawList_AddText(dl, sx + chip + gap, ty,
-    selected and T.TEXT_PRIMARY or T.TEXT_SECONDARY, option.label)
+    selected and T.ACCENT_HOVER or T.TEXT_SECONDARY, option.label)
   return clicked
+end
+
+local REFERENCE_MODES = {
+  { button = "Auto##reference_mode_auto", value = "auto" },
+  { button = "Side by Side##reference_mode_horizontal", value = "horizontal" },
+  { button = "Stacked##reference_mode_vertical", value = "vertical" },
+}
+
+local function selected_button(ctx, label, selected, width)
+  local pushed = widgets.push_soft_active(ctx, selected)
+  if selected then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER) end
+  local clicked = reaper.ImGui_Button(ctx, label, width)
+  if selected then reaper.ImGui_PopStyleColor(ctx) end
+  widgets.pop_soft_active(ctx, pushed)
+  return clicked
+end
+
+local function paint_reference_icon(ctx, name, fallback, cx, cy, color)
+  if icons.paint_glyph(ctx, icon_font, name, cx, cy, color, M.ICON_FS) then return end
+  fallback(reaper.ImGui_GetWindowDrawList(ctx), cx, cy, color)
+end
+
+-- A pair of picture panes inside one stable button. Their actual left/right or
+-- top/bottom placement carries the meaning; tooltips identify each arrangement.
+local function reference_order_button(ctx, id, first, stacked, selected, width)
+  local height = reaper.ImGui_GetFrameHeight(ctx) * 2 + M.ITEM_SPACING_Y
+  local pushed = widgets.push_soft_active(ctx, selected)
+  local clicked = reaper.ImGui_Button(ctx, id, width, height)
+  widgets.pop_soft_active(ctx, pushed)
+
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local inset = M.FRAME_PAD_Y
+  x0, y0, x1, y1 = x0 + inset, y0 + inset, x1 - inset, y1 - inset
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  if not selected then
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, T.FILL_QUATERNARY)
+  end
+  local icon_color = selected and T.ACCENT_HOVER or T.TEXT_TERTIARY
+  reaper.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, T.STROKE_SECONDARY)
+
+  local first_x, first_y, second_x, second_y
+  if stacked then
+    local mid = math.floor((y0 + y1) * 0.5 + 0.5)
+    reaper.ImGui_DrawList_AddLine(dl, x0, mid, x1, mid, T.STROKE_SECONDARY)
+    first_x, first_y = (x0 + x1) * 0.5, (y0 + mid) * 0.5
+    second_x, second_y = first_x, (mid + y1) * 0.5
+  else
+    local mid = math.floor((x0 + x1) * 0.5 + 0.5)
+    reaper.ImGui_DrawList_AddLine(dl, mid, y0, mid, y1, T.STROKE_SECONDARY)
+    first_x, first_y = (x0 + mid) * 0.5, (y0 + y1) * 0.5
+    second_x, second_y = (mid + x1) * 0.5, first_y
+  end
+
+  local first_is_waveform = first == "waveform"
+  paint_reference_icon(ctx, first_is_waveform and "activity" or "chart-no-axes-column",
+    first_is_waveform and icons.draw_wave or icons.draw_spectrum,
+    first_x, first_y, icon_color)
+  paint_reference_icon(ctx, first_is_waveform and "chart-no-axes-column" or "activity",
+    first_is_waveform and icons.draw_spectrum or icons.draw_wave,
+    second_x, second_y, icon_color)
+  return clicked
+end
+
+local function reference_mode_note(mode)
+  if mode == "horizontal" then
+    return "Keeps panels side by side when enough room is available."
+  elseif mode == "vertical" then
+    return "Keeps panels stacked when enough room is available."
+  end
+  return "Auto adapts to the available width and height."
+end
+
+local function draw_reference_layout(ctx, state)
+  local action
+  local layout = state.reference_layout
+  local mode = layout and layout.mode or "auto"
+  local horizontal_first = layout and layout.horizontal_first or "waveform"
+  local vertical_first = layout and layout.vertical_first or "waveform"
+  local opened, child = begin_settings_group(ctx, "reference_view", "Reference View")
+  if opened then
+    begin_setting(ctx)
+    setting_label(ctx, "Waveform & Spectrum Layout")
+    local gap = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
+    local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+    local mode_w = (avail - gap * (#REFERENCE_MODES - 1)) / #REFERENCE_MODES
+    for i, option in ipairs(REFERENCE_MODES) do
+      if i > 1 then reaper.ImGui_SameLine(ctx) end
+      if selected_button(ctx, option.button, mode == option.value, mode_w) then
+        action = { type = "set_reference_layout", key = "mode", value = option.value }
+      end
+    end
+    setting_note(ctx, reference_mode_note(mode))
+
+    begin_setting(ctx)
+    local x0 = reaper.ImGui_GetCursorPosX(ctx)
+    local title_y = reaper.ImGui_GetCursorPosY(ctx)
+    local column_gap = M.ITEM_SPACING_X * 2
+    local column_w = (select(1, reaper.ImGui_GetContentRegionAvail(ctx)) - column_gap) * 0.5
+    local right_x = x0 + column_w + column_gap
+    local choice_w = (column_w - M.ITEM_SPACING_X) * 0.5
+
+    setting_label(ctx, "Side by Side Order")
+    local choices_y = reaper.ImGui_GetCursorPosY(ctx)
+    reaper.ImGui_SetCursorPos(ctx, right_x, title_y)
+    setting_label(ctx, "Stacked Order")
+    choices_y = math.max(choices_y, reaper.ImGui_GetCursorPosY(ctx))
+
+    reaper.ImGui_SetCursorPos(ctx, x0, choices_y)
+    if reference_order_button(ctx, "##reference_horizontal_waveform", "waveform", false,
+        horizontal_first == "waveform", choice_w) then
+      action = action or {
+        type = "set_reference_layout", key = "horizontal_first", value = "waveform",
+      }
+    end
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+      "Waveform on the left, spectrum on the right")
+    reaper.ImGui_SameLine(ctx)
+    if reference_order_button(ctx, "##reference_horizontal_spectrum", "spectrum", false,
+        horizontal_first == "spectrum", choice_w) then
+      action = action or {
+        type = "set_reference_layout", key = "horizontal_first", value = "spectrum",
+      }
+    end
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+      "Spectrum on the left, waveform on the right")
+
+    reaper.ImGui_SetCursorPos(ctx, right_x, choices_y)
+    if reference_order_button(ctx, "##reference_vertical_waveform", "waveform", true,
+        vertical_first == "waveform", choice_w) then
+      action = action or {
+        type = "set_reference_layout", key = "vertical_first", value = "waveform",
+      }
+    end
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+      "Waveform on top, spectrum below")
+    reaper.ImGui_SameLine(ctx)
+    if reference_order_button(ctx, "##reference_vertical_spectrum", "spectrum", true,
+        vertical_first == "spectrum", choice_w) then
+      action = action or {
+        type = "set_reference_layout", key = "vertical_first", value = "spectrum",
+      }
+    end
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+      "Spectrum on top, waveform below")
+
+    end_settings_group(ctx, child)
+  end
+  return action
 end
 
 local function draw_appearance(ctx, state)
@@ -562,7 +681,8 @@ local function draw_appearance(ctx, state)
       y0 + math.max(0, (content_h - control_h) * 0.5))
 
     local percent = theme.scale_percent(state.ui_scale)
-    local changed, commit = widgets.step_slider(ctx, "ui_size", percent, {
+    local changed, commit = widgets.step_slider(ctx,
+      "ui_size", percent, {
       min = theme.scale_percent(theme.MIN_SCALE),
       max = theme.scale_percent(theme.MAX_SCALE),
       step = math.floor(theme.SCALE_STEP * 100 + 0.5),
@@ -593,8 +713,19 @@ local function draw_appearance(ctx, state)
         action = action or { type = "set_accent_colour", colour = option.id }
       end
     end
+    if row(ctx, "Interface Animations", nil, {
+      switch = state.ui_animations ~= false,
+      switch_owns_disabled_motion = true,
+      far_right = true,
+      note = "Turn off decorative motion and glows to reduce resource use.",
+    }) then
+      action = action or { type = "set_ui_animations", enabled = state.ui_animations == false }
+    end
     end_settings_group(ctx, child)
   end
+
+  local reference_action = draw_reference_layout(ctx, state)
+  action = action or reference_action
 
   return action
 end
@@ -686,31 +817,20 @@ end
 -- No row at all while the changelog holds no releases (the beta ships with an
 -- empty one): a View button over nothing is a broken promise.
 local function notes_row(ctx, state)
-  if not state.changelog or #state.changelog == 0 then return end
-  -- The VALUE is the newest release and its date (2026-08-09, user-reported:
-  -- with no value the row was "Release notes …hole… [View]" — the one row in
-  -- the pane with nothing bridging the name and its far-edge control). The
-  -- Version row above shows what's INSTALLED in PRIMARY; this shows what the
-  -- notes run up to, quieter, so the two version strings can't be read as one.
-  local newest = state.changelog[1]
-  local vline = "v" .. (newest.version or "?")
-  if newest.date then
-    vline = vline .. "  \u{00B7}  " .. whatsnew.human_date(newest.date)
-  end
-  if row(ctx, "Latest Release", vline, {
+  if state.dev_copy and row(ctx, "Upcoming Release", "v" .. whatsnew.preview_version, {
+    button = "Preview",
+    button_tip = "Preview the upcoming feature demonstrations in this development copy.",
     value_color = T.TEXT_SECONDARY,
-    button = "View",
-    button_tip = "Every release, newest first. The same notes the update popup shows.",
   }) then
-    whatsnew.open_history()
+    whatsnew.open_preview()
   end
 end
 
-local function version_route(ctx, installed, available, button, button_tip)
+local function version_route(ctx, state, installed, available, button, button_tip)
   local x0 = reaper.ImGui_GetCursorPosX(ctx)
   local y0 = reaper.ImGui_GetCursorPosY(ctx)
   local avail_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-  local gap_x, gap_y = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing())
+  local gap_x = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing())
   local frame_h = reaper.ImGui_GetFrameHeight(ctx)
 
   if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
@@ -720,29 +840,43 @@ local function version_route(ctx, installed, available, button, button_tip)
   reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, "v" .. (installed or "?"))
   if bold then reaper.ImGui_PopFont(ctx) end
 
-  if available then
-    reaper.ImGui_SameLine(ctx, 0, gap_x)
-    reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, "\u{2192}")
-    reaper.ImGui_SameLine(ctx, 0, gap_x)
-    local available_x = reaper.ImGui_GetCursorPosX(ctx)
-    reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Available")
-    reaper.ImGui_SameLine(ctx, available_x + M.SET_VERSION_LABEL_W + gap_x)
-    bold = theme.push_bold_font(ctx)
-    reaper.ImGui_TextColored(ctx, T.ACCENT, "v" .. available)
-    if bold then reaper.ImGui_PopFont(ctx) end
+  reaper.ImGui_SetCursorPos(ctx, x0, y0 + frame_h + M.SET_VERSION_GAP)
+  if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
+  reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Available")
+  reaper.ImGui_SameLine(ctx, x0 + M.SET_VERSION_LABEL_W + gap_x)
+  bold = theme.push_bold_font(ctx)
+  reaper.ImGui_TextColored(ctx, available and T.ACCENT or T.TEXT_QUATERNARY,
+    available and ("v" .. available) or "—")
+  if bold then reaper.ImGui_PopFont(ctx) end
+
+  local remote = available and state.update and state.update.available_notes
+  local release = remote and remote[1] or nil
+  if not available then
+    for _, candidate in ipairs(state.changelog or {}) do
+      if candidate.version == installed then release = candidate; break end
+    end
+  end
+  reaper.ImGui_SameLine(ctx, x0 + avail_w - M.SET_ACTION_W * 2 - gap_x)
+  reaper.ImGui_BeginDisabled(ctx, release == nil)
+  local read_notes = reaper.ImGui_Button(ctx, "Release Notes", M.SET_ACTION_W)
+  reaper.ImGui_EndDisabled(ctx)
+  if read_notes and release then
+    if remote then whatsnew.open_available({ release })
+    else whatsnew.open_history({ release }) end
   end
 
-  local clicked = false
-  if button then
-    reaper.ImGui_SameLine(ctx, x0 + avail_w - M.SET_ACTION_W)
-    clicked = reaper.ImGui_Button(ctx, button, M.SET_ACTION_W)
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), button_tip)
-  end
+  reaper.ImGui_SameLine(ctx, x0 + avail_w - M.SET_ACTION_W)
+  reaper.ImGui_BeginDisabled(ctx, button == nil)
+  local clicked = reaper.ImGui_Button(ctx, button or "Update Now", M.SET_ACTION_W)
+  reaper.ImGui_EndDisabled(ctx)
+  tips.show(ctx, button_tip and reaper.ImGui_IsItemHovered(ctx), button_tip)
 
-  -- The route always reserves one control-height line. Installed-only states
-  -- therefore keep exactly the same spacing as states with an action button.
-  reaper.ImGui_SetCursorPos(ctx, x0, y0 + frame_h + gap_y)
-  return clicked
+  -- The buttons already advance to the next line, including when disabled.
+  -- Leave that item-established boundary intact when there is no message below.
+  if not release then
+    reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "No release notes are available for this version.")
+  end
+  return button ~= nil and clicked
 end
 
 local function version_message(ctx, text, color)
@@ -788,7 +922,6 @@ local function draw_version(ctx, state)
     status = "Updated. Close and reopen yb-Reference."
   else
     available = detected
-    note = "Checks once a day for a new version. It doesn't send project data."
     if u.pinned then
       status = "Paused. This tool is pinned in ReaPack."
       note = "Right-click it in Extensions \u{2192} ReaPack \u{2192} Browse packages and untick \"Pin to current version\"."
@@ -802,21 +935,23 @@ local function draw_version(ctx, state)
     end
   end
 
-  local clicked = version_route(ctx, installed, available, button, button_tip)
+  local clicked = version_route(ctx, state, installed, available, button, button_tip)
   version_message(ctx, status, T.TEXT_SECONDARY)
   version_message(ctx, note, T.TEXT_TERTIARY)
   return clicked and { type = "start_update" } or nil
 end
 
+local version_inset = {}
 local function draw_updates(ctx, state)
   local action
-  local opened, child = begin_settings_group(ctx, "updates_version", "Version")
+  version_inset.pad_x, version_inset.pad_y = M.SET_VERSION_PAD, M.SET_VERSION_PAD
+  local opened, child = begin_settings_group(ctx, "updates_version", "Version", nil, version_inset)
   if opened then
     action = draw_version(ctx, state)
     end_settings_group(ctx, child)
   end
 
-  if state.changelog and #state.changelog > 0 then
+  if state.dev_copy then
     opened, child = begin_settings_group(ctx, "updates_notes", "Release Notes")
     if opened then
       notes_row(ctx, state)
@@ -977,7 +1112,8 @@ local function draw_feedback(ctx, state)
   if fbui.last_phase ~= fbs.phase then
     if fbs.phase == "sent" then
       fbui.draft = ""
-    elseif fbs.phase == "failed" and HAS_CLIPBOARD and fbui.draft ~= "" then
+    elseif fbs.phase == "failed" and HAS_CLIPBOARD
+        and fbui.draft ~= "" then
       reaper.ImGui_SetClipboardText(ctx, fbui.draft)
     end
     fbui.last_phase = fbs.phase
@@ -1133,7 +1269,8 @@ local function draw_feedback(ctx, state)
     reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, fbs.address or "")
     local hov = reaper.ImGui_IsItemHovered(ctx)
     tips.show(ctx, hov and HAS_CLIPBOARD, "Click to copy the address.")
-    if HAS_CLIPBOARD and hov and reaper.ImGui_IsMouseClicked(ctx, 0) then
+    if HAS_CLIPBOARD and hov
+        and reaper.ImGui_IsMouseClicked(ctx, 0) then
       reaper.ImGui_SetClipboardText(ctx, fbs.address or "")
     end
   elseif fbs.phase == "sent" and fbui.draft == "" then
@@ -1232,7 +1369,7 @@ local function nav_row(ctx, id, name, selected, first)
   local _, y0 = reaper.ImGui_GetItemRectMin(ctx)
   local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  if selected then
+  if selected and not theme.motion.enabled then
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + M.SET_TAB_STRIPE_W, y1, T.ACCENT)
   end
 
@@ -1288,7 +1425,7 @@ local function nav_row(ctx, id, name, selected, first)
       fill = reaper.ImGui_GetStyleColor(ctx, reaper.ImGui_Col_Header())
     end
     if fill then reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, clip_x1, y0 + 2, fill) end
-    if selected then
+    if selected and not theme.motion.enabled then
       -- From `x0` on purpose: the clip trims it to the same left edge the
       -- stripe below is trimmed to, so the two columns of blue line up.
       reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + M.SET_TAB_STRIPE_W, y0 + 2, T.ACCENT)
@@ -1317,6 +1454,92 @@ local function nav_row(ctx, id, name, selected, first)
   if bold then reaper.ImGui_PopFont(ctx) end
 
   return clicked
+end
+
+-- Navigation and content share the selected Settings section.
+local function draw_panes(ctx, state, view, panes_h, id_suffix)
+  local action
+  id_suffix = id_suffix or ""
+
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), T.BG_CHROME)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 0, 0)
+  local nav_flags = HAS_CHILD_PAD and reaper.ImGui_ChildFlags_AlwaysUseWindowPadding() or 0
+  local nav_open = reaper.ImGui_BeginChild(ctx, "settingsnav" .. id_suffix,
+    M.SET_NAV_W, panes_h, nav_flags)
+  reaper.ImGui_PopStyleVar(ctx, 2)
+  if nav_open then
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), M.ITEM_SPACING_X, 0)
+    local nav_x, nav_y = reaper.ImGui_GetCursorScreenPos(ctx)
+    for i, section in ipairs(SECTIONS) do
+      if nav_row(ctx, section.id, section.name,
+          view.section == section.id, i == 1) then
+        view.section = section.id
+      end
+    end
+    if theme.motion.enabled then
+      local dl = reaper.ImGui_GetWindowDrawList(ctx)
+      local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+      for i, section in ipairs(SECTIONS) do
+        local selected = view.section == section.id
+        local duration = theme.motion.SETTINGS_TAB_GROW
+        local progress = widgets.motion_event(ctx,
+          "settings_nav_grow_" .. section.id .. id_suffix, selected, duration)
+        local opacity = widgets.motion_value(ctx,
+          "settings_nav_fade_" .. section.id .. id_suffix,
+          selected and 1 or 0, duration * 0.5)
+        -- Each tab owns its stripe: selection grows locally, departure fades in place.
+        local growth = progress and (1 - (1 - progress) ^ 3) or 1
+        local half_height = M.SET_NAV_ROW_H * 0.5 * growth
+        local centre = nav_y + (i - 0.5) * M.SET_NAV_ROW_H
+        if selected or opacity > 0 then
+          reaper.ImGui_DrawList_AddRectFilled(dl, nav_x, centre - half_height,
+            nav_x + M.SET_TAB_STRIPE_W, centre + half_height,
+            theme.fade(T.ACCENT, alpha * (selected and 1 or opacity)))
+        end
+      end
+    end
+    reaper.ImGui_PopStyleVar(ctx)
+    reaper.ImGui_EndChild(ctx)
+  end
+  reaper.ImGui_PopStyleColor(ctx)
+
+  local nx1, ny1 = reaper.ImGui_GetItemRectMax(ctx)
+  local _, ny0 = reaper.ImGui_GetItemRectMin(ctx)
+  reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
+    nx1 + 0.5, ny0, nx1 + 0.5, ny1, T.STROKE_TERTIARY, 1)
+  reaper.ImGui_SameLine(ctx, 0, M.SET_CONTENT_GAP)
+
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(),
+    M.WINDOW_PAD, M.WINDOW_PAD)
+  local pane_flags = HAS_CHILD_PAD and reaper.ImGui_ChildFlags_AlwaysUseWindowPadding() or 0
+  -- Keep group widths steady when switching between short and scrolling pages.
+  local pane_open = reaper.ImGui_BeginChild(ctx, "settingspane" .. id_suffix,
+    0, panes_h, pane_flags, reaper.ImGui_WindowFlags_AlwaysVerticalScrollbar())
+  reaper.ImGui_PopStyleVar(ctx)
+  if pane_open then
+    if reaper.ImGui_GetScrollMaxY(ctx) <= 0 then
+      -- Cover the inactive native thumb while preserving its reserved lane.
+      local px, py = reaper.ImGui_GetWindowPos(ctx)
+      local pw, ph = reaper.ImGui_GetWindowSize(ctx)
+      local rail_w = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ScrollbarSize())
+      local dl = reaper.ImGui_GetWindowDrawList(ctx)
+      local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+      reaper.ImGui_DrawList_PushClipRect(dl, px + pw - rail_w, py, px + pw, py + ph, false)
+      reaper.ImGui_DrawList_AddRectFilled(dl, px + pw - rail_w, py, px + pw, py + ph,
+        theme.fade(T.BG_WINDOW, alpha))
+      reaper.ImGui_DrawList_PopClipRect(dl)
+    end
+    first_group = true
+    for _, section in ipairs(SECTIONS) do
+      if view.section == section.id then
+        action = section.draw(ctx, state)
+        break
+      end
+    end
+    reaper.ImGui_EndChild(ctx)
+  end
+  return action
 end
 
 function settings.draw(ctx, state, res)
@@ -1378,59 +1601,7 @@ function settings.draw(ctx, state, res)
   -- modal, so there is nothing to reserve height for.
   local panes_h = select(2, reaper.ImGui_GetContentRegionAvail(ctx))
 
-  -- Nav: full-bleed chrome, square corners (it meets the window edges), and ZERO
-  -- padding on every side — a tab's fill runs the strip's full width and butts
-  -- against its neighbours and the title bar. Any padding here becomes a gutter
-  -- of bare chrome around the tabs, which is exactly what reads as "a list
-  -- floating in a panel" rather than a tab strip (user's calls, 2026-08-08:
-  -- first the gap above the top one, then the gaps either side). The names are
-  -- inset inside the row instead — see nav_row.
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), T.BG_CHROME)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ChildRounding(), 0)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 0, 0)
-  local nav_flags = HAS_CHILD_PAD and reaper.ImGui_ChildFlags_AlwaysUseWindowPadding() or 0
-  local nav_open = reaper.ImGui_BeginChild(ctx, "settingsnav", M.SET_NAV_W, panes_h, nav_flags)
-  reaper.ImGui_PopStyleVar(ctx, 2)
-  if nav_open then
-    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), M.ITEM_SPACING_X, 0)
-    for i, s in ipairs(SECTIONS) do
-      -- `i == 1`: the top tab repaints its clipped first pixel — see nav_row.
-      if nav_row(ctx, s.id, s.name, ui.section == s.id, i == 1) then ui.section = s.id end
-    end
-    reaper.ImGui_PopStyleVar(ctx)
-    reaper.ImGui_EndChild(ctx)
-  end
-  reaper.ImGui_PopStyleColor(ctx)
-
-  -- One hairline on the seam — the only separation the two surfaces need.
-  local nx1, ny1 = reaper.ImGui_GetItemRectMax(ctx)
-  local _, ny0 = reaper.ImGui_GetItemRectMin(ctx)
-  reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
-    nx1 + 0.5, ny0, nx1 + 0.5, ny1, T.STROKE_TERTIARY, 1)
-  reaper.ImGui_SameLine(ctx, 0, 0)
-
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), M.WINDOW_PAD, M.WINDOW_PAD)
-  local pane_flags = HAS_CHILD_PAD and reaper.ImGui_ChildFlags_AlwaysUseWindowPadding() or 0
-  -- Filled groups can exceed the available height at smaller window sizes.
-  -- Let this outer pane own that overflow so the whole tab remains reachable;
-  -- specialised inner children still keep their own local scrolling.
-  local pane_win_flags = 0
-  local pane_open = reaper.ImGui_BeginChild(ctx, "settingspane", 0, panes_h,
-    pane_flags, pane_win_flags)
-  reaper.ImGui_PopStyleVar(ctx)
-  -- The lit tab names the destination. Inside it, filled groups name the distinct
-  -- subjects that share that destination; related rows stay inside one group and
-  -- unrelated groups never share a divider.
-  if pane_open then
-    first_group = true
-    for _, s in ipairs(SECTIONS) do
-      if ui.section == s.id then
-        local sec_action = s.draw(ctx, state)
-        action = action or sec_action
-      end
-    end
-    reaper.ImGui_EndChild(ctx)
-  end
+  action = draw_panes(ctx, state, ui, panes_h, "")
 
   -- Esc puts the window away while it has focus — the one popup habit kept now
   -- that outside clicks deliberately don't close it (the Loudness panel's rule).

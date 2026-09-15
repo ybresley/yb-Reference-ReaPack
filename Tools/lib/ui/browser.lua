@@ -13,6 +13,7 @@
 local theme = require("ui.theme")
 local tips = require("ui.tips")
 local categories = require("core.categories")
+local selection = require("core.selection")
 local techfacts = require("core.techfacts")
 local transport = require("ui.transport")
 local waveform = require("ui.waveform")
@@ -133,50 +134,19 @@ end
 -- from nothing enters at the top, Up from nothing at the bottom), clamped at
 -- the ends. Returns the exact action clicking that row would.
 local function step_list(state, step)
-  local sounds = state.visible_sounds
-  if not sounds or #sounds == 0 then return nil end
-  local idx
-  if state.browse_id then
-    for i, s in ipairs(sounds) do
-      if s.id == state.browse_id then idx = i; break end
-    end
-  end
-  local to = idx and idx + step or (step > 0 and 1 or #sounds)
-  if to < 1 then to = 1 elseif to > #sounds then to = #sounds end
-  if sounds[to].id == state.browse_id then return nil end -- already at that edge
-  nav.list_row, nav.dir = to - 1, step
-  return { type = "browse_sound", id = sounds[to].id }
-end
-
--- The sidebar's rows as one flat sequence, in the order the eye reads them
--- (2026-08-10 reorder, user's ask: Uncategorised moved up beside All sounds —
--- the two views lead, then every category).
-local function sidebar_entries(lib)
-  local out = { { scope = "all" }, { scope = "uncategorised" } }
-  for _, cat in ipairs(lib.categories) do
-    out[#out + 1] = { scope = "category", id = cat.id }
-  end
-  return out
+  local result = selection.step_sounds(state.visible_sounds, state.browse_id, step)
+  if not result then return nil end
+  nav.list_row, nav.dir = result.row, step
+  return { type = "browse_sound", id = result.id }
 end
 
 -- Step the sidebar the same way. A view that somehow isn't in the sequence
 -- (can't happen today) steps to All sounds rather than nowhere.
 local function step_sidebar(state, step)
-  local entries = sidebar_entries(state.library)
-  local idx
-  local anchor = state.view.scope == "categories" and state.view.anchor or state.view.id
-  for i, e in ipairs(entries) do
-    if state.view.scope == "categories" then
-      if e.id == anchor then idx = i; break end
-    elseif e.scope == state.view.scope and e.id == state.view.id then
-      idx = i; break
-    end
-  end
-  local to = idx and idx + step or 1
-  if to < 1 then to = 1 elseif to > #entries then to = #entries end
-  if idx == to then return nil end -- already at that edge
-  nav.view, nav.dir = entries[to], step
-  return { type = "select_view", view = { scope = entries[to].scope, id = entries[to].id } }
+  local result = selection.step_sidebar(state.library, state.view, step)
+  if not result then return nil end
+  nav.view, nav.dir = result.entry, step
+  return { type = "select_view", view = result.view }
 end
 
 --------------------------------------------------------------- group rows
@@ -251,7 +221,7 @@ local function group_row(ctx, id, name, opts)
   local hit_w = 0
   if opts.hit_right_pad then
     hit_w = math.max(1, select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-      - opts.hit_right_pad)
+      - opts.hit_right_pad - M.ITEM_SPACING_X * 0.5)
   end
   reaper.ImGui_Selectable(ctx, "##" .. id, opts.selected or false, 0, hit_w,
     group_row_height(ctx))
@@ -276,13 +246,27 @@ local function group_row(ctx, id, name, opts)
   local win_r = select(1, reaper.ImGui_GetWindowPos(ctx))
     + select(1, reaper.ImGui_GetWindowWidth(ctx))
   local hovered = reaper.ImGui_IsItemHovered(ctx)
-  if opts.selected then
+  if opts.selected and not opts.selection_motion_id then
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, win_r, y1, T.FILL_SECONDARY)
   elseif hovered then
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, win_r, y1, T.FILL_TERTIARY)
   end
   if opts.echo and not opts.selected then
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, win_r, y1, T.FILL_TERTIARY)
+  end
+  -- The actual neutral selection plate travels to the new anchor. Its timing
+  -- runs in the child's content coordinates, then returns to screen space, so
+  -- scrolling or moving the window cannot create a false selection animation.
+  -- Pinned views and the scrolling category child use separate tracks because
+  -- a plate cannot safely travel across their clipping boundaries.
+  if opts.selection_motion_id then
+    local scroll_y = reaper.ImGui_GetScrollY(ctx)
+    local window_y = select(2, reaper.ImGui_GetWindowPos(ctx))
+    local plate_y = widgets.motion_value(ctx, opts.selection_motion_id,
+      y0 - window_y + scroll_y, 0.42) + window_y - scroll_y
+    local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, plate_y, win_r,
+      plate_y + (y1 - y0), theme.fade(T.FILL_SECONDARY, alpha))
   end
   -- The COUNT owns the row's right end and the name is cut to whatever is left
   -- (2026-08-07, user-reported: dragging the sidebar narrow ran the category
@@ -426,37 +410,23 @@ local function view_is(state, scope, id)
   return v.scope == scope and (id == nil or v.id == id)
 end
 
-local function copy_category_selection(view)
-  local ids = {}
+-- Multi-category selection has several real selected rows. Its anchor alone
+-- owns the travelling plate; the rest retain their genuine static fills.
+local function selection_motion_id(view, scope, id)
+  if not theme.motion.enabled then return nil end
   if view.scope == "categories" then
-    for selected_id, selected in pairs(view.ids or {}) do
-      if selected then ids[selected_id] = true end
-    end
-  elseif view.scope == "category" then
-    ids[view.id] = true
+    return view.anchor == id and view.ids and view.ids[id]
+      and "sidebar_selection_categories" or nil
   end
-  return ids
+  if view.scope == scope and view.id == id then
+    return scope == "category" and "sidebar_selection_categories" or "sidebar_selection_pinned"
+  end
 end
 
--- Return the category rows between two ids in the exact order they appear in
--- the sidebar. All sounds and Uncategorised carry no id, so they can never enter
--- a Shift-click range.
-local function category_range(lib, from_id, to_id)
-  if not from_id then return nil end
-  local entries = sidebar_entries(lib)
-  local from, to
-  for i, entry in ipairs(entries) do
-    if entry.id == from_id then from = i end
-    if entry.id == to_id then to = i end
-  end
-  if not from or not to then return nil end
-
-  local ids = {}
-  local first, last = math.min(from, to), math.max(from, to)
-  for i = first, last do
-    if entries[i].id then ids[entries[i].id] = true end
-  end
-  return ids
+local function seed_selection_motion(ctx, id, y)
+  if not id then return end
+  local window_y = select(2, reaper.ImGui_GetWindowPos(ctx))
+  widgets.motion_value(ctx, id, y - window_y + reaper.ImGui_GetScrollY(ctx), 0.42)
 end
 
 -- A normal click keeps the established single-category navigation. Ctrl-click
@@ -467,63 +437,13 @@ local function select_category_view(ctx, state, scope, id)
     and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Ctrl()) ~= 0
   local shift = HAS_SHIFT_SELECT
     and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Shift()) ~= 0
-  if not ctrl and not shift then return { scope = scope, id = id } end
-
-  local current = state.view
-  local anchor = current.scope == "categories" and current.anchor or current.id
-  if shift then
-    local range = category_range(state.library, anchor, id)
-    if not range then return { scope = scope, id = id } end
-    local ids = ctrl and copy_category_selection(current) or {}
-    for range_id in pairs(range) do ids[range_id] = true end
-    return { scope = "categories", ids = ids, anchor = id }
-  end
-
-  local ids = copy_category_selection(current)
-  if ids[id] then ids[id] = nil else ids[id] = true end
-  if next(ids) == nil then return { scope = "all" } end
-  return { scope = "categories", ids = ids, anchor = id }
-end
-
--- The explicit selections a delete command applies to. Right-clicking a row
--- outside the set keeps the old one-row behaviour; right-clicking any selected
--- row applies to the complete set.
-local function category_delete_ids(state, clicked_id)
-  local selected = state.view.scope == "categories" and state.view.ids
-  if not (selected and selected[clicked_id]) then return { clicked_id } end
-
-  local ids = {}
-  for _, cat in ipairs(state.library.categories) do
-    if selected[cat.id] then ids[#ids + 1] = cat.id end
-  end
-  return ids
+  return selection.click_category(state.library, state.view, scope, id, ctrl, shift)
 end
 
 -- Which category a sound dropped in the current view should be filed under.
 local function view_target(lib, v)
   if v.scope == "category" and categories.get(lib, v.id) then return v.id end
   return nil -- "all" / "uncategorised" -> Uncategorised
-end
-
-local function copy_sound_selection(state)
-  local ids = {}
-  for id, selected in pairs(state.browse_ids or {}) do
-    if selected then ids[id] = true end
-  end
-  return ids
-end
-
-local function sound_range(sounds, from_id, to_id)
-  if not from_id then return nil end
-  local from, to
-  for i, sound in ipairs(sounds) do
-    if sound.id == from_id then from = i end
-    if sound.id == to_id then to = i end
-  end
-  if not from or not to then return nil end
-  local ids = {}
-  for i = math.min(from, to), math.max(from, to) do ids[sounds[i].id] = true end
-  return ids
 end
 
 -- The browser mirrors the sidebar's file-list grammar. The returned set is
@@ -534,31 +454,8 @@ local function select_sound_rows(ctx, state, id)
     and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Ctrl()) ~= 0
   local shift = HAS_SHIFT_SELECT
     and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Shift()) ~= 0
-  if not ctrl and not shift then return { ids = { [id] = true }, anchor = id } end
-
-  if shift then
-    local range = sound_range(state.visible_sounds, state.browse_anchor_id, id)
-    if not range then return { ids = { [id] = true }, anchor = id } end
-    local ids = ctrl and copy_sound_selection(state) or {}
-    for range_id in pairs(range) do ids[range_id] = true end
-    return { ids = ids, anchor = id }
-  end
-
-  local ids = copy_sound_selection(state)
-  if ids[id] then ids[id] = nil else ids[id] = true end
-  return { ids = ids, anchor = id }
-end
-
--- Right-click and drag apply to the selected set only when the row under the
--- pointer belongs to it. Otherwise they keep the familiar one-row behaviour.
-local function sound_action_ids(state, clicked_id)
-  local selected = state.browse_ids or {}
-  if not selected[clicked_id] then return { clicked_id } end
-  local ids = {}
-  for _, sound in ipairs(state.visible_sounds) do
-    if selected[sound.id] then ids[#ids + 1] = sound.id end
-  end
-  return #ids > 0 and ids or { clicked_id }
+  return selection.click_sound(state.visible_sounds, state.browse_ids,
+    state.browse_anchor_id, id, ctrl, shift)
 end
 
 -- A value in a table cell: LEFT-aligned under its own header (2026-08-11, the
@@ -622,27 +519,26 @@ end
 
 local CATEGORY_COLOR_NAMES = { "Red", "Yellow", "Green", "Teal", "Blue", "Purple" }
 
-local function category_sound_count(state, ids)
-  local count = 0
-  for _, id in ipairs(ids) do count = count + (state.counts.by_id[id] or 0) end
-  return count
-end
-
 -- Mouse and keyboard deletion share the same confirmation rules.
 local function request_category_delete(state, ids)
-  if #ids == 0 then return nil end
-  if category_sound_count(state, ids) > 0 then
-    local cat = categories.get(state.library, ids[1])
-    edit.cat_del = { ids = ids, count = #ids, name = cat.name, color = cat.color, open = true }
-  elseif #ids > 1 then
-    return { type = "remove_categories", ids = ids }
+  local request = selection.category_delete(state.library.categories, state.counts.by_id, ids)
+  if not request then return nil end
+  if request.confirmation_required then
+    request.open = true
+    edit.cat_del = request
+  elseif request.count > 1 then
+    return { type = "remove_categories", ids = request.ids }
   else
-    return { type = "remove_category", id = ids[1] }
+    return { type = "remove_category", id = request.ids[1] }
   end
 end
 
 local function request_sound_delete(ids, name)
-  edit.del = { ids = ids, name = name, count = #ids, open = true }
+  local request = selection.sound_delete(ids, name)
+  if request and request.confirmation_required then
+    request.open = true
+    edit.del = request
+  end
 end
 
 local function pane_shortcut(ctx, state, pane)
@@ -701,7 +597,7 @@ end
 local function category_menu(ctx, state, cat)
   local action
   if reaper.ImGui_BeginPopupContextItem(ctx, "ctx_" .. cat.id) then
-    local ids = category_delete_ids(state, cat.id)
+    local ids = selection.category_targets(state.library.categories, state.view, cat.id)
     local common_color = cat.color
     for _, id in ipairs(ids) do
       local selected_cat = categories.get(state.library, id)
@@ -717,9 +613,9 @@ local function category_menu(ctx, state, cat)
         edit.rename_id, edit.rename, edit.open = cat.id, cat.name, "rename_cat"
       end
     end
-    local sound_count = category_sound_count(state, ids)
+    local delete_request = selection.category_delete(state.library.categories, state.counts.by_id, ids)
     local label = #ids > 1 and string.format("Delete %d Categories", #ids) or "Delete"
-    if sound_count > 0 then label = label .. "\u{2026}" end
+    if delete_request.confirmation_required then label = label .. "\u{2026}" end
     if reaper.ImGui_MenuItem(ctx, label) then
       action = request_category_delete(state, ids)
     end
@@ -801,7 +697,8 @@ local function draw_category_edit_popups(ctx)
     edit.open = nil
   end
   local action
-  local newcat = popups.edit_popup(ctx, edit, "add_cat", "New Category", "new_cat")
+  local newcat = popups.edit_popup(ctx, edit, "add_cat", "New Category", "new_cat",
+    { submit_on_enter = true })
   if newcat then action = { type = "add_category", name = newcat } end
   local renamed = popups.edit_popup(ctx, edit, "rename_cat", "Rename Category", "rename")
   if renamed then action = { type = "rename_category", id = edit.rename_id, name = renamed } end
@@ -820,7 +717,8 @@ local function draw_categories(ctx, state, hit_right_pad)
         { color = cat.color, selected = view_is(state, "category", cat.id),
           count = counts and counts.by_id[cat.id],
           echo = echo.cat == cat.id, hit_right_pad = hit_right_pad,
-          preserve_case = true })
+          preserve_case = true,
+          selection_motion_id = selection_motion_id(state.view, "category", cat.id) })
     local active = reaper.ImGui_IsItemActive(ctx)
     local _, y0 = reaper.ImGui_GetItemRectMin(ctx)
     local _, y1 = reaper.ImGui_GetItemRectMax(ctx)
@@ -854,6 +752,7 @@ local function draw_categories(ctx, state, hit_right_pad)
       local row = category_drag.rows[i]
       if mouse_y < (row.y0 + row.y1) * 0.5 then gap = i; break end
     end
+    local changed_gap = category_drag.gap ~= gap
     category_drag.gap = gap
     local from = categories.index_of(lib, category_drag.id)
     local to = categories.drop_target(from, gap)
@@ -865,8 +764,26 @@ local function draw_categories(ctx, state, hit_right_pad)
       local wx = reaper.ImGui_GetWindowPos(ctx)
       local ww = reaper.ImGui_GetWindowWidth(ctx)
       local line_y = gap == 1 and edge + 1 or edge - 1
-      reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
-        wx, line_y, wx + ww, line_y, T.ACCENT, 2)
+      local progress = widgets.motion_event(ctx, "category_reorder_gap", true, 0.44,
+        changed_gap)
+      local grow, pulse = 1, 0
+      if progress then
+        grow = math.min(1, progress / 0.35)
+        pulse = (1 - progress) * (1 - progress)
+      end
+      local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+      if progress then
+        local mid = wx + ww * 0.5
+        local half = ww * grow * 0.5
+        reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
+          mid - half, line_y, mid + half, line_y,
+          theme.fade(T.ACCENT, (0.72 + 0.28 * pulse) * alpha), 1.5 + pulse * 1.5)
+      else
+        reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
+          wx, line_y, wx + ww, line_y, theme.fade(T.ACCENT, alpha), 2)
+      end
+    else
+      widgets.motion_event(ctx, "category_reorder_gap", false, 0.44)
     end
     if not reaper.ImGui_IsMouseDown(ctx, 0) then
       if to then action = action or { type = "reorder_category", id = category_drag.id, to = to } end
@@ -874,12 +791,20 @@ local function draw_categories(ctx, state, hit_right_pad)
     end
   end
 
+  -- Retarget after every row has drawn, so an older selected row cannot undo the click.
+  if action and action.type == "select_view" then
+    for i = 1, category_drag.count do
+      local row = category_drag.rows[i]
+      local id = selection_motion_id(action.view, "category", row.id)
+      if id then seed_selection_motion(ctx, id, row.y0); break end
+    end
+  end
   sidebar_context(ctx) -- this child's own empty space (the sidebar shell has its own)
   return action
 end
 
 local function draw_sidebar(ctx, state)
-  local action
+  local action, selection_y
   local counts = state.sidebar_counts
 
   -- Rows sit tight (2026-07-29, "we don't need an empty row between
@@ -891,8 +816,10 @@ local function draw_sidebar(ctx, state)
   -- button directly above the list it adds to, then the categories scroll in
   -- whatever height is left. White caps = a view; every category is coloured.
   if group_row(ctx, "view_all", "All sounds",
-      { selected = view_is(state, "all"), count = counts and counts.all }) then
+      { selected = view_is(state, "all"), count = counts and counts.all,
+        selection_motion_id = selection_motion_id(state.view, "all") }) then
     action = { type = "select_view", view = { scope = "all" } }
+    selection_y = select(2, reaper.ImGui_GetItemRectMin(ctx))
   end
   -- Files dropped on All sounds join the library at large — no category, same
   -- landing spot as the Uncategorised row (2026-08-01, user's call: every
@@ -901,14 +828,20 @@ local function draw_sidebar(ctx, state)
 
   if group_row(ctx, "view_unc", "Uncategorised",
       { selected = view_is(state, "uncategorised"),
-        count = counts and counts.uncat, echo = echo.unc }) then
+        count = counts and counts.uncat, echo = echo.unc,
+        selection_motion_id = selection_motion_id(state.view, "uncategorised") }) then
     action = { type = "select_view", view = { scope = "uncategorised" } }
+    selection_y = select(2, reaper.ImGui_GetItemRectMin(ctx))
   end
   if dropzone.sound_drop_target(ctx, state) then
     action = { type = "refile_sounds", ids = state.drag.sound_ids or { state.drag.sound_id },
       wins_release = true }
   end
   action = dropzone.read_file_drop(ctx, state) or action
+
+  if selection_y and action and action.type == "select_view" then
+    seed_selection_motion(ctx, selection_motion_id(action.view, action.view.scope), selection_y)
+  end
 
   -- The + New category button, inset SB_PAD from the flush edges the rows now
   -- own (the child carries zero padding — see the Begin site). The same compact
@@ -961,15 +894,17 @@ local function draw_sidebar(ctx, state)
       reaper.ImGui_SetScrollY(ctx, cats_scroll.pending)
       cats_scroll.pending = nil
     end
+    cats_scroll.max = reaper.ImGui_GetScrollMaxY(ctx)
     local scrollbar_live = cats_scroll.max > 0 and cats_w > M.SCROLL_RAIL_W * 3
+    local rail_hovered, rail_active = widgets.scrollbar_input(ctx, "catscroll",
+      cats_x + cats_w - M.SCROLL_RAIL_W, cats_y, M.SCROLL_RAIL_W, cats_h, scrollbar_live)
     action = draw_categories(ctx, state,
       scrollbar_live and M.SCROLL_RAIL_W or nil) or action
     cats_scroll.y = reaper.ImGui_GetScrollY(ctx)
-    cats_scroll.max = reaper.ImGui_GetScrollMaxY(ctx)
     if cats_w > M.SCROLL_RAIL_W * 3 then
       local new = widgets.overlay_scrollbar(ctx, "catscroll",
         cats_x + cats_w - M.SCROLL_RAIL_W, cats_y, M.SCROLL_RAIL_W, cats_h,
-        cats_scroll.y, cats_scroll.max)
+        cats_scroll.y, cats_scroll.max, rail_hovered, rail_active)
       if new then cats_scroll.pending = new end
     end
     reaper.ImGui_EndChild(ctx)
@@ -1082,8 +1017,12 @@ end
 -- `arrow_zone`, when given, centres the arrow in that many pixels at the cell's
 -- RIGHT end instead of placing it after the label — for the pin column, whose
 -- "label" is a glyph painted over the header afterwards.
-local function header_cell(ctx, state, idx, label, key, arrow_zone)
+local function header_cell(ctx, state, idx, label, key, arrow_zone, text_left)
   reaper.ImGui_TableSetColumnIndex(ctx, idx)
+  if text_left then
+    local _, y = reaper.ImGui_GetCursorScreenPos(ctx)
+    reaper.ImGui_SetCursorScreenPos(ctx, text_left, y)
+  end
   -- The label's own origin: TableHeader draws it at the cursor, exactly as
   -- group_row's hand-drawn name does (never from the item rect, which starts at
   -- the cell's padding edge).
@@ -1250,7 +1189,7 @@ local function sound_menu(ctx, state, sound)
   local action
   local pinned = state.pins and state.pins.by_origin[sound.id]
   if reaper.ImGui_BeginPopupContextItem(ctx, "row_" .. sound.id) then
-    local ids = sound_action_ids(state, sound.id)
+    local ids = selection.sound_targets(state.visible_sounds, state.browse_ids, sound.id)
     if pinned then
       if reaper.ImGui_MenuItem(ctx, "Unpin (Keep Audio Copy)") then
         action = { type = "unpin", id = pinned.id }
@@ -1266,7 +1205,8 @@ local function sound_menu(ctx, state, sound)
   return action
 end
 
-local function draw_sound_list(ctx, state, res)
+local row_fills = {}
+local function draw_sound_list(ctx, state, res, text_left)
   local action
   local sounds = state.visible_sounds
   local unit = loud_unit(state)
@@ -1361,11 +1301,11 @@ local function draw_sound_list(ctx, state, res)
   local row_h = reaper.ImGui_GetTextLineHeight(ctx) + cellpad_y * 2
 
   -- The scrollbar strip is always reserved, so columns keep the same width
-  -- whether this view scrolls or not. Its input is submitted before the table;
-  -- its thumb is painted after EndTable from this frame's scroll range. Keeping
-  -- cursor-moving input here is required by ReaImGui's parent-boundary rules.
+  -- whether this view scrolls or not. Claim its input before the table and
+  -- paint after EndTable so the wrapper keeps its normal content bounds.
   local table_x, table_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local avail_w, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
+  local row_fill_count = 0
   local natural_content_h = row_h * (#sounds + 1) -- body plus header
   local content_scrolls = natural_content_h > avail_h
   local stable_content_h
@@ -1379,15 +1319,14 @@ local function draw_sound_list(ctx, state, res)
   -- window squashed too thin skips the rail rather than starving the columns.
   local outer_w = 0
   if avail_w > M.SCROLL_RAIL_W * 3 then outer_w = avail_w - M.SCROLL_RAIL_W end
-  local rail_top, rail_h, rail_new, rail_hot
+  local rail_top, rail_h
   if outer_w > 0 then
     rail_top = table_y + row_h + 3
     rail_h = avail_h - row_h - 3
-    rail_new, rail_hot = widgets.scrollbar_input(ctx, "soundscroll",
-      table_x + outer_w, rail_top, M.SCROLL_RAIL_W, rail_h,
-      list_scroll.y, list_scroll.max)
-    if rail_new then list_scroll.pending = rail_new end
   end
+  local rail_hovered, rail_active = widgets.scrollbar_input(ctx, "soundscroll",
+    table_x + outer_w, rail_top or table_y, M.SCROLL_RAIL_W, rail_h or 0,
+    outer_w > 0 and content_scrolls)
 
   -- Short views use one pixel of artificial overflow solely to hold the native
   -- scrollbar geometry steady. Keep their real scroll position at the top.
@@ -1414,14 +1353,16 @@ local function draw_sound_list(ctx, state, res)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ScrollbarGrab(), 0)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ScrollbarGrabHovered(), 0)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ScrollbarGrabActive(), 0)
+  -- Row backgrounds belong to the wrapper so their edges remain continuous.
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0)
 
   if not reaper.ImGui_BeginTable(ctx, sounds_table_id(state), COL_COUNT, flags, outer_w, 0) then
     reaper.ImGui_PopStyleVar(ctx, 2)   -- ScrollbarSize + CellPadding
-    reaper.ImGui_PopStyleColor(ctx, 7) -- 4 scrollbar + the 3 table colours
+    reaper.ImGui_PopStyleColor(ctx, 8) -- child background, 4 scrollbar, 3 table colours
     return nil
   end
   reaper.ImGui_PopStyleVar(ctx, 1)   -- ScrollbarSize (CellPadding stays for the rows)
-  reaper.ImGui_PopStyleColor(ctx, 4) -- the scrollbar sliver's colours
+  reaper.ImGui_PopStyleColor(ctx, 5) -- child background and scrollbar colours
 
   -- Fallback only, for a ReaImGui without SetNextWindowScroll: applied from
   -- inside the table (the one scope where its scrolling window is current),
@@ -1475,7 +1416,7 @@ local function draw_sound_list(ctx, state, res)
     -- Explicit height: with CellPadding.y pushed to 0 the header would otherwise
     -- shrink to bare text and sit cramped against its own underline.
     reaper.ImGui_TableNextRow(ctx, reaper.ImGui_TableRowFlags_Headers(), row_h)
-    action = header_cell(ctx, state, 0, "Name", "name") or action
+    action = header_cell(ctx, state, 0, "Name", "name", nil, text_left) or action
     local ux0, _ = reaper.ImGui_GetItemRectMin(ctx)
     action = header_cell(ctx, state, 1, "Dur", "dur") or action
     action = header_cell(ctx, state, 2, "Ch", "ch") or action
@@ -1561,6 +1502,8 @@ local function draw_sound_list(ctx, state, res)
       reaper.ImGui_TableNextRow(ctx)
 
       reaper.ImGui_TableNextColumn(ctx)
+      local _, name_y = reaper.ImGui_GetCursorScreenPos(ctx)
+      reaper.ImGui_SetCursorScreenPos(ctx, text_left, name_y)
       -- A clean name, nothing else (2026-07-29 review): the category dot is gone
       -- — the sidebar echo answers "where does this sound live?" — and the pin
       -- marker moved to its own column at the row's end.
@@ -1583,22 +1526,40 @@ local function draw_sound_list(ctx, state, res)
       -- Only the visible half is cut; the id after ## is the untouched sound id,
       -- so a name that changes its cut can never change the row's identity.
       local row_selected = state.browse_ids and state.browse_ids[s.id] == true
-      -- ImGui normally uses HeaderHovered for every hovered Selectable, even a
-      -- selected one. That collapsed hover-only and selected+hover into the same
-      -- fill, hiding whether this row already belonged to the multi-selection.
-      if row_selected then
-        reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderHovered(), T.FILL_PRIMARY)
-      end
+      -- Paint one continuous background in the wrapper rather than joining
+      -- a native highlight to a separate fill across the scrollbar boundary.
+      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Header(), 0)
+      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderHovered(), 0)
+      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderActive(), 0)
       local row_clicked = reaper.ImGui_Selectable(ctx,
         widgets.ellipsize(ctx, s.name, name_w) .. "##" .. s.id,
         row_selected, span, 0, row_h)
-      if row_selected then reaper.ImGui_PopStyleColor(ctx, 1) end
+      reaper.ImGui_PopStyleColor(ctx, 3)
       local row_hovered = reaper.ImGui_IsItemHovered(ctx)
+      -- Save visible fills for the wrapper. ReaImGui resolves window draw
+      -- lists at drawing time, so drawing here would clip them to the table.
+      if row_selected or row_hovered then
+        local _, y0 = reaper.ImGui_GetItemRectMin(ctx)
+        local _, y1 = reaper.ImGui_GetItemRectMax(ctx)
+        y0 = math.max(y0, table_y + header_h)
+        y1 = math.min(y1, table_y + avail_h)
+        local held = row_hovered and reaper.ImGui_IsItemActive(ctx)
+        local fill = (held or (row_selected and row_hovered)) and T.FILL_PRIMARY
+          or (row_hovered and T.FILL_TERTIARY or T.FILL_SECONDARY)
+        if y1 > y0 then
+          row_fills[row_fill_count + 1] = y0
+          row_fills[row_fill_count + 2] = y1
+          row_fills[row_fill_count + 3] = fill
+          row_fill_count = row_fill_count + 3
+        end
+      end
       local row_pressed = row_hovered and reaper.ImGui_IsMouseClicked(ctx, 0)
       reaper.ImGui_PopStyleVar(ctx, 2)
+      local next_selection
       if row_pressed then
+        next_selection = select_sound_rows(ctx, state, s.id)
         action = { type = "browse_sound", id = s.id,
-          selection = select_sound_rows(ctx, state, s.id), quiet = true }
+          selection = next_selection, quiet = true }
         nav_owner = "list" -- the arrows follow the last-clicked pane
       end
 
@@ -1631,7 +1592,7 @@ local function draw_sound_list(ctx, state, res)
       if state.deps.drag_out and not state.drag
         and reaper.ImGui_IsItemActive(ctx) and reaper.ImGui_IsMouseDragging(ctx, 0) then
         action = { type = "drag_sound", id = s.id, target = "browse",
-          ids = sound_action_ids(state, s.id) }
+          ids = selection.sound_targets(state.visible_sounds, state.browse_ids, s.id) }
       end
       -- Right-click the row: pin it to (or unpin it from) the current project, or
       -- delete it. Like the category menus, the delete confirmation can't be opened
@@ -1698,10 +1659,23 @@ local function draw_sound_list(ctx, state, res)
   reaper.ImGui_PopStyleVar(ctx, 1) -- the CellPadding pushed before BeginTable
   reaper.ImGui_PopStyleColor(ctx, 3)
 
+  local panel_draw_list = reaper.ImGui_GetWindowDrawList(ctx)
+  local row_right = table_x + (outer_w > 0 and outer_w or avail_w)
+  for i = 1, row_fill_count, 3 do
+    reaper.ImGui_DrawList_AddRectFilled(panel_draw_list,
+      table_x, row_fills[i], row_right,
+      row_fills[i + 1], row_fills[i + 2])
+  end
+  for i = #row_fills, row_fill_count + 1, -1 do row_fills[i] = nil end
+
   if outer_w > 0 then
-    widgets.scrollbar_thumb(ctx, table_x + outer_w, rail_top,
-      M.SCROLL_RAIL_W, rail_h, rail_new or list_scroll.y,
-      list_scroll.max, rail_hot)
+    -- Unlike the sidebar, this rail reaches the outer window's right edge.
+    -- Its inherited clip trims half the border, rounded inward to a pixel.
+    local border = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_WindowBorderSize())
+    local new = widgets.overlay_scrollbar(ctx, "soundscroll",
+      table_x + outer_w, rail_top, M.SCROLL_RAIL_W, rail_h,
+      list_scroll.y, list_scroll.max, rail_hovered, rail_active, math.ceil(border * 0.5))
+    if new then list_scroll.pending = new end
   end
 
   local confirmed = draw_delete_confirm(ctx)
@@ -1785,6 +1759,7 @@ local function draw_toolbar(ctx, state, res)
 end
 
 local function draw_main(ctx, state, res)
+  local text_left = select(1, reaper.ImGui_GetCursorScreenPos(ctx))
   local action = draw_toolbar(ctx, state, res)
 
   -- Height budget: the strip and the info row are anchored to the bottom, the
@@ -1827,20 +1802,25 @@ local function draw_main(ctx, state, res)
   -- EndChild only inside the `if`: ReaImGui's contract (see app.lua) — a fully
   -- clipped child (window squashed to zero width) returns false WITHOUT opening,
   -- and an unmatched EndChild is a hard assertion that kills the script.
-  -- This child takes no padding of its own, so there is nothing to push here —
-  -- and nothing that could reach the row menus drawn inside it.
-  local list_open = reaper.ImGui_BeginChild(ctx, "listarea", 0, list_h, 0, no_scroll)
+  -- Let the list reach the panel edges while the toolbar and preview retain
+  -- their inset. Name text uses the toolbar's measured left edge.
+  local list_x = reaper.ImGui_GetCursorPosX(ctx)
+  local panel_pad = M.WINDOW_PAD
+  local list_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx)) + panel_pad * 2
+  reaper.ImGui_SetCursorPosX(ctx, list_x - panel_pad)
+  local list_open = reaper.ImGui_BeginChild(ctx, "listarea", list_w, list_h, 0, no_scroll)
   if list_open then
     local shortcut_action = pane_shortcut(ctx, state, "list")
     -- Always draw the list (never short-circuit it behind `action or ...`, which
     -- would blank the list for a frame whenever the search box set an action).
-    local list_action = draw_sound_list(ctx, state, res)
+    local list_action = draw_sound_list(ctx, state, res, text_left)
     action = action or list_action or shortcut_action
     reaper.ImGui_EndChild(ctx)
     -- The categories stop keeps the list BRIGHT (context, not ringed) so a
     -- category click visibly filters it.
     walkthrough_ui.note(ctx, state.walkthrough, "list")
   end
+  reaper.ImGui_SetCursorPosX(ctx, list_x)
   -- The main panel's drop target spans the list AND the audition strip below
   -- it (2026-08-01, user's call) — the list rect is captured here, the one
   -- rect-based target (dropzone.file_drop_over_rect, the same mechanism as the
@@ -1930,7 +1910,7 @@ local function draw_main(ctx, state, res)
   -- grows by RULER_H and the table above pays for it (list_h). Its own cache
   -- slot ("browse") so the two windows never thrash one entry.
   local wave_action, wave_id, wave_cols, sx0, sy0, sx1, sy1 = waveform.draw(ctx, state, wave_h,
-    { id = state.browse_id, waveform = state.browse_waveform,
+    { id = state.browse_id, waveform = state.browse_waveform, detail = state.browse_detail,
       ruler = true, slot = "browse",
       duration = state.browse and state.browse.duration or nil })
   if wave_action then wave_action.target = "browse" end
@@ -2055,7 +2035,7 @@ local function draw_main(ctx, state, res)
   -- truth, reachable from whichever window you're listening in.
   if widgets.toggle(ctx, "browseloop", LOOP, state.loop,
       "Loop: keep the sound repeating until you stop it",
-      res.icon_font, "repeat") then
+      res.icon_font, "repeat", nil, "loop") then
     action = action or { type = "toggle_loop" }
   end
   reaper.ImGui_SameLine(ctx)
@@ -2064,7 +2044,7 @@ local function draw_main(ctx, state, res)
   reaper.ImGui_SameLine(ctx)
   if widgets.toggle(ctx, "auto", "A", state.auto_audition,
       "Auto-audition: play a sound the moment you click it in this browser",
-      res.icon_font, "ear") then
+      res.icon_font, "ear", nil, "audition") then
     action = action or { type = "toggle_auto" }
   end
   reaper.ImGui_SameLine(ctx)
@@ -2076,7 +2056,7 @@ local function draw_main(ctx, state, res)
   -- browser must not take it with it. Since 2026-08-10 nothing in this window
   -- touches it at all — the gear lives in the Reference View's bar.
 
-  return action
+  return action, wave_id, wave_cols
 end
 
 --------------------------------------------------------------- draw
@@ -2230,8 +2210,11 @@ function browser.draw(ctx, state, res)
   local main_child_flags = HAS_CHILD_PAD and reaper.ImGui_ChildFlags_AlwaysUseWindowPadding() or 0
   local main_open = reaper.ImGui_BeginChild(ctx, "main", 0, 0, main_child_flags, main_flags)
   reaper.ImGui_PopStyleVar(ctx, 1)
+  local wave_id, wave_cols
   if main_open then
-    action = merge_action(action, draw_main(ctx, state, res))
+    local main_action
+    main_action, wave_id, wave_cols = draw_main(ctx, state, res)
+    action = merge_action(action, main_action)
     reaper.ImGui_EndChild(ctx)
   end
 
@@ -2239,7 +2222,7 @@ function browser.draw(ctx, state, res)
   -- clipped away this frame) — never carried across frames.
   nav.list_row, nav.view = nil, nil
 
-  return action
+  return action, wave_id, wave_cols
 end
 
 -- The isolated review script seeds transient inputs and calls the production

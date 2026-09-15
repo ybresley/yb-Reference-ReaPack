@@ -6,10 +6,29 @@ local function clamp(value, low, high)
   return value
 end
 
+-- Resize an already positioned panel in place, moving only the edges that
+-- would otherwise leave its current monitor. The anchor button is irrelevant
+-- after the user has dragged the panel elsewhere.
+function picker_layout.resize(rect, work, width, height, margin)
+  local work_width = math.max(0, work.right - work.left)
+  local work_height = math.max(0, work.bottom - work.top)
+  margin = math.max(0, margin or 0)
+  local mx = work_width >= margin * 2 and margin or 0
+  local my = work_height >= margin * 2 and margin or 0
+  width = math.min(width, work_width - mx * 2)
+  height = math.min(height, work_height - my * 2)
+  return {
+    x = clamp(rect.left, work.left + mx, work.right - mx - width),
+    y = clamp(rect.top, work.top + my, work.bottom - my - height),
+    w = width,
+    h = height,
+  }
+end
+
 -- Place a popup around an anchor without allowing it to leave the usable work area.
 -- The caller supplies coordinates in one shared space, including negative monitor
 -- origins.  The minimum height is honoured whenever either side has room for it.
-function picker_layout.place(anchor, work, width, height, min_height, gap, margin)
+function picker_layout.place(anchor, work, width, height, min_height, gap, margin, prefer_above)
   -- A very small work area cannot afford the nominal margin on both sides.
   -- Reduce it independently so the result is still contained on each axis.
   local work_width = math.max(0, work.right - work.left)
@@ -41,11 +60,16 @@ function picker_layout.place(anchor, work, width, height, min_height, gap, margi
   local below_space = bottom - below_y
   local above_space = anchor.top - gap - top
 
-  if below_space >= height then
-    return result(below_y)
-  end
-  if above_space >= height then
-    return result(anchor.top - gap - popup_height)
+  if prefer_above then
+    if above_space >= height then
+      return result(anchor.top - gap - popup_height)
+    end
+    if below_space >= height then return result(below_y) end
+  else
+    if below_space >= height then return result(below_y) end
+    if above_space >= height then
+      return result(anchor.top - gap - popup_height)
+    end
   end
 
   -- If one side can hold the useful minimum, use the side with more room and
