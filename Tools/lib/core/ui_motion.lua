@@ -126,12 +126,12 @@ local function pulse_value(start, now, duration)
   return 0.85 * (1 - ease_out((t - 0.35) / 0.65)), true
 end
 
-local function update_pulse(tracker, key, on, now, frame, duration, trigger, rise)
+local function update_pulse(tracker, key, on, now, frame, duration, trigger, rise, revision)
   local entry = entry_for(tracker, key)
   local pulse = entry.pulse
 
   if not pulse then
-    pulse = { on = on, last_now = now, frame = frame }
+    pulse = { on = on, last_now = now, frame = frame, revision = revision }
     entry.pulse = pulse
     if on and trigger and duration > 0 then
       pulse.start, pulse.triggered_frame = now, frame
@@ -139,28 +139,35 @@ local function update_pulse(tracker, key, on, now, frame, duration, trigger, ris
   elseif not on then
     -- Off must win even if this is a second draw in the same frame.
     pulse.on, pulse.start, pulse.last_now, pulse.frame = false, nil, now, frame
+    pulse.revision = revision
   elseif frame > pulse.frame + 1 or now < pulse.last_now or duration <= 0 then
     pulse.on, pulse.start, pulse.last_now, pulse.frame = on, nil, now, frame
+    pulse.revision = revision
     if trigger and duration > 0 then
       pulse.start, pulse.triggered_frame = now, frame
     end
   elseif frame == pulse.frame then
     -- A seed draw may be followed by the click that caused it. A trigger starts
     -- once per frame; repeated draws cannot keep extending the pulse.
-    if trigger and pulse.triggered_frame ~= frame then
+    local changed = revision ~= nil and pulse.revision ~= nil
+      and revision ~= pulse.revision
+    if (trigger or changed) and pulse.triggered_frame ~= frame then
       pulse.start, pulse.triggered_frame = now, frame
     elseif rise ~= false and not pulse.on then
       pulse.start = now
     end
-    pulse.on = true
+    pulse.on, pulse.revision = true, revision
   else
+    local changed = revision ~= nil and pulse.revision ~= nil
+      and revision ~= pulse.revision
     if not on then
       pulse.start = nil
-    elseif trigger or (rise ~= false and not pulse.on) then
+    elseif trigger or changed or (rise ~= false and not pulse.on) then
       pulse.start = now
-      if trigger then pulse.triggered_frame = frame end
+      if trigger or changed then pulse.triggered_frame = frame end
     end
     pulse.on, pulse.last_now, pulse.frame = on, now, frame
+    pulse.revision = revision
   end
 
   if not on or not pulse.start or duration <= 0 then return nil end
@@ -168,8 +175,8 @@ local function update_pulse(tracker, key, on, now, frame, duration, trigger, ris
   return pulse.start
 end
 
-function motion.pulse(tracker, key, on, now, frame, duration, trigger)
-  local start = update_pulse(tracker, key, on, now, frame, duration, trigger)
+function motion.pulse(tracker, key, on, now, frame, duration, trigger, revision)
+  local start = update_pulse(tracker, key, on, now, frame, duration, trigger, nil, revision)
   if not start then return 0 end
   return (pulse_value(start, now, duration))
 end

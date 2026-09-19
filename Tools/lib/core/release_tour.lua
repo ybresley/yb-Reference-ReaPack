@@ -2,11 +2,43 @@
 local tour = {}
 
 function tour.available(content, installed, releases)
-  if installed ~= content.version then return false end
+  if type(content) ~= 'table' or type(content.version) ~= 'string'
+      or content.version == '' or type(installed) ~= 'string' or installed == '' then
+    return false
+  end
+
+  local compatible = installed == content.version
+  if not compatible then
+    local versions = type(content.compatible_versions) == 'table'
+        and content.compatible_versions or {}
+    for _, version in ipairs(versions) do
+      if version == installed then
+        compatible = true
+        break
+      end
+    end
+  end
+  if not compatible then return false end
+
   for _, release in ipairs(releases or {}) do
-    if release.version == content.version then return true end
+    if type(release) == 'table' and release.version == content.version then return true end
   end
   return false
+end
+
+function tour.supplements(content, releases)
+  local result = {}
+  local supplements = type(content) == 'table' and content.supplements or nil
+  if type(supplements) ~= 'table' or type(releases) ~= 'table' then return result end
+
+  for _, release in ipairs(releases) do
+    local version = type(release) == 'table' and release.version or nil
+    local supplement = version and supplements[version] or nil
+    if type(supplement) == 'table' then
+      result[#result + 1] = { version = version, title = supplement.title }
+    end
+  end
+  return result
 end
 
 function tour.new()

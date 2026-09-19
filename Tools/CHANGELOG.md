@@ -26,6 +26,21 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.4.1 — 2026-09-19
+
+This update adds configurable hotkeys, separate playback controls and more accent colours, alongside improved release notes and a floating-window crash fix.
+
+### Changes
+
+- **Hotkeys** — Hotkeys are now available for yb-Reference controls and stay in sync with Reaper's Actions list. Assign them in Settings → Hotkeys; assigned shortcuts also appear in the matching button tooltips.
+- **Reference Playback** — Reference View and Library now have separate Play and Pause / Resume controls. Play restarts the sound, while Pause / Resume continues from the same position.
+- **Updates** — Release Notes now includes every version you missed when updating across several releases. Open the full history from Settings → Updates.
+- **Appearance** — Accent Colour now offers twelve choices in Settings → Appearance.
+
+### Fixes
+
+- **Window** — Moving yb-Reference beyond the edges of Reaper's window no longer crashes the tool.
+
 ## 0.4.0 — 2026-09-15
 
 This update brings a new high-quality frequency spectrum analyser, an improved waveform display and new interface animations, alongside smaller improvements and bug fixes.

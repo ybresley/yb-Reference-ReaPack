@@ -27,6 +27,7 @@ local widgets = require("ui.widgets")
 local icons = require("ui.icons")
 local focus = require("ui.focus")
 local whatsnew = require("ui.whatsnew")
+local hotkeys = require("ui.hotkeys")
 local fb_core = require("core.feedback") -- message cap for the Help composer
 local T = theme.tokens
 local M = theme.metrics
@@ -485,32 +486,38 @@ local function appearance_readout(ctx, text)
     math.floor((y0 + y1 - th) * 0.5 + 0.5), T.TEXT_PRIMARY, text)
 end
 
--- One fixed-width Settings button with a colour chip and hand-painted label.
--- The whole face is clickable; the chip is not a second tiny target.
-local function accent_button(ctx, option, selected, width)
-  local pushed = widgets.push_soft_active(ctx, selected)
-  local clicked = reaper.ImGui_Button(ctx, "##accent_" .. option.id, width or M.SET_ACTION_W)
-  widgets.pop_soft_active(ctx, pushed)
-
-  widgets.button_bloom(ctx, "accent_" .. option.id, selected or clicked,
-    option.color, clicked, true)
-
+-- The target includes the selection ring so its bounds never change.
+local function accent_button(ctx, option, selected)
+  local size, pad = M.SET_ACCENT_SIZE, M.SET_ACCENT_PAD
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), 0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
+  local clicked = reaper.ImGui_Button(ctx, '##accent_' .. option.id, size, size)
+  reaper.ImGui_PopStyleVar(ctx)
+  reaper.ImGui_PopStyleColor(ctx, 3)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
   local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
   local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
-  local chip = M.ICON_SM_FS
-  local gap = M.ITEM_SPACING_X
-  local tw, th = reaper.ImGui_CalcTextSize(ctx, option.label)
-  local content_w = chip + gap + tw
-  local sx = math.floor((x0 + x1 - content_w) * 0.5 + 0.5)
-  local sy = math.floor((y0 + y1 - chip) * 0.5 + 0.5)
-  local ty = math.floor((y0 + y1 - th) * 0.5 + 0.5)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  reaper.ImGui_DrawList_AddRectFilled(dl, sx, sy, sx + chip, sy + chip, option.color, 3)
-  reaper.ImGui_DrawList_AddText(dl, sx + chip + gap, ty,
-    selected and T.ACCENT_HOVER or T.TEXT_SECONDARY, option.label)
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  local rounding = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding())
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0 + pad, y0 + pad, x1 - pad, y1 - pad,
+    theme.fade(hovered and option.hover or option.color, alpha), rounding)
+  widgets.button_bloom(ctx, 'accent_' .. option.id, selected or clicked,
+    option.color, clicked, true)
+  if selected then
+    local scale = theme.scale
+    reaper.ImGui_DrawList_AddRect(dl, x0 + scale, y0 + scale, x1 - scale, y1 - scale,
+      theme.fade(T.TEXT_PRIMARY, alpha), rounding + scale, 0, scale)
+    local cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+    local ink = theme.fade(T.TEXT_ON_ACCENT, alpha)
+    reaper.ImGui_DrawList_AddLine(dl, cx - 5 * scale, cy, cx - scale, cy + 4 * scale, ink, 2 * scale)
+    reaper.ImGui_DrawList_AddLine(dl, cx - scale, cy + 4 * scale, cx + 6 * scale, cy - 4 * scale, ink, 2 * scale)
+  end
+  tips.show(ctx, hovered, option.label, 'accent_' .. option.id)
   return clicked
 end
-
 local REFERENCE_MODES = {
   { button = "Auto##reference_mode_auto", value = "auto" },
   { button = "Side by Side##reference_mode_horizontal", value = "horizontal" },
@@ -702,14 +709,12 @@ local function draw_appearance(ctx, state)
     begin_setting(ctx)
     setting_label(ctx, "Accent Colour")
     setting_note(ctx, "Changes active controls, sort arrows and selection accents.")
-    local button_gap = select(1,
-      reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
     local button_avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-    local button_w = (button_avail - button_gap * (#theme.accent_options - 1))
-      / #theme.accent_options
+    local columns = math.max(1, math.min(#theme.accent_options,
+      math.floor((button_avail + M.SET_ACCENT_GAP) / (M.SET_ACCENT_SIZE + M.SET_ACCENT_GAP))))
     for i, option in ipairs(theme.accent_options) do
-      if i > 1 then reaper.ImGui_SameLine(ctx) end
-      if accent_button(ctx, option, state.accent_colour == option.id, button_w) then
+      if (i - 1) % columns > 0 then reaper.ImGui_SameLine(ctx, 0, M.SET_ACCENT_GAP) end
+      if accent_button(ctx, option, state.accent_colour == option.id) then
         action = action or { type = "set_accent_colour", colour = option.id }
       end
     end
@@ -717,7 +722,7 @@ local function draw_appearance(ctx, state)
       switch = state.ui_animations ~= false,
       switch_owns_disabled_motion = true,
       far_right = true,
-      note = "Turn off decorative motion and glows to reduce resource use.",
+      note = "Turn off decorative motion and glows.",
     }) then
       action = action or { type = "set_ui_animations", enabled = state.ui_animations == false }
     end
@@ -861,8 +866,8 @@ local function version_route(ctx, state, installed, available, button, button_ti
   local read_notes = reaper.ImGui_Button(ctx, "Release Notes", M.SET_ACTION_W)
   reaper.ImGui_EndDisabled(ctx)
   if read_notes and release then
-    if remote then whatsnew.open_available({ release })
-    else whatsnew.open_history({ release }) end
+    if remote then whatsnew.open_available(remote)
+    else whatsnew.open_history(state.changelog) end
   end
 
   reaper.ImGui_SameLine(ctx, x0 + avail_w - M.SET_ACTION_W)
@@ -1105,6 +1110,7 @@ local function draw_feedback(ctx, state)
   -- the only user-visible recovery path.
   if not fbui.recovery_loaded and type(fbs.recovered_message) == "string" then
     fbui.draft = fbs.recovered_message
+    if type(fbs.recovered_email) == "string" then fbui.email = fbs.recovered_email end
     fbui.recovery_loaded = true
   end
 
@@ -1260,8 +1266,13 @@ local function draw_feedback(ctx, state)
   if fbs.phase == "failed" then
     reaper.ImGui_SetCursorPos(ctx, action_x, action_y)
     reaper.ImGui_TextColored(ctx, T.DANGER_RED,
-      HAS_CLIPBOARD and "Couldn't send. Your message has been copied."
-      or "Couldn't send. Copy your message before leaving.")
+      fbs.saved and "Delivery unconfirmed. Submitted message saved."
+      or "Delivery unconfirmed. Copy your message before closing.")
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+      (fbs.failure_reason or "The receiver hasn't confirmed this report.") ..
+      (fbs.saved and " The submitted message is saved for retry after reopening."
+        or " The message could not be saved for reopening.") ..
+      " It may already have arrived. Retry to check, or email it below.")
     reaper.ImGui_SetCursorPos(ctx, action_x, control_y)
     if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
     reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, "Email it to: ")
@@ -1276,7 +1287,9 @@ local function draw_feedback(ctx, state)
   elseif fbs.phase == "sent" and fbui.draft == "" then
     reaper.ImGui_SetCursorPos(ctx, action_x, control_y)
     if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
-    reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Sent. Thank you.")
+    reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Received. Thank you.")
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+      fbs.report_id and ("Receipt: " .. fbs.report_id) or "Your report was received.")
   else
     reaper.ImGui_SetCursorPos(ctx, action_x, control_y)
     reaper.ImGui_Text(ctx, "")
@@ -1288,7 +1301,9 @@ local function draw_feedback(ctx, state)
   -- state (dead-face rule); the dead face says why on hover.
   local can_send = not sending and not over_cap and fbui.draft:match("%S") ~= nil
   reaper.ImGui_SameLine(ctx, action_x + avail_w - M.SET_ACTION_W)
-  local label = sending and "Sending\u{2026}" or "Send"
+  local retrying = fbs.phase == "failed" and fbui.draft == fbs.last_message
+    and fbui.email == fbs.email
+  local label = sending and "Sending\u{2026}" or (retrying and "Retry" or "Send")
   if can_send then
     if reaper.ImGui_Button(ctx, label, M.SET_ACTION_W) then send_now = true end
   else
@@ -1321,13 +1336,12 @@ local function draw_feedback_panel(ctx, state)
   return action
 end
 
--- The list, in the user's chosen order. Five sections were decided
--- (Library · Appearance · Updates · Help · About); the two not yet built have
--- nothing to draw, and an empty section is never shown — they arrive here with
--- the features, one line each.
+-- The list in the user's chosen order. Adding a page remains one entry here;
+-- page-specific drawing stays in its owning module or function above.
 local SECTIONS = {
   { id = "library", name = "Library", draw = draw_library },
   { id = "appearance", name = "Appearance", draw = draw_appearance },
+  { id = "hotkeys", name = "Hotkeys", draw = hotkeys.draw },
   { id = "updates", name = "Updates", draw = draw_updates },
   { id = "help", name = "Help", draw = draw_help },
   { id = "feedback", name = "Feedback", draw = draw_feedback_panel },
@@ -1533,7 +1547,7 @@ local function draw_panes(ctx, state, view, panes_h, id_suffix)
     first_group = true
     for _, section in ipairs(SECTIONS) do
       if view.section == section.id then
-        action = section.draw(ctx, state)
+        action = section.draw(ctx, state, icon_font)
         break
       end
     end

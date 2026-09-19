@@ -13,6 +13,10 @@ function showcase.available(installed, releases)
   return tour.available(content, installed, releases)
 end
 
+function showcase.supplements(releases)
+  return tour.supplements(content, releases)
+end
+
 function showcase.reset()
   selection, demo, demo_key = tour.new(), nil, nil
   generation = generation + 1

@@ -20,6 +20,38 @@ local tips = {}
 
 tips.DELAY = 0.15 -- seconds of continuous hover before a tip appears
 
+-- Use the current native descriptions so modifiers and multiple assignments
+-- match Settings without giving unrelated controls the Reference View shortcut.
+local shortcut_snapshot, shortcut_content = nil, {}
+function tips.with_shortcut(state, id, text)
+  local snapshot = state.hotkeys
+  if not snapshot or not snapshot.available or not id then return text end
+  -- The adapter replaces its snapshot on refresh. Keep only that snapshot's
+  -- display data so idle frames neither scan commands nor allocate tables.
+  if snapshot ~= shortcut_snapshot then
+    shortcut_snapshot, shortcut_content = snapshot, {}
+    for _, command in ipairs(snapshot.commands or {}) do
+      local lines = {}
+      for _, shortcut in ipairs(command.shortcuts or {}) do
+        if shortcut.description and shortcut.description ~= "" then
+          lines[#lines + 1] = shortcut.description
+        end
+      end
+      if #lines > 0 then
+        shortcut_content[command.id] = {
+          shortcuts = lines, key = "hotkey_" .. command.id,
+        }
+      end
+    end
+  end
+  local content = shortcut_content[id]
+  if content then
+    content.text = text
+    return content
+  end
+  return text
+end
+
 -- Without both clock functions, show the tip immediately. This also supports
 -- callers using a partial API stand-in outside REAPER.
 local HAS_CLOCK = reaper.ImGui_GetTime ~= nil and reaper.ImGui_GetFrameCount ~= nil
@@ -30,9 +62,71 @@ local HAS_CLOCK = reaper.ImGui_GetTime ~= nil and reaper.ImGui_GetFrameCount ~= 
 -- appearing instantly — that is what `frame` is for.
 local key_now, since, last_frame = nil, 0, -2
 
+local MODIFIERS = { Ctrl = true, Shift = true, Alt = true, Win = true,
+  Cmd = true, Opt = true, Control = true, Command = true, Option = true }
+
+function tips.shortcut_keys(description)
+  local keys, remaining = {}, description
+  while true do
+    local modifier, rest = remaining:match("^([^+]+)%+(.*)$")
+    if not modifier or not MODIFIERS[modifier] or rest == "" then break end
+    keys[#keys + 1] = modifier
+    remaining = rest
+  end
+  -- Only split known modifiers. The final key may itself be '+' or a MIDI name.
+  if remaining ~= "" then keys[#keys + 1] = remaining end
+  return keys
+end
+
+local function draw_shortcut_tip(ctx, content)
+  local m, t = theme.metrics, theme.tokens
+  if not reaper.ImGui_BeginTooltip(ctx) then return end
+  local wrap_width = m.PICK_LIST_MAX_W - m.WINDOW_PAD * 2
+  local rounding = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding())
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  for _, description in ipairs(content.shortcuts) do
+    local used = 0
+    for _, label in ipairs(tips.shortcut_keys(description)) do
+      local tw, th = reaper.ImGui_CalcTextSize(ctx, label)
+      local width, height = tw + m.FRAME_PAD_X * 2, th + m.FRAME_PAD_Y
+      if used > 0 and used + m.FRAME_PAD_Y + width <= wrap_width then
+        reaper.ImGui_SameLine(ctx, 0, m.FRAME_PAD_Y)
+      else
+        used = 0
+      end
+      if width > wrap_width then
+        -- Long native MIDI/OSC descriptions remain readable without truncation.
+        reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + wrap_width)
+        reaper.ImGui_Text(ctx, label)
+        reaper.ImGui_PopTextWrapPos(ctx)
+      else
+        local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
+        reaper.ImGui_Dummy(ctx, width, height)
+        reaper.ImGui_DrawList_AddRectFilled(dl, x, y, x + width, y + height,
+          theme.fade(t.FILL_TERTIARY, alpha), rounding)
+        reaper.ImGui_DrawList_AddRect(dl, x + 0.5, y + 0.5,
+          x + width - 0.5, y + height - 0.5,
+          theme.fade(t.STROKE_PRIMARY, alpha), rounding, 0, 1)
+        reaper.ImGui_DrawList_AddText(dl, x + m.FRAME_PAD_X, y + m.FRAME_PAD_Y * 0.5,
+          theme.fade(t.TEXT_PRIMARY, alpha), label)
+      end
+      used = used + width + (used > 0 and m.FRAME_PAD_Y or 0)
+    end
+  end
+  reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + wrap_width)
+  reaper.ImGui_TextColored(ctx, t.TEXT_SECONDARY, content.text)
+  reaper.ImGui_PopTextWrapPos(ctx)
+  reaper.ImGui_EndTooltip(ctx)
+end
+
 -- Anchored tips avoid the entire control row, not just the pointer. Measure
 -- before opening so even the first visible frame has a safe screen position.
 local function draw(ctx, text, anchor)
+  if type(text) == "table" then
+    if not anchor then return draw_shortcut_tip(ctx, text) end
+    text = table.concat(text.shortcuts, "\n") .. "\n\n" .. text.text
+  end
   if not anchor then
     reaper.ImGui_SetTooltip(ctx, text)
     return
@@ -83,7 +177,7 @@ function tips.show(ctx, hovered, text, key, anchor)
     draw(ctx, text, anchor)
     return
   end
-  key = key or text
+  key = key or (type(text) == "table" and text.key or text)
   local now, frame = reaper.ImGui_GetTime(ctx), reaper.ImGui_GetFrameCount(ctx)
   if key ~= key_now or frame > last_frame + 1 then
     key_now, since = key, now

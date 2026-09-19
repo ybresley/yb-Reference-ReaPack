@@ -1,6 +1,6 @@
 -- The picker borrows the one preview engine without selecting a reference.
--- Only its pause belongs to the popup; interrupted Reference View/Library positions
--- remain parked until the user explicitly resumes them.
+-- Interrupted Reference View/Library positions remain parked until the user
+-- explicitly resumes them.
 local pins = require("core.pins")
 local holders = require("holders")
 
@@ -30,7 +30,7 @@ end
 
 -- `play` is the entry script's normal playback path, including routing, gain,
 -- spans and error reporting. This module never opens another audio player.
-function picker_preview.play(state, id, owner, restart, play)
+function picker_preview.play(state, id, owner, play)
   local ps = state.pins
   if owner == nil or owner ~= state.picker_preview_owner
     or not ps or owner ~= ps.proj or ps.load_error then return false end
@@ -41,21 +41,16 @@ function picker_preview.play(state, id, owner, restart, play)
   local sound = pins.find(ps.data, id)
   if not sound then return false, "That reference is no longer pinned to this project." end
 
-  local live = state.preview
-  if not restart and live.playing and live.slot == "picker" and live.sound_id == id then
-    holders.pause_playback(state, "picker", id)
-    return true
-  end
-
   -- Preserve the actual sounding reference, even if a quiet left-click has
   -- selected another row since playback started. Selection itself stays intact.
+  local live = state.preview
   if live.playing and live.slot ~= "picker" then
     holders.pause_playback(state, live.slot, live.sound_id)
   end
-  local parked = not restart and holders.paused_on(state, "picker", id)
-  local from = parked and parked.at or nil
+  -- Picker rows are one-shot triggers. A repeated click starts the pin again;
+  -- the popup never owns a pause/resume gesture.
   holders.clear_pause(state, "picker")
-  if not play(sound, from, "picker") then return false, state.status end
+  if not play(sound, nil, "picker") then return false, state.status end
   return true
 end
 

@@ -1,77 +1,43 @@
--- feedback: the REAPER-facing half of the Send-feedback panel — it takes a
--- ready payload (core/feedback builds it), delivers it to the doorman in the
--- background, and answers "sent" only when the doorman's literal "ok" came
--- back. Decided end to end in `.brief/_done/send-feedback/`; the delivery
--- route was live-proven from this machine and from inside REAPER before this
--- module was written (2026-08-09).
---
--- THE PROMISE THIS MODULE OWNS: a report is never lost SILENTLY. Success is
--- claimed only on the doorman's own "ok"; every other shape — offline, a slow
--- network, a dead URL, a policy-locked machine — ends in phase "failed", which
--- the UI turns into the loud clipboard-plus-address fallback. Between those
--- two ends there is nothing.
---
--- The send has ONE windowless wscript/VBS courier, under 10 s end to end. A
--- second POST is never launched automatically: Google can save a report before
--- curl receives the reply, so retrying after a short timeout can turn one click
--- into two reports. If Windows Script Host is unavailable or the request cannot
--- be verified, the normal visible failure path keeps the message safe.
---
--- The courier's curl carries --max-time 8 and the defer loop watches for 9 s.
--- That leaves time for curl to finish before cleanup without making the REAPER
--- interface wait indefinitely. A tiny pending record keeps the message and
--- active parity across a tool close
--- or restart. The next launch watches the existing courier without submitting
--- a duplicate; an unverified result becomes the ordinary visible failure.
---
--- An adapter, so it calls reaper.* freely. Spec'd against a fake reaper
--- (tests/feedback_spec.lua) under the AGENTS adapter rule: it holds an
--- in-flight send across defer frames, and owns the never-silently-lost
--- sequencing above. A fake can't prove curl or the doorman — the probe and
--- the live setup test did that.
+-- REAPER-facing feedback delivery. A request is saved before its one hidden
+-- POST starts, and success requires the receiver to echo the exact request ID
+-- with the Sheet's report ID.
 
 local fb_core = require("core.feedback")
+local store = require("core.library_store")
 
 local feedback = {}
 
 local SEP = package.config:sub(1, 1)
 
--- The doorman's address (the user's own Apps Script deployment, 2026-08-09)
--- and the public support mailbox shown whenever delivery fails. Keeping the
--- mailbox here gives startup failures and the Feedback panel one source of truth.
 feedback.URL = "https://script.google.com/macros/s/AKfycbyO_6OjXKDv8kUfqImqqBYz7L1hjy51jn1Ux4_iCBCP8I9wLpt3-evxQq-vGdZ7VqCB/exec"
 feedback.ADDRESS = "yoni.ybtools@gmail.com"
 
--- Curl is dead before the watch ends, so cleanup cannot race a late file write.
-local SEND_WATCH = 9
-local CURL_SECS = 8
+local SEND_WATCH = 31
+local CURL_SECS = 30
 
--- What the UI reads (state.feedback in the entry script). One table for the
--- session — mutated, never replaced. phase: nil | "sending" | "sent" |
--- "failed". The entry script fills the display fields (attach line, remembered
--- email) at startup; this module only ever touches phase.
-local S = { phase = nil }
+local S = { phase = nil, saved = false }
 feedback.state = S
 
 local P = {
-  base = nil,                            -- temp-file stem, set by init
-  payload = nil, reply = nil, vbs = nil, -- this send's files, set by start
-  pending = nil,                         -- restart-safe message + active parity
-  flip = 0, -- alternates per send (see start)
+  base = nil,
+  payload = nil,
+  reply = nil,
+  vbs = nil,
+  pending = nil,
+  receipt = nil,
+  current = nil,
+  flip = 0,
   deadline = 0,
-  recovered = false,
 }
 
--- The three temp files for one send, suffixed 0 or 1. Two sends never share
--- filenames (Codex, 2026-08-09): a courier from the PREVIOUS send that stalled
--- before launching its curl could otherwise write the reply file after this
--- send staged its own — a stale "ok" claiming a report that didn't land. By
--- the send after next, any such straggler's curl (--max-time 4) is long dead,
--- so two alternating names close the race completely.
 local function send_files(n)
   return P.base .. "_payload" .. n .. ".json",
     P.base .. "_reply" .. n .. ".txt",
     P.base .. "_send" .. n .. ".vbs"
+end
+
+local function select_files(n)
+  P.payload, P.reply, P.vbs = send_files(n)
 end
 
 local function read_file(path)
@@ -94,17 +60,6 @@ local function write_file(path, text)
   return true
 end
 
-local function pending_text(parity, message)
-  return "version=1\nparity=" .. parity .. "\n" .. message
-end
-
-local function parse_pending(text)
-  if type(text) ~= "string" then return nil end
-  local parity, message = text:match("^version=1\nparity=([01])\n(.*)$")
-  if not parity then return nil end
-  return tonumber(parity), message
-end
-
 local function clean_parity(n)
   local payload, reply, vbs = send_files(n)
   os.remove(payload)
@@ -112,11 +67,46 @@ local function clean_parity(n)
   os.remove(vbs)
 end
 
--- The courier shim: wscript runs curl with its window hidden (style 0), waiting
--- so curl's --max-time bounds the whole thing. Same quoting ground rules as
--- the updater's shim: Windows paths and URLs cannot contain double quotes, so
--- doubling quotes around them inside VBS strings is safe. There is no automatic
--- fallback request: an unverified first POST may already have reached the Sheet.
+local function clean_attempt()
+  os.remove(P.payload)
+  os.remove(P.reply)
+  os.remove(P.vbs)
+end
+
+local function recover_atomic(path)
+  local ok, err = pcall(store.recover, path)
+  return ok, err
+end
+
+local function save_pending(record)
+  fb_core.encode_pending(record)
+  store.save(P.pending, record)
+end
+
+local function save_receipt(receipt)
+  fb_core.encode_saved_receipt(receipt)
+  store.save(P.receipt, {
+    version = fb_core.RECEIPT_VERSION,
+    request_id = receipt.request_id,
+    report_id = receipt.report_id,
+  })
+end
+
+local function read_saved_receipt()
+  local text = read_file(P.receipt)
+  if not text then return nil end
+  local ok, receipt = pcall(fb_core.decode_saved_receipt, text)
+  return ok and receipt or nil
+end
+
+local function request_id()
+  local raw = reaper.genGuid("")
+  if type(raw) ~= "string" then return nil end
+  local id = raw:gsub("[{}-]", ""):lower()
+  if #id ~= 32 or not id:match("^[0-9a-f]+$") then return nil end
+  return id
+end
+
 local function curl_cmd()
   return 'curl -s -L --max-time ' .. CURL_SECS
     .. ' -H "Content-Type: application/json"'
@@ -129,133 +119,223 @@ local function write_shim()
     .. 'sh.Run "' .. curl_cmd():gsub('"', '""') .. '", 0, True\r\n')
 end
 
-local function cleanup(keep_pending)
-  os.remove(P.payload)
-  os.remove(P.reply)
-  os.remove(P.vbs)
-  if not keep_pending then os.remove(P.pending) end
+local function current_matches(message, email)
+  return P.current and P.current.delivery_version == 2
+    and P.current.message == message and P.current.email == email
 end
 
-local function fail(keep_pending)
-  cleanup(keep_pending)
+local function fail(reason)
+  clean_attempt()
   S.phase = "failed"
+  S.failure_reason = reason or "Delivery unconfirmed."
 end
 
--- Once at startup. A send interrupted by closing or restarting the tool keeps
--- one small pending record. Resume WATCHING that courier only — never launch a
--- second POST automatically, because the first may already have reached the
--- Sheet. A verified reply clears everything; a missing courier becomes the
--- normal visible failure with the original message restored in Settings.
+local function finish_success(receipt)
+  S.failure_reason = nil
+  if receipt.legacy then
+    clean_attempt()
+    os.remove(P.pending)
+    P.current = nil
+    S.saved = false
+    S.report_id = nil
+    S.phase = "sent"
+    return
+  end
+
+  -- Keep the pending record and reply if this small save fails. On the next
+  -- launch they can prove the same success again without sending another POST.
+  local saved = pcall(save_receipt, receipt)
+  S.report_id = receipt.report_id
+  S.saved = true
+  S.phase = "sent"
+  if saved then
+    clean_attempt()
+    os.remove(P.pending)
+    P.current = nil
+    S.saved = false
+  end
+end
+
+local function recover_pending(raw)
+  local ok, record, migrated = pcall(fb_core.decode_pending, raw)
+  if not ok then
+    S.last_message = raw
+    S.recovered_message = raw
+    S.saved = true
+    S.failure_reason = "Saved feedback could not be read."
+    S.phase = "failed"
+    return
+  end
+
+  P.current = record
+  P.flip = record.parity
+  select_files(record.parity)
+
+  if record.delivery_version == 1 and migrated then
+    local staged = read_file(P.payload)
+    if staged then
+      local identity_ok, message, email = pcall(fb_core.payload_identity, staged)
+      if identity_ok and message == record.message then
+        record.payload = staged
+        record.email = email
+        pcall(save_pending, record)
+      end
+    end
+  end
+
+  S.last_message = record.message
+  S.recovered_message = record.message
+  S.recovered_email = record.email
+  S.saved = true
+
+  if record.delivery_version == 2 then
+    local saved_receipt = read_saved_receipt()
+    if saved_receipt and saved_receipt.request_id == record.request_id then
+      finish_success(saved_receipt)
+      return
+    end
+  end
+
+  local reply = read_file(P.reply)
+  local receipt = fb_core.receipt(reply, record.request_id, record.delivery_version == 1)
+  if receipt then
+    finish_success(receipt)
+    return
+  end
+
+  clean_parity(1 - record.parity)
+  local staged = read_file(P.payload)
+  if staged and (record.delivery_version == 1 or staged == record.payload) then
+    P.deadline = reaper.time_precise() + SEND_WATCH
+    S.failure_reason = nil
+    S.phase = "sending"
+  else
+    clean_attempt()
+    S.failure_reason = "Delivery unconfirmed."
+    S.phase = "failed"
+  end
+end
+
 function feedback.init()
   P.base = reaper.GetResourcePath() .. SEP .. "yb_reference_feedback"
   P.pending = P.base .. "_pending.txt"
+  P.receipt = P.base .. "_receipt.json"
 
-  local saved_pending = read_file(P.pending)
-  local parity, message = parse_pending(saved_pending)
-  if parity ~= nil then
-    P.flip = parity
-    P.payload, P.reply, P.vbs = send_files(parity)
-    local reply = read_file(P.reply)
-    if reply and fb_core.is_ok(reply) then
-      clean_parity(0)
-      clean_parity(1)
-      os.remove(P.pending)
-      return
-    end
-
-    S.last_message = message
-    S.recovered_message = message
-    clean_parity(1 - parity)
-    if read_file(P.payload) ~= nil then
-      P.deadline = reaper.time_precise() + SEND_WATCH
-      P.recovered = true
-      S.phase = "sending"
-    else
-      clean_parity(parity)
-      S.phase = "failed"
-    end
-    return
-  end
-
-  -- A torn or hand-damaged pending record is still evidence that a deliberate
-  -- Send had not been settled. Keep its bytes and fail visibly instead of
-  -- classifying it as ordinary stale temp data and deleting the last copy.
-  if saved_pending ~= nil then
-    S.last_message = saved_pending
-    S.recovered_message = saved_pending
+  local ok = recover_atomic(P.pending)
+  recover_atomic(P.receipt)
+  if not ok then
+    local raw = read_file(P.pending) or read_file(P.pending .. ".bak") or ""
+    S.last_message = raw
+    S.recovered_message = raw
+    S.saved = raw ~= ""
+    S.failure_reason = "Saved feedback could not be restored."
     S.phase = "failed"
-    clean_parity(0)
-    clean_parity(1)
     return
   end
 
-  -- No owned pending record: all reply/payload files are stale and must not
-  -- satisfy a later send's poll.
+  local raw = read_file(P.pending)
+  if raw then
+    recover_pending(raw)
+    return
+  end
+
   clean_parity(0)
   clean_parity(1)
-  os.remove(P.pending)
+  local receipt = read_saved_receipt()
+  if receipt then
+    S.phase = "sent"
+    S.report_id = receipt.report_id
+    S.saved = false
+  end
 end
 
--- Kick off a send. `payload_json` comes from core/feedback.payload — already
--- clipped, escaped and non-empty. A send already in flight refuses (the UI's
--- Send button is dead then; two curls aimed at one reply file is the race this
--- guard exists for). `message` is the plain draft kept for restart recovery.
--- Starting over from "sent" or "failed" is the retry path.
 function feedback.start(payload_json, message)
   if S.phase == "sending" or type(payload_json) ~= "string" then return end
 
-  P.flip = 1 - P.flip
-  P.payload, P.reply, P.vbs = send_files(P.flip)
-  P.recovered = false
-  cleanup() -- leftovers from two sends ago; nothing alive can still write them
-  message = type(message) == "string" and message or S.last_message or payload_json
+  local identity_ok, payload_message, email = pcall(fb_core.payload_identity, payload_json)
+  message = type(message) == "string" and message or payload_message or ""
   S.last_message = message
   S.recovered_message = nil
-  if not write_file(P.pending, pending_text(P.flip, message)) then
+  S.recovered_email = nil
+  S.report_id = nil
+  S.failure_reason = nil
+  if not identity_ok then
+    S.saved = false
+    S.failure_reason = "Feedback could not be prepared."
     S.phase = "failed"
     return
   end
-  if not write_file(P.payload, payload_json) then
-    -- Can't even stage the payload (resource dir unwritable): fail loudly now
-    -- rather than spawning a courier with nothing to carry.
-    fail()
+
+  local delivered, id
+  if current_matches(payload_message, email) then
+    delivered = P.current.payload
+    id = P.current.request_id
+  else
+    id = request_id()
+    local prepared_ok
+    prepared_ok, delivered = pcall(fb_core.add_delivery, payload_json, id)
+    if not prepared_ok then
+      S.saved = false
+      S.failure_reason = "Feedback could not be prepared."
+      S.phase = "failed"
+      return
+    end
+  end
+
+  local parity = 1 - P.flip
+  clean_parity(parity)
+  local record = {
+    version = fb_core.PENDING_VERSION,
+    delivery_version = 2,
+    parity = parity,
+    payload = delivered,
+    message = payload_message,
+    email = email,
+    request_id = id,
+  }
+
+  local saved = pcall(save_pending, record)
+  if not saved then
+    S.saved = current_matches(payload_message, email)
+    S.failure_reason = "Couldn’t save your message."
+    S.phase = "failed"
+    return
+  end
+
+  P.current = record
+  P.flip = parity
+  select_files(parity)
+  S.saved = true
+  os.remove(P.receipt)
+  clean_parity(1 - parity)
+
+  if not write_file(P.payload, delivered) or not write_shim() then
+    fail("Delivery couldn’t start.")
     return
   end
 
   S.phase = "sending"
-  local quiet = write_shim()
-    and reaper.ExecProcess('wscript.exe //B "' .. P.vbs .. '"', -1) ~= nil
-  if not quiet then
-    fail()
+  local launched = reaper.ExecProcess('wscript.exe //B "' .. P.vbs .. '"', -1) ~= nil
+  if not launched then
+    fail("Delivery couldn’t start.")
     return
   end
   P.deadline = reaper.time_precise() + SEND_WATCH
 end
 
--- Every defer frame. Idle frames cost one compare; the file poll runs only
--- while a send is in flight, and the whole thing is time-bounded.
 function feedback.tick()
   if S.phase ~= "sending" then return end
 
-  local f = io.open(P.reply, "rb")
-  if f then
-    local reply = f:read("a") or ""
-    f:close()
-    -- Only the doorman's literal "ok" ends the wait early. Anything else in
-    -- the file (an error page, a half-written body) keeps the clock running.
-    if fb_core.is_ok(reply) then
-      cleanup()
-      P.recovered = false
-      S.phase = "sent"
-      return
-    end
+  local reply = read_file(P.reply)
+  local receipt = fb_core.receipt(reply, P.current and P.current.request_id,
+    P.current and P.current.delivery_version == 1)
+  if receipt then
+    finish_success(receipt)
+    return
   end
 
   if reaper.time_precise() >= P.deadline then
-    -- A recovered courier is never re-launched automatically. Keep its plain
-    -- message on disk until the user deliberately retries, so another close
-    -- cannot silently discard the fallback too.
-    fail(P.recovered)
+    fail("Delivery unconfirmed.")
   end
 end
 

@@ -161,11 +161,11 @@ end
 
 -- Paint only: the existing button keeps its hit target, state colours and glyph.
 -- A few translucent outlines approximate the glow without images or blur passes.
-function widgets.button_bloom(ctx, id, on, colour, trigger, strong, glow_gain, bounds)
+function widgets.button_bloom(ctx, id, on, colour, trigger, strong, glow_gain, bounds, revision)
   if not motion_ready() then return end
   local strength = motion.pulse(bloom_motion, id, on,
     reaper.ImGui_GetTime(ctx), reaper.ImGui_GetFrameCount(ctx),
-    theme.motion.BUTTON_BLOOM, trigger)
+    theme.motion.BUTTON_BLOOM, trigger, revision)
   if strength <= 0 then return end
   local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
   local rounding = select(1,
@@ -199,8 +199,9 @@ end
 
 -- All audio Play controls use the same confirmed-start bloom. Hand-drawn
 -- controls supply their painted bounds rather than a neighbouring hit target.
-function widgets.play_bloom(ctx, id, playing, bounds, trigger)
-  widgets.button_bloom(ctx, "play_" .. id, playing, T.ACCENT, trigger, false, 1.6, bounds)
+function widgets.play_bloom(ctx, id, playing, bounds, trigger, revision)
+  widgets.button_bloom(ctx, "play_" .. id, playing, T.ACCENT,
+    trigger, false, 1.6, bounds, revision)
 end
 
 -- Match the normal button border. AddRect applies its own half-pixel inset.

@@ -77,9 +77,8 @@ end
 
 ------------------------------------------------------- the transport controls
 
--- PLAY/PAUSE AND STOP LIVE HERE ONCE AND BOTH WINDOWS DRAW THEM (2026-08-12,
--- when the Library gained a transport of its own): the Reference View's control
--- cluster and the Library's info row call the same two functions, so the two
+-- PLAY, PAUSE AND STOP LIVE HERE ONCE AND BOTH WINDOWS DRAW THEM. The Reference
+-- View's control cluster and the Library's info row call the same three functions, so the two
 -- transports cannot drift into looking or behaving differently — which is the
 -- whole reason the user asked for a full transport in the Library rather than a
 -- lone stop button.
@@ -98,9 +97,7 @@ end
 --   id     the sound id this window is pointed at (selected_id / browse_id)
 --   sound  that sound's record, or nil when this window has nothing to act on
 
--- Is this slot's own sound sounding, and is it paused? One answer, because it
--- decides three things at once (the face, the tooltip, and whether the square is
--- dim) and the two buttons must agree about it exactly.
+-- Is this slot's own sound sounding, and does this slot own a parked position?
 --
 -- The slot test matters as much as the id: there is ONE live preview and two
 -- windows that can speak for it, so without it a Library audition of the very
@@ -112,51 +109,82 @@ local function playback_state(state, slot, id)
   local playing = state.preview.playing and state.preview.slot == slot
     and state.preview.sound_id ~= nil and state.preview.sound_id == id
   local parked = state.preview.paused[slot]
-  local paused = (not playing) and parked ~= nil and id ~= nil and parked.sound_id == id
+  local paused = (not state.preview.playing or state.preview.slot ~= slot) and parked ~= nil
   return playing, paused
 end
 
--- Play / pause. Every audio transport uses the shared soft active treatment.
---
--- "Stopped" and "paused" share the same PLAY face: clicking either resumes from
--- wherever this slot was left, or starts fresh. Dimmed — never hidden, never
--- resized — when the window has no sound to act on at all.
+-- Play is always a trigger. Repeating it starts the selected sound again from
+-- its normal start point; pausing and resuming belong to the neighbouring button.
 function transport.draw_play(ctx, state, font, opts)
   local slot = opts.slot
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
-  local playing, paused = playback_state(state, slot, opts.id)
-  local face = playing and "pause" or "play"
-  local use_icon = font and icons.NAMES[face]
+  local playing = playback_state(state, slot, opts.id)
+  local use_icon = font and icons.NAMES.play
 
   local dim = opts.sound == nil
   if dim then reaper.ImGui_BeginDisabled(ctx) end
   local soft_pushed = widgets.push_soft_active(ctx, playing)
   if playing then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER) end
   local clicked = reaper.ImGui_Button(ctx,
-    (use_icon and "" or (playing and PAUSE or PLAY)) .. "##playpause_" .. slot, ctrl, ctrl)
+    (use_icon and "" or PLAY) .. "##play_" .. slot, ctrl, ctrl)
   if playing then
     reaper.ImGui_PopStyleColor(ctx)
     widgets.pop_soft_active(ctx, soft_pushed)
   end
   -- Follow confirmed playback, so failed starts and pausing never light a bloom.
-  widgets.play_bloom(ctx, slot, playing and not dim)
+  widgets.play_bloom(ctx, slot, playing and not dim, nil, nil,
+    state.preview.start_serial)
   -- The painted glyph fades itself against the live style alpha (icons.lua), so
   -- a disabled square dims face and all with no hand-faded colour here.
   if use_icon then
     SOFT_ACTIVE_FACE.color = T.ACCENT_HOVER
-    icons.paint_over_item(ctx, font, face, playing and SOFT_ACTIVE_FACE or nil)
+    icons.paint_over_item(ctx, font, "play", playing and SOFT_ACTIVE_FACE or nil)
   end
   local hovered = reaper.ImGui_IsItemHovered(ctx)
   if dim then reaper.ImGui_EndDisabled(ctx) end
   tips.show(ctx, hovered,
-    playing and "Pause" or (paused and "Resume" or "Play selected sound"))
+    tips.with_shortcut(state, slot == "main" and "play" or nil,
+      slot == "main" and "Play from the saved start point" or "Play from the start"))
 
-  if clicked then return { type = "toggle_play", target = slot } end
+  if clicked then return { type = "trigger_play", target = slot } end
+  return nil
+end
+
+-- Pause parks the slot's current position. While parked, the same fixed pause
+-- icon is accented and resumes that exact sound, even if the selection moved.
+function transport.draw_pause(ctx, state, font, opts)
+  local slot = opts.slot
+  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  local _, paused = playback_state(state, slot, opts.id)
+  local playing = state.preview.playing and state.preview.slot == slot
+  local available = playing or paused
+  local use_icon = font and icons.NAMES.pause
+
+  if not available then reaper.ImGui_BeginDisabled(ctx) end
+  local soft_pushed = widgets.push_soft_active(ctx, paused)
+  if paused then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER) end
+  local clicked = reaper.ImGui_Button(ctx,
+    (use_icon and "" or PAUSE) .. "##pause_" .. slot, ctrl, ctrl)
+  if paused then
+    reaper.ImGui_PopStyleColor(ctx)
+    widgets.pop_soft_active(ctx, soft_pushed)
+  end
+  if use_icon then
+    SOFT_ACTIVE_FACE.color = T.ACCENT_HOVER
+    icons.paint_over_item(ctx, font, "pause", paused and SOFT_ACTIVE_FACE or nil)
+  end
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  if not available then reaper.ImGui_EndDisabled(ctx) end
+  tips.show(ctx, hovered,
+    tips.with_shortcut(state, slot == "main" and "pause" or nil,
+      paused and "Resume from the paused position" or "Pause at the current position"))
+
+  if clicked then return { type = "toggle_pause", target = slot } end
   return nil
 end
 
 -- What the STOP square acts on: anything this slot has going, whatever sound it
--- happens to be. Deliberately NOT id-matched the way play/pause is, because the
+-- happens to be. Deliberately NOT id-matched the way Play is, because the
 -- two buttons answer different questions. "Play" means "play the sound this
 -- window is pointed at", so it follows the selection. "Stop" means "stop what
 -- this window has going" — and a window whose selection has moved on while its
@@ -196,9 +224,9 @@ end
 -- Measure host-controlled sizes here, then pass them with the live scaled theme
 -- metrics to the pure policy. `transport.measure` and `transport.draw` both use
 -- this function, so the reserved and drawn heights agree.
--- Squares in the transport cluster: play, stop, loop, mono, pitch. A constant so `cluster_w`
+-- Squares in the transport cluster: play, pause, stop, loop, mono, pitch. A constant so `cluster_w`
 -- and the draw loop can never disagree about how many squares exist.
-local N_CLUSTER = 5
+local N_CLUSTER = 6
 
 local function geometry(ctx, width, count_w)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
@@ -273,7 +301,7 @@ function transport.draw_latch(ctx, state, font)
       or (state.selected
         and "Turn on Reference mode. This mutes the project so Play in Reaper hears the selected reference instead. You can bind the Latch button to a Reaper shortcut."
         or "Choose a reference first. Click the Latch button to open the reference list.")
-    tips.show(ctx, true, tip, "reference_latch")
+    tips.show(ctx, true, tips.with_shortcut(state, "latch", tip), "reference_latch")
   end
   return action
 end
@@ -346,8 +374,8 @@ function transport.draw(ctx, state, res)
   walkthrough_ui.note_rect(ctx, state.walkthrough, "latch",
     walk_x, walk_y, walk_x + ctrl, walk_y + ctrl)
 
-  -- The transport cluster. The play/pause and stop squares are the SHARED pair
-  -- (see the top of this file) — the Library's info row draws the same two —
+  -- The transport cluster. The play, pause and stop squares are the shared trio
+  -- (see the top of this file) — the Library's info row draws the same three —
   -- pointed at the "main" slot, so they speak only for the Reference View even
   -- while the one live preview is a browse audition (Phase 5.9: independent
   -- browsing).
@@ -365,16 +393,20 @@ function transport.draw(ctx, state, res)
   action = action or play_action
 
   place_cluster(1)
+  local pause_action = transport.draw_pause(ctx, state, font, main_slot)
+  action = action or pause_action
+
+  place_cluster(2)
   local stop_action = transport.draw_stop(ctx, state, font, main_slot)
   action = action or stop_action
 
-  place_cluster(2)
+  place_cluster(3)
   local controls_x, controls_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local controls_right = controls_x + (g.trim_x + g.trim_w)
-    - (g.cluster_x + 2 * (ctrl + g.cluster_gap))
+    - (g.cluster_x + 3 * (ctrl + g.cluster_gap))
   walkthrough_ui.note_rect(ctx, state.walkthrough, "transport",
     controls_x, controls_y, controls_right, controls_y + ctrl)
-  if widgets.toggle(ctx, "loop", LOOP, state.loop, "Loop", font, "repeat", nil,
+  if widgets.toggle(ctx, "loop", LOOP, state.loop, tips.with_shortcut(state, "loop", "Loop"), font, "repeat", nil,
       "loop") then action = { type = "toggle_loop" } end
   -- (The auto-audition ear left the bar 2026-08-07 — it only ever governed the
   -- browser's click-to-hear, so it lives beside the browser's audition strip.)
@@ -384,7 +416,7 @@ function transport.draw(ctx, state, res)
   --
   -- A plain accent-faced toggle like loop. Unlike the latch, it changes only
   -- what you hear right now and does not mute the project.
-  place_cluster(3)
+  place_cluster(4)
   local mono_channels = state.preview.playing and (tonumber(state.preview.channels) or 0)
     or (main_slot.sound and (tonumber(main_slot.sound.channels) or 0) or 0)
   local mono_available = mono_channels <= 2
@@ -392,13 +424,13 @@ function transport.draw(ctx, state, res)
     and "Fold left and right together in both speakers to check mono compatibility."
     or "Mono is available for mono and stereo sounds."
   if widgets.toggle(ctx, "mono", "M", state.mono,
-      mono_tip, font, nil, mono_available, "mono") then
+      tips.with_shortcut(state, "mono", mono_tip), font, nil, mono_available, "mono") then
     action = { type = "toggle_mono" }
   end
 
   -- PITCH: natural rate-style pitch in semitones. The value stays inside its
   -- compact panel; the bar keeps one stable musical-note square.
-  place_cluster(4)
+  place_cluster(5)
   local pitch_action = transport.draw_pitch(ctx, state, font, "main")
   action = action or pitch_action
   -- The reference picker: the name slot (the bar's one flexible element), the
@@ -510,7 +542,7 @@ function transport.draw(ctx, state, res)
       state.browser_open, icons.draw_folder) then
     action = action or { type = "toggle_browser" }
   end
-  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), "Open the Library.")
+  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), tips.with_shortcut(state, "library", "Open the Library."))
 
   -- Settings, the bar's corner (the user's pick over gear-beside-Library —
   -- same brief). Moved here from the browser toolbar so Settings is one click
@@ -542,7 +574,8 @@ function transport.draw(ctx, state, res)
       max_x - r - 2, min_y + r + 2, r, T.ACCENT)
   end
   tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
-    update_due and "Settings. An update is available" or "Settings")
+    tips.with_shortcut(state, "settings",
+      update_due and "Settings. An update is available" or "Settings"))
 
   -- Every item above was placed absolutely, so leave the cursor where a normal
   -- row would have left it — directly below the bar's full (possibly wrapped)

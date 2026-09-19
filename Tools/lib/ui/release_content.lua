@@ -1,7 +1,11 @@
--- Keep demonstrations for one release. Older releases use CHANGELOG.md only.
+-- Retain one demonstration catalogue, with explicit compatibility for patch releases.
 -- Edit description text between [=[ and ]=]; apostrophes and quotation marks are safe inside.
 return {
   version = '0.4.0',
+  compatible_versions = { '0.4.1' },
+  supplements = {
+    ['0.4.1'] = { title = 'Hotkeys and playback controls' },
+  },
   features = {
     {
       title = 'Spectrum Analyser',

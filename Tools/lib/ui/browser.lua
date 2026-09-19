@@ -1973,20 +1973,20 @@ local function draw_main(ctx, state, res)
   if small then reaper.ImGui_PopFont(ctx) end
   local btn = reaper.ImGui_GetFrameHeight(ctx)
   local gap_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
-  -- The right block is play/pause + stop + loop + pitch + the ear + the PREVIEW fader.
+  -- The right block is play + pause + stop + loop + pitch + the ear + the PREVIEW fader.
   -- (The ear joined 2026-08-07, moved out of the Reference View's bar:
   -- auto-audition only ever governed THIS window's click-to-hear, so it sits
   -- beside the audition strip it controls; loop joined it 2026-08-11 so
   -- browsing doesn't need the other window to repeat a sound; the transport
-  -- pair joined 2026-08-12 — until then the Library could start a sound but
+  -- transport joined 2026-08-12 — until then the Library could start a sound but
   -- had no way to stop one.)
   --
-  -- Five squares now, and the block is what the tech line on the left is sized
+  -- Six squares now, and the block is what the tech line on the left is sized
   -- AGAINST (left_w, below), so the extra square comes out of the text's share: it
   -- truncates a little sooner on a narrow window, and the two never share a
   -- pixel. The row's HEIGHT is a control either way, so the pane budget above
   -- is untouched.
-  local squares = btn * 5 + gap_x * 5
+  local squares = btn * 6 + gap_x * 6
   local fader_block = squares + label_w + 6 + M.SLIDER_W
   local row_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local left_w = row_w - fader_block - 8
@@ -2009,24 +2009,27 @@ local function draw_main(ctx, state, res)
   -- so once an earlier widget has an action the draw call is SKIPPED and its
   -- widget vanishes for that frame. Always draw, then merge.
   if left_w > 0 then reaper.ImGui_SameLine(ctx) end
-  -- The five squares, pushed right so they sit against the fader (which
+  -- The six squares, pushed right so they sit against the fader (which
   -- right-aligns itself in whatever remains — the measure-then-push idiom).
   local cx = reaper.ImGui_GetCursorPosX(ctx)
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local target = cx + avail - fader_block
   if target > cx then reaper.ImGui_SetCursorPosX(ctx, target) end
-  -- The transport pair (2026-08-12), leading the block in the Reference View's
-  -- own order — play/pause, stop, then loop — and drawn by the SAME two
-  -- functions that view's cluster uses (ui/transport.lua), so the two
+  -- The transport trio, leading the block in the Reference View's own order —
+  -- play, pause, stop, then loop — and drawn by the same functions that view's
+  -- cluster uses (ui/transport.lua), so the two
   -- windows' transports cannot drift apart. Pointed at the "browse" slot:
   -- they act on the sound on the strip, and the pause they park is the
   -- Library's own, never the Reference View's.
   --
-  -- Clicking a row still auditions from the start, exactly as before — this
-  -- pair is how you stop one, and how you pick a paused audition back up.
+  -- Clicking a row still auditions from the start, exactly as before. These
+  -- three controls trigger, pause/resume, and stop the Library's own audition.
   local browse_slot = { slot = "browse", id = state.browse_id, sound = state.browse }
   local play_action = transport.draw_play(ctx, state, res.icon_font, browse_slot)
   action = action or play_action
+  reaper.ImGui_SameLine(ctx)
+  local pause_action = transport.draw_pause(ctx, state, res.icon_font, browse_slot)
+  action = action or pause_action
   reaper.ImGui_SameLine(ctx)
   local stop_action = transport.draw_stop(ctx, state, res.icon_font, browse_slot)
   action = action or stop_action

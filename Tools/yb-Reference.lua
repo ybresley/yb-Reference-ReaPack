@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.4.0
+-- @version 0.4.1
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -20,52 +20,48 @@
 --   [nomain] CHANGELOG.md
 --   [effect] yb-Reference Monitoring Filter.jsfx
 --   [main] yb-Reference_ToggleReferenceMode.lua
+--   [main] yb-Reference_Hotkey_PlayPause.lua
+--   [main] yb-Reference_Hotkey_PauseResume.lua
+--   [nomain] yb-Reference_PlayPause.lua
+--   [main] yb-Reference_Hotkey_ToggleFilterSub.lua
+--   [main] yb-Reference_Hotkey_ToggleFilterBass.lua
+--   [main] yb-Reference_Hotkey_ToggleFilterLowMid.lua
+--   [main] yb-Reference_Hotkey_ToggleFilterMid.lua
+--   [main] yb-Reference_Hotkey_ToggleFilterHigh.lua
+--   [main] yb-Reference_Hotkey_ToggleMono.lua
+--   [nomain] yb-Reference_ToggleMono.lua
+--   [main] yb-Reference_Hotkey_ToggleLoop.lua
+--   [nomain] yb-Reference_ToggleLoop.lua
+--   [main] yb-Reference_Hotkey_NextPinnedReference.lua
+--   [nomain] yb-Reference_NextPinnedReference.lua
+--   [main] yb-Reference_Hotkey_PreviousPinnedReference.lua
+--   [nomain] yb-Reference_PreviousPinnedReference.lua
+--   [main] yb-Reference_Hotkey_ToggleLibrary.lua
+--   [nomain] yb-Reference_ToggleLibrary.lua
+--   [main] yb-Reference_Hotkey_ToggleSettings.lua
+--   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update brings a new high-quality frequency spectrum analyser, an
---   improved waveform display and new interface animations, alongside smaller
---   improvements and bug fixes.
---    
---   Highlights
---     • Spectrum Analyser: A new high-quality frequency spectrum analyser
---       shows the frequency balance of reference playback, Library auditioning
---       and the Reaper project. It includes detailed frequency readouts and
---       adjustable listening bands, so you can inspect and hear specific parts
---       of a sound.
---     • Improved Waveform: The waveform now shows finer detail down to
---       individual samples, with combined time navigation and zoom, plus
---       independent waveform height adjustment.
---     • Panel Layout: The waveform and spectrum now arrange themselves to fit
---       the available space, with Side by Side and Stacked options in Settings
---       and a swap button to change their order.
---     • UI Animations: Buttons, switches and colour changes now have subtle
---       animations, adding motion to everyday controls. Interface Animations
---       in Settings → Appearance turns them on or off.
+--   This update adds configurable hotkeys, separate playback controls and more
+--   accent colours, alongside improved release notes and a floating-window
+--   crash fix.
 --    
 --   Changes
---     • Reference Picker: Pinned-reference labels can now be edited in place
---       without closing the dropdown.
---     • Reference Playback: Reference View and Library volume readouts now
---       accept exact typed values and reset with right-click.
---     • Updates: What's New can now present substantial release features with
---       silent guided demonstrations while keeping the full release notes
---       available.
---     • Library: New categories can now be confirmed with Enter.
+--     • Hotkeys: Hotkeys are now available for yb-Reference controls and stay
+--       in sync with Reaper's Actions list. Assign them in Settings →
+--       Hotkeys; assigned shortcuts also appear in the matching button
+--       tooltips.
+--     • Reference Playback: Reference View and Library now have separate Play
+--       and Pause / Resume controls. Play restarts the sound, while Pause /
+--       Resume continues from the same position.
+--     • Updates: Release Notes now includes every version you missed when
+--       updating across several releases. Open the full history from Settings
+--       → Updates.
+--     • Appearance: Accent Colour now offers twelve choices in Settings →
+--       Appearance.
 --    
 --   Fixes
---     • Library: Library waveforms now continue loading after a sound file
---       cannot be read.
---     • Waveform: Start and end markers now match in size and stay aligned to
---       the waveform.
---     • Reference Playback: Library Pitch changes now apply reliably during
---       audition.
---     • Reference Playback: Pitch panels now stay on the current monitor and
---       remain scrollable when screen space is limited.
---     • Reference Playback: Volume readouts now show rounded zero consistently
---       while keeping the sign of nonzero values.
---     • Loudness: The Loudness panel now stays on the current monitor, opens
---       clear of its button and keeps all controls reachable.
---     • Reference Picker: Dropdown rows now keep consistent widths, and the
---       scrollbar appears only when needed.
+--     • Window: Moving yb-Reference beyond the edges of Reaper's window no
+--       longer crashes the tool.
 --
 -- RELEASE NOTES ARE GENERATED — never hand-write them here. CHANGELOG.md is the
 -- single source of truth (2026-08-08); `lua scripts/gen_header.lua` writes the
@@ -759,7 +755,8 @@ local state = {
   -- trim at all, so neither the level nor the waveform can be re-derived from the
   -- sound record alone — the same sound sounds different depending on who started it.
   preview        = { playing = false, sound_id = nil, position = 0, length = 0, channels = 0,
-    slot = nil, trim_db = 0, paused = { main = nil, browse = nil, picker = nil } },
+    slot = nil, trim_db = 0, start_serial = 0,
+    paused = { main = nil, browse = nil, picker = nil } },
   picker_preview_owner = nil, -- this frame's open picker project; never saved
   picker_preview_blocked = false,
   -- Reference mode (Phase 4). `active` = the current preview was started BY the
@@ -1687,6 +1684,8 @@ local function replace_monitor_filter(next_value, save)
 end
 
 local actions = require("core.actions")
+local hotkeys = require("hotkeys")
+local settings = require("ui.settings")
 local function handle_action(a)
   if a.type == "pick" then
     do_import(reaper_api.pick_files(), a.category)
@@ -1870,7 +1869,7 @@ local function handle_action(a)
       end
     end
   elseif a.type == "preview_pin" then
-    local ok, message = picker_preview.play(state, a.id, a.proj, a.restart == true, playback.play)
+    local ok, message = picker_preview.play(state, a.id, a.proj, playback.play)
     if not ok and message then
       state.status = message
       -- The Library's status line may be hidden while the picker is in use.
@@ -1893,8 +1892,10 @@ local function handle_action(a)
     if state.browse_id == a.id then playback.audition_browse() end
   elseif a.type == "show_in_library" then
     show_in_library(a.id)
-  elseif a.type == "toggle_play" then
-    playback.toggle_play(a.target == "browse" and "browse" or "main")
+  elseif a.type == "trigger_play" then
+    playback.trigger(a.target == "browse" and "browse" or "main")
+  elseif a.type == "toggle_pause" then
+    playback.toggle_pause(a.target == "browse" and "browse" or "main")
   elseif a.type == "stop_play" then
     playback.stop(a.target == "browse" and "browse" or "main")
   elseif a.type == "toggle_loop" then
@@ -1920,6 +1921,17 @@ local function handle_action(a)
     local next_value = monitor_filter_core.set_boundary(state.monitor_filter,
       a.boundary, a.hz)
     replace_monitor_filter(next_value, a.commit == true)
+  elseif a.type == "toggle_monitor_filter_preset" then
+    local value = state.monitor_filter
+    if not value.system.available then return end
+    if value.on and value.selected_id == a.id then
+      handle_action({ type = "monitor_filter_full_range" })
+    else
+      local band = value.presets[a.id]
+      if not band or (value.system.max_filter_hz
+          and band.high_hz > value.system.max_filter_hz) then return end
+      handle_action({ type = "apply_monitor_filter_preset", id = a.id })
+    end
   elseif a.type == "apply_monitor_filter_preset" then
     if not state.monitor_filter.system.available then return end
     replace_monitor_filter(
@@ -2191,6 +2203,24 @@ local function handle_action(a)
     -- (installed version, pin state) so the modal describes now, not the
     -- last daily check.
     updater.refresh_registry()
+    state.hotkeys = hotkeys.refresh()
+  elseif a.type == "toggle_settings" then
+    if settings.is_open() then
+      settings.close()
+    else
+      settings.open(state)
+      updater.refresh_registry()
+      state.hotkeys = hotkeys.refresh()
+    end
+  elseif a.type == "hotkey_edit" or a.type == "hotkey_remove" then
+    -- Native dialogs run after app.frame has closed every ImGui window.
+    local update = a.type == "hotkey_edit" and hotkeys.edit or hotkeys.remove
+    local snapshot, message = update(a.id, a.index, a.expected_description)
+    state.hotkeys = snapshot
+    if message then
+      state.status = message
+      reaper_api.message(message, "yb-Reference · Hotkeys")
+    end
   elseif a.type == "set_open_library_on_startup" then
     state.open_library_on_startup = a.enabled == true
     reaper_api.set_open_library_on_startup(state.open_library_on_startup)
@@ -2297,6 +2327,7 @@ end
 reaper_api.mark_action_running(CMD_ID, true)
 reaper.atexit(function()
   reference.cleanup(); pcall(monitoring_filter.shutdown)
+  pcall(hotkeys.stop)
   if import_job then import_job:cancel() end
   preview.stop(); peaks.cancel(); wave_detail.close(); loudness.cancel()
   reaper_api.cancel_folder_picker()
@@ -2308,6 +2339,9 @@ reaper.atexit(function()
   dragout.hide_ghost()
   reaper_api.mark_action_running(CMD_ID, false)
 end)
+
+state.hotkeys = hotkeys.start(root)
+local hotkeys_refresh_at = 0
 
 -- The browser's open/closed EDGE feeds the walkthrough (stop 1 advances on the
 -- real open; a browser stop freezes while it's closed). Watched here, on the
@@ -2346,6 +2380,14 @@ local function loop()
   local pins_warning
   if pin_refresh then
     pins_warning = apply_pins_refresh(pin_refresh)
+  end
+
+  -- Companion actions share the same handlers as the visible controls, after
+  -- the current project's pins and selection have caught up.
+  for _, intent in ipairs(hotkeys.tick()) do handle_action(intent) end
+  if reaper.time_precise() >= hotkeys_refresh_at then
+    state.hotkeys = hotkeys.refresh()
+    hotkeys_refresh_at = reaper.time_precise() + 0.5
   end
 
   playback.sync_reference(pins_warning)
@@ -2393,12 +2435,12 @@ local function loop()
   end
 
   -- The feedback sender's heartbeat: one compare on an idle frame; a reply-file
-  -- poll only while a report is in flight, time-bounded under 10 s. The curl
+  -- poll only while a report is in flight, time-bounded at 31 s. The curl
   -- itself runs in a separate process — nothing here blocks.
   feedback.tick()
 
   -- The never-silently-lost promise holds OUTSIDE the Feedback pane too: a send
-  -- takes up to ~9 s, so the user may close Settings or switch sections before
+  -- takes up to 31 s, so the user may close Settings or switch sections before
   -- the answer arrives. Remember the failure until this frame has drawn; only
   -- then do we know whether the pane itself showed its red warning.
   if state.feedback.phase == "failed" and fb_last_phase ~= "failed" then
@@ -2409,7 +2451,9 @@ local function loop()
     fb_failure_notice = {
       copied = reaper_api.set_clipboard(state.feedback.last_message or "")
     }
-    state.status = "Your feedback couldn't be sent. Your draft is still in Settings \u{2192} Feedback, where you can email it instead."
+    state.status = "Feedback delivery is unconfirmed. Open Settings \u{2192} Feedback to retry or email your message."
+  elseif state.feedback.phase == "sent" and fb_last_phase ~= "sent" then
+    state.status = "Your feedback was received. Thank you."
   end
   fb_last_phase = state.feedback.phase
 
@@ -2491,13 +2535,16 @@ local function loop()
   -- the Library's clipped status line being open.
   if fb_failure_notice then
     if not feedback_visible then
-      local copy_line = fb_failure_notice.copied
-        and "Your message is still in Settings \u{2192} Feedback and has also been copied to your clipboard."
-        or "Your message is still in Settings \u{2192} Feedback."
+      local copy_line = state.feedback.saved
+        and "Your submitted message is saved in Settings \u{2192} Feedback, including after reopening the tool."
+        or "Copy your message from Settings \u{2192} Feedback before closing the tool. It could not be saved for reopening."
+      if fb_failure_notice.copied then
+        copy_line = copy_line .. " It has also been copied to your clipboard."
+      end
       reaper_api.message(
-        "Your feedback couldn't be sent.\n\n" .. copy_line ..
-        "\n\nYou can email it instead to:\n" .. tostring(state.feedback.address or ""),
-        "yb-Reference · Feedback Couldn't Be Sent")
+        "Feedback delivery is unconfirmed. It may already have arrived.\n\n" .. copy_line ..
+        "\n\nRetry from Feedback, or email your message to:\n" .. tostring(state.feedback.address or ""),
+        "yb-Reference · Feedback Delivery Unconfirmed")
     end
     fb_failure_notice = nil
   end
@@ -2533,7 +2580,10 @@ local function loop()
   -- shortcut system instead — Space still plays the project mid-browse
   -- (2026-08-08 round 3; which keys and when is ui/focus.lua's decision).
   if forward_keys then
-    for i = 1, #forward_keys do reaper_api.send_key_to_main(forward_keys[i]) end
+    for i = 1, #forward_keys do
+      local key = forward_keys[i]
+      reaper_api.send_key_to_main(key.vk, key.modifiers)
+    end
   end
   -- Keep the drag cursor and the name tag asserted while a drag is live (REAPER
   -- re-asserts its own cursor constantly, so this must repeat per frame). After
@@ -2567,6 +2617,7 @@ local function loop()
     -- also why this isn't a holders.release): the un-mute leads, everything else
     -- follows.
     reference.cleanup() -- window closed: never leave the project muted behind us
+    pcall(hotkeys.stop)
     pcall(monitoring_filter.shutdown) -- return Monitoring FX to exact dry immediately
     if import_job then import_job:cancel() end
     preview.stop()      -- then stop any sound still playing

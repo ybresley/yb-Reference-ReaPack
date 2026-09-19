@@ -71,8 +71,9 @@ function holders.forget_wave(slot) wave_asked[slot] = nil end
 
 --------------------------------------------------------------- the pause memory
 
--- Each playback surface remembers its own pause. The picker's pause lasts only
--- while its normal list is open; Reference View and Library pauses outlive it.
+-- Reference View and Library each remember their own pause. The picker entry is
+-- retained only so cleanup can discard stale session state from older builds;
+-- selector Play is now a trigger and never creates it.
 local PAUSE_SLOTS = { "main", "browse", "picker" }
 
 -- ONE REMEMBERED PAUSE PER SLOT, not one for the tool (2026-08-12, when the

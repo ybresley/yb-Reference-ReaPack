@@ -351,13 +351,15 @@ function refpicker.draw_arrows(ctx, state, res)
     action = { type = "step_reference", delta = -1 }
   end
   icons.paint_over_item(ctx, font, "chevron-left")
-  tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx), "Previous reference")
+  tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx),
+    tips.with_shortcut(state, "previous", "Previous reference"))
   reaper.ImGui_SameLine(ctx, 0, M.PICK_ARROW_GAP) -- a pair, not one welded button
   if reaper.ImGui_Button(ctx, (font and icons.NAMES["chevron-right"] and "" or CHEVRON_RIGHT) .. "##refnext", ctrl, ctrl) then
     action = { type = "step_reference", delta = 1 }
   end
   icons.paint_over_item(ctx, font, "chevron-right")
-  tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx), "Next reference")
+  tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx),
+    tips.with_shortcut(state, "next", "Next reference"))
   if not live then reaper.ImGui_EndDisabled(ctx) end
 
   return action
@@ -641,13 +643,11 @@ local function draw_row(ctx, state, res, p, w)
   else
     if not state.picker_preview_blocked and not state.drag then
       if row_hovered and reaper.ImGui_IsMouseClicked(ctx, 1) then
-        action = { type = "preview_pin", id = p.id, proj = state.pins.proj, restart = true }
+        action = { type = "preview_pin", id = p.id, proj = state.pins.proj }
         request_preview_bloom(ctx, state, p.id)
       elseif preview_clicked then
         action = { type = "preview_pin", id = p.id, proj = state.pins.proj }
-        if not picker_playing then
-          request_preview_bloom(ctx, state, p.id)
-        end
+        request_preview_bloom(ctx, state, p.id)
       end
     end
     if pressed then
@@ -735,8 +735,6 @@ local function draw_row(ctx, state, res, p, w)
 
   if show_preview then
     local playing = picker_playing
-    local parked = state.preview.paused and state.preview.paused.picker
-    local paused = not playing and parked and parked.sound_id == p.id
     local blocked = state.picker_preview_blocked or state.drag ~= nil
     local cx, cy = preview_x + ctrl * 0.5, (y0 + y1) * 0.5
     if blocked then reaper.ImGui_BeginDisabled(ctx) end
@@ -768,15 +766,15 @@ local function draw_row(ctx, state, res, p, w)
       ui.preview_bloom_id, ui.preview_bloom_proj, ui.preview_bloom_frame = nil, nil, nil
     end
     local color = playing and T.ACCENT_HOVER or T.TEXT_SECONDARY
-    if not icons.paint_glyph(ctx, font, playing and "pause" or "play", cx, cy, color) then
-      local glyph = playing and "\u{23F8}" or "\u{25B6}"
+    if not icons.paint_glyph(ctx, font, "play", cx, cy, color) then
+      local glyph = "\u{25B6}"
       local gw, gh = reaper.ImGui_CalcTextSize(ctx, glyph)
       reaper.ImGui_DrawList_AddText(dl, px(cx - gw * 0.5), px(cy - gh * 0.5),
         theme.fade(color, alpha), glyph)
     end
     if blocked then reaper.ImGui_EndDisabled(ctx) end
     local tip = state.picker_preview_blocked and PREVIEW_BLOCKED
-      or (playing and "Pause preview" or (paused and "Resume preview" or "Preview without changing the selected reference"))
+      or "Play from the saved start point without changing the selected reference"
     tips.show(ctx, preview_hovered, tip, "pinpreview_" .. p.id, r)
   end
 
