@@ -44,6 +44,9 @@ function coordinator.new(state, callbacks, startup_alert)
     state.preview.channels = ok and preview.channels() or 0
     state.preview.length = ok and preview.length() or 0
     state.preview.position = ok and (position or 0) or 0
+    if ok then
+      state.preview.start_serial = (state.preview.start_serial or 0) + 1
+    end
     if not ok then
       local folder = holders.is_pin(s.id)
         and "the project's References folder" or "the Library folder"
@@ -59,19 +62,32 @@ function coordinator.new(state, callbacks, startup_alert)
     if state.auto_audition then playback.play(state.browse, 0, "browse") end
   end
 
-  function playback.toggle_play(slot)
+  -- Play is a trigger, not a transport toggle. Repeating it replaces the
+  -- current preview and starts this sound again from its normal start point.
+  function playback.trigger(slot)
     local s = (slot == "browse") and state.browse or state.selected
-    local id = (slot == "browse") and state.browse_id or state.selected_id
-    if state.preview.playing and state.preview.slot == slot
-      and state.preview.sound_id ~= nil and state.preview.sound_id == id then
-      holders.pause_playback(state, slot, id)
+    if slot == "browse" and state.reference.active then
+      state.status = REF_PLAYING_MSG
+    elseif s then
+      local loop = slot == "main" and state.reference.active and true or nil
+      if playback.play(s, nil, slot, loop) then holders.clear_pause(state, slot) end
+    end
+  end
+
+  -- Pause owns the parked position. The same button resumes the sound this
+  -- slot parked, even if its window's selection has moved in the meantime.
+  function playback.toggle_pause(slot)
+    if state.preview.playing and state.preview.slot == slot then
+      holders.pause_playback(state, slot, state.preview.sound_id)
     elseif slot == "browse" and state.reference.active then
       state.status = REF_PLAYING_MSG
-    elseif s and holders.paused_on(state, slot, id) then
-      local p = holders.pause_of(state, slot)
-      if playback.play(s, p and p.at or 0, slot) then holders.clear_pause(state, slot) end
-    elseif s then
-      playback.play(s, nil, slot)
+    else
+      local parked = holders.pause_of(state, slot)
+      local s = parked and callbacks.find(parked.sound_id) or nil
+      local loop = slot == "main" and state.reference.active and true or nil
+      if s and playback.play(s, parked.at or 0, slot, loop) then
+        holders.clear_pause(state, slot)
+      end
     end
   end
 

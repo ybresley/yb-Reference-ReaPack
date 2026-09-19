@@ -90,8 +90,9 @@ local WATCH_FRAMES = 5
 --   * Delete / Backspace — forwarding those would let a stray press while
 --     browsing OUR list delete items in the user's PROJECT, a destructive
 --     surprise. Delete belongs to the focused Library pane.
--- Modifiers ride along physically (send_key_to_main reads the live keyboard),
--- so Ctrl+Z forwarded as Z undoes in REAPER, exactly as bound.
+-- Capture modifiers from the same ImGui frame as the key press. Reading the
+-- physical keyboard later can lose a fast Ctrl/Shift/Alt release and send the
+-- unmodified key instead.
 --
 -- The map is built once at load: each ImGui key constant that this ReaImGui
 -- knows, paired with its Windows virtual-key code. Missing constants are
@@ -100,6 +101,42 @@ local FWD = {}
 local function fwd_key(name, vk)
   local ctor = reaper["ImGui_Key_" .. name]
   if ctor ~= nil then FWD[#FWD + 1] = { key = ctor(), vk = vk } end
+end
+
+-- SWS uses its own modifier bits. Map each named ImGui flag explicitly rather
+-- than assuming the two APIs assign the same numbers. A nil result asks the
+-- adapter to use SWS's physical-keyboard fallback on older ReaImGui builds.
+local FWD_MODS = {}
+local KNOWN_IMGUI_MODS = 0
+local function fwd_mod(name, sws)
+  local ctor = reaper["ImGui_Mod_" .. name]
+  if ctor ~= nil then
+    local imgui = ctor()
+    FWD_MODS[#FWD_MODS + 1] = { imgui = imgui, sws = sws }
+    KNOWN_IMGUI_MODS = KNOWN_IMGUI_MODS | imgui
+  end
+end
+do
+  fwd_mod("Ctrl", 4)
+  fwd_mod("Shift", 8)
+  fwd_mod("Alt", 16)
+  fwd_mod("Super", 32)
+end
+
+local function forwarding_modifiers(ctx)
+  if reaper.ImGui_GetKeyMods == nil then return nil end
+  local imgui_mods = reaper.ImGui_GetKeyMods(ctx)
+  if type(imgui_mods) ~= "number"
+    or (imgui_mods & KNOWN_IMGUI_MODS) ~= imgui_mods then
+    return nil
+  end
+
+  local sws_mods = 0
+  for i = 1, #FWD_MODS do
+    local mod = FWD_MODS[i]
+    if (imgui_mods & mod.imgui) ~= 0 then sws_mods = sws_mods | mod.sws end
+  end
+  return sws_mods
 end
 do
   fwd_key("Space", 0x20)
@@ -176,8 +213,8 @@ end
 
 -- Called after every window has drawn. Returns two things for the entry
 -- script: whether to hand keyboard focus back to REAPER this frame, and the
--- list of key presses (Windows VK codes) to forward to REAPER's shortcut
--- system — nil on the overwhelming majority of frames.
+-- list of key presses and their same-frame modifier snapshots to forward to
+-- REAPER's shortcut system — nil on the overwhelming majority of frames.
 function focus.frame_end(ctx)
   if not ENABLED then want_request = false; return false, nil end
 
@@ -263,11 +300,12 @@ function focus.frame_end(ctx)
   local keys
   if not reaper.ImGui_IsAnyItemActive(ctx)
     and reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_AnyWindow()) then
+    local modifiers = forwarding_modifiers(ctx)
     for i = 1, #FWD do
       if not consumed_keys[FWD[i].key]
         and reaper.ImGui_IsKeyPressed(ctx, FWD[i].key, true) then
         keys = keys or {}
-        keys[#keys + 1] = FWD[i].vk
+        keys[#keys + 1] = { vk = FWD[i].vk, modifiers = modifiers }
       end
     end
   end

@@ -1,6 +1,6 @@
 -- Release highlights share one window with the text-only release history.
--- Demonstrations exist for the matching installed release only. Small updates
--- and older releases retain the compact reading layout.
+-- A retained catalogue can also accompany explicitly compatible patch releases.
+-- Updates that do not include its feature release keep the text-only layout.
 --
 -- It fires after the RESTART, never before: an update swaps the files on disk
 -- while REAPER carries on running the old script, so notes shown at install time
@@ -64,7 +64,8 @@ function whatsnew.open_history(releases)
   ui.available = nil
   ui.open, ui.history, ui.preview = true, true, false
   ui.history_list = releases
-  ui.notes = false
+  ui.notes = true
+  ui.notes_top = true
   ui.work = nil
   showcase.reset()
 end
@@ -262,6 +263,43 @@ local function draw_notes(ctx, list, preview)
   end
 end
 
+-- Patch summaries sit above the retained feature browser. Both version labels
+-- use the same release font; the summary never becomes another feature card.
+local function draw_supplements(ctx, list)
+  if ui.supplement_source ~= list then
+    ui.supplement_source = list
+    ui.supplements = showcase.supplements(list)
+  end
+  for _, supplement in ipairs(ui.supplements) do
+    local bold = theme.push_release_bold_font(ctx)
+    reaper.ImGui_TextColored(ctx, T.ACCENT, 'v' .. supplement.version)
+    if bold then reaper.ImGui_PopFont(ctx) end
+    local x, y = reaper.ImGui_GetCursorPos(ctx)
+    local width = reaper.ImGui_GetContentRegionAvail(ctx)
+    local button_w = reaper.ImGui_CalcTextSize(ctx, 'View Changes') + M.FRAME_PAD_X * 2
+    local text_w = math.max(1, width - button_w - M.WN_TOPIC_GAP)
+    reaper.ImGui_BeginGroup(ctx)
+    reaper.ImGui_PushTextWrapPos(ctx, x + text_w)
+    bold = theme.push_release_bold_font(ctx, M.WN_DESCRIPTION_FS)
+    reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, supplement.title)
+    if bold then reaper.ImGui_PopFont(ctx) end
+    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
+      'Included alongside the new features in v' .. showcase.version .. '.')
+    reaper.ImGui_PopTextWrapPos(ctx)
+    reaper.ImGui_EndGroup(ctx)
+    local bottom = reaper.ImGui_GetCursorPosY(ctx)
+    reaper.ImGui_SetCursorPos(ctx, x + width - button_w,
+      y + math.max(0, (bottom - y - M.ITEM_SPACING_Y - reaper.ImGui_GetFrameHeight(ctx)) / 2))
+    if reaper.ImGui_Button(ctx, 'View Changes###release_supplement_' .. supplement.version, button_w) then
+      ui.notes, ui.notes_top = true, true
+    end
+    reaper.ImGui_SetCursorPos(ctx, x, math.max(bottom, reaper.ImGui_GetCursorPosY(ctx)))
+    reaper.ImGui_Dummy(ctx, 0, M.ITEM_SPACING_Y)
+    reaper.ImGui_Separator(ctx)
+    reaper.ImGui_Dummy(ctx, 0, M.ITEM_SPACING_Y)
+  end
+end
+
 function whatsnew.draw(ctx, state, res)
   local pending = state.whatsnew
   local available_mode = ui.available ~= nil
@@ -269,7 +307,8 @@ function whatsnew.draw(ctx, state, res)
   -- so dismissing it doesn't reopen on the very next frame, and so a second
   -- update in one session (which cannot happen today — an update restarts the
   -- tool — but might once that changes) would still get its own card.
-  if pending and not ui.available and ui.shown_for ~= pending.version then
+  if pending and not ui.available and not ui.history and not ui.preview
+      and ui.shown_for ~= pending.version then
     ui.open, ui.shown_for = true, pending.version
     ui.focus_pending = true
     ui.notes = false
@@ -285,10 +324,8 @@ function whatsnew.draw(ctx, state, res)
   elseif preview then
     list = {}
     for _, release in ipairs(state.changelog or {}) do
-      if release.version == showcase.version then
-        list[1] = release
-        break
-      end
+      list[#list + 1] = release
+      if release.version == showcase.version then break end
     end
     title = "WHAT'S NEW · PREVIEW###yb_whatsnew"
   elseif ui.history then
@@ -371,10 +408,21 @@ function whatsnew.draw(ctx, state, res)
     local body_h = math.max(1, available_h - reaper.ImGui_GetFrameHeight(ctx) - M.ITEM_SPACING_Y * 2 - 1)
     local body_flags = ui.notes and 0 or
       reaper.ImGui_WindowFlags_NoScrollbar() | reaper.ImGui_WindowFlags_NoScrollWithMouse()
+    if ui.notes and ui.notes_top and reaper.ImGui_SetNextWindowScroll then
+      reaper.ImGui_SetNextWindowScroll(ctx, -1, 0)
+      ui.notes_top = nil
+    end
     if reaper.ImGui_BeginChild(ctx, ui.notes and 'release_notes_body' or 'release_highlights_body',
         0, body_h, 0, body_flags) then
+      if ui.notes and ui.notes_top then
+        reaper.ImGui_SetScrollY(ctx, 0)
+        ui.notes_top = nil
+      end
       if ui.notes then draw_notes(ctx, list, preview)
-      else showcase.draw(ctx, res, preview) end
+      else
+        draw_supplements(ctx, list)
+        showcase.draw(ctx, res, preview)
+      end
       reaper.ImGui_EndChild(ctx)
     end
     reaper.ImGui_Separator(ctx)
@@ -383,6 +431,7 @@ function whatsnew.draw(ctx, state, res)
     local footer_label = ui.notes and 'Back to Highlights' or 'Full Release Notes'
     if reaper.ImGui_Button(ctx, footer_label .. '###release_notes_toggle', footer_w) then
       ui.notes = not ui.notes
+      if ui.notes then ui.notes_top = true end
     end
   else
     draw_notes(ctx, list, false)

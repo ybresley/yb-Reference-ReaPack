@@ -41,9 +41,8 @@ local T = {
   ACTIVE_CONTROL_HELD   = 0x599CE738, -- pressed active button
   ACTIVE_CONTROL_BORDER = 0x599CE759, -- quiet accent outline around the wash
   SEARCH_MATCH_BG = 0x599CE747, -- matching text within a result row
-  -- Red is reserved for destructive controls. The active latch follows ACCENT,
-  -- so changing the user's palette changes that state along with the other
-  -- active controls without weakening the danger meaning here.
+  -- Destructive controls keep a fixed colour independent of the chosen accent.
+  -- Red accents are allowed; destructive actions also use explicit icons or labels.
   DANGER_RED   = 0xFC6B83FF,
   -- The title bar's ✕ under the cursor. The same red, THINNED over the dark
   -- title bar rather than laid on at full strength: at full strength the cross
@@ -95,15 +94,21 @@ local T = {
 }
 theme.tokens = T
 
--- Appearance choices. Blue is the shipped default; the other hues reuse the
--- established category colours so they already belong to the product's visual
--- language. The list follows the colour wheel from green through purple rather
--- than jumping back and forth between hues. Hover colours are a small lift.
+-- Appearance choices follow hue order. Blue stays the default, and hover
+-- colours provide a small lift without changing the selected colour family.
 local ACCENT_OPTIONS = {
+  { id = "red",    label = "Red",    color = 0xE08080FF, hover = 0xE59393FF },
+  { id = "orange", label = "Orange", color = 0xD9A06AFF, hover = 0xDFAD80FF },
+  { id = "gold",   label = "Gold",   color = 0xC9B45FFF, hover = 0xD1BF77FF },
+  { id = "lime",   label = "Lime",   color = 0x9CBE6DFF, hover = 0xABC883FF },
   { id = "green",  label = "Green",  color = 0x77B779FF, hover = 0x87C489FF },
+  { id = "mint",   label = "Mint",   color = 0x58B99AFF, hover = 0x71C4A9FF },
   { id = "teal",   label = "Teal",   color = 0x35B9C0FF, hover = 0x49C5CBFF },
+  { id = "cyan",   label = "Cyan",   color = 0x62B1D8FF, hover = 0x7ABDDFFF },
   { id = "blue",   label = "Blue",   color = 0x599CE7FF, hover = 0x6AABE9FF },
   { id = "purple", label = "Purple", color = 0xAF95DFFF, hover = 0xBCA5E5FF },
+  { id = "magenta",label = "Magenta",color = 0xCC85C9FF, hover = 0xD497D1FF },
+  { id = "pink",   label = "Pink",   color = 0xDD86AFFF, hover = 0xE298BBFF },
 }
 local ACCENTS_BY_ID = {}
 for _, option in ipairs(ACCENT_OPTIONS) do ACCENTS_BY_ID[option.id] = option end
@@ -535,6 +540,9 @@ local BASE = {
   -- bare "…" is a control-height square instead — the same two classes the
   -- browser toolbar already runs ("+ Add sounds" plus its square icon buttons).
   SET_ACTION_W = 96,
+  SET_ACCENT_SIZE = 32, -- includes the ring around the 26 px colour face
+  SET_ACCENT_PAD = 3,
+  SET_ACCENT_GAP = 2,
   -- Compact pill used for persistent on/off choices in Settings. The knob has
   -- the same 2px inset at either end, so changing state moves colour and fill
   -- without changing the row's geometry.
@@ -615,7 +623,7 @@ local BASE = {
   -- The Library popup's OWN width floor (2026-08-12). MIN_WIN_W above is sized
   -- for the Reference View's transport bar; the browser just reused it, which was
   -- already tight with two toggles on the info row and went stale as transport
-  -- controls joined them (five squares now — see the info row's own comment in
+  -- controls joined them (six squares now — see the info row's own comment in
   -- ui/browser.lua). Applied at the browser's own
   -- SetNextWindowSizeConstraints call IN PLACE OF MIN_WIN_W (mirrors how
   -- MIN_WIN_H already gets RULER_H added for that same call — width needs a
@@ -629,15 +637,15 @@ local BASE = {
   -- both sides (16) + a readable slice of the tech line (80 — enough to read
   -- the sample rate and bit depth before the rest clips, not the whole line;
   -- the one judgement call here, tune by eye) + the row's own 8px text-to-
-  -- controls gap (browser.lua) + five control-height squares with their
-  -- trailing gaps — play/pause, stop, loop, Pitch, auto-audition: 5×(BASE_FS +
-  -- FRAME_PAD_Y×2) + 5×ITEM_SPACING_X = 135 + the "Preview" fader caption
+  -- controls gap (browser.lua) + six control-height squares with their
+  -- trailing gaps — play, pause, stop, loop, Pitch, auto-audition: 6×(BASE_FS +
+  -- FRAME_PAD_Y×2) + 6×ITEM_SPACING_X = 162 + the "Preview" fader caption
   -- (~46 at GROUP_FS — CalcTextSize only knows the real width at runtime, so
   -- this is a hand measurement, the same way SEARCH_W's text allowance was)
   -- + its 6px gap to the track (transport.lua's own `spacing`) + the whole
   -- master fader (SLIDER_W, 132, already track + gap + FADER_VAL_W). Total:
-  -- 120+16+80+8+135+46+6+132 = 543.
-  BROWSER_MIN_W = 543,
+  -- 120+16+80+8+162+46+6+132 = 570.
+  BROWSER_MIN_W = 570,
   -- The update notice: an ACCENT dot drawn over the gear button's top-right
   -- corner while a newer version is published (DESIGN.md "Settings, help,
   -- feedback, and releases" — the gear is the notice's only home).

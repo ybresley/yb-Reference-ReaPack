@@ -839,13 +839,13 @@ end
 -- the list, a dropdown standing open — the user's REAPER hotkeys must still
 -- work, and this is how. SWS's CF_SendActionShortcut runs whatever action the
 -- given section has bound to the key, no OS focus involved. `vk` is a Windows
--- virtual-key code; modifiers are deliberately NOT passed — the documented nil
--- means "read from keyboard", so a physically held Ctrl/Shift/Alt rides along
--- and chords resolve exactly as REAPER would. Section 0 = the Main section.
+-- virtual-key code. `modifiers` is the same-frame SWS snapshot from ui/focus;
+-- nil deliberately retains SWS's physical-keyboard fallback for older
+-- ReaImGui builds. Section 0 = the Main section.
 -- ui/focus.lua decides WHICH keys and WHEN; this only delivers.
-function reaper_api.send_key_to_main(vk)
+function reaper_api.send_key_to_main(vk, modifiers)
   if not reaper.APIExists("CF_SendActionShortcut") then return false end
-  return reaper.CF_SendActionShortcut(reaper.GetMainHwnd(), 0, vk)
+  return reaper.CF_SendActionShortcut(reaper.GetMainHwnd(), 0, vk, modifiers)
 end
 
 -- Native REAPER message box. Works even when SWS and ImGui are absent, so it's

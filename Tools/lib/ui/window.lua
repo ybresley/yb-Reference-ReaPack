@@ -342,6 +342,11 @@ function window.draw(ctx, state, res)
   relocation_notice.draw(ctx, state, cx0, relocation_y0,
     cx0 + avail_w, cy0 + geometry.visual_h)
 
+  -- The transport parks the cursor below its controls; the notice restores it
+  -- there too. Register that final position so End never has to infer the
+  -- content boundary from a cursor move alone.
+  reaper.ImGui_Dummy(ctx, 0, 0)
+
   return action, wave_id, wave_cols
 end
 
