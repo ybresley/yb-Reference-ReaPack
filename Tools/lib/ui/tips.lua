@@ -19,6 +19,11 @@ local placement = require("core.picker_layout")
 local tips = {}
 
 tips.DELAY = 0.15 -- seconds of continuous hover before a tip appears
+local TOOLTIP_WRAP_W = 360
+
+local function tooltip_wrap_width()
+  return TOOLTIP_WRAP_W * theme.scale
+end
 
 -- Use the current native descriptions so modifiers and multiple assignments
 -- match Settings without giving unrelated controls the Reference View shortcut.
@@ -81,7 +86,7 @@ end
 local function draw_shortcut_tip(ctx, content)
   local m, t = theme.metrics, theme.tokens
   if not reaper.ImGui_BeginTooltip(ctx) then return end
-  local wrap_width = m.PICK_LIST_MAX_W - m.WINDOW_PAD * 2
+  local wrap_width = tooltip_wrap_width()
   local rounding = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding())
   local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
@@ -128,7 +133,12 @@ local function draw(ctx, text, anchor)
     text = table.concat(text.shortcuts, "\n") .. "\n\n" .. text.text
   end
   if not anchor then
-    reaper.ImGui_SetTooltip(ctx, text)
+    if not reaper.ImGui_BeginTooltip(ctx) then return end
+    local wrap_width = tooltip_wrap_width()
+    reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + wrap_width)
+    reaper.ImGui_Text(ctx, text)
+    reaper.ImGui_PopTextWrapPos(ctx)
+    reaper.ImGui_EndTooltip(ctx)
     return
   end
   local m, work = theme.metrics, anchor.work
@@ -136,7 +146,8 @@ local function draw(ctx, text, anchor)
   local available = work.right - work.left - margin * 2
   if available <= padding * 2 then return end
   local text_w = reaper.ImGui_CalcTextSize(ctx, text)
-  local width = math.min(math.ceil(text_w) + padding * 2, m.PICK_LIST_MAX_W, available)
+  local width = math.min(math.ceil(text_w) + padding * 2,
+    tooltip_wrap_width() + padding * 2, available)
   local wrap_w = width - padding * 2
   local _, text_h = reaper.ImGui_CalcTextSize(ctx, text, nil, nil, false, wrap_w)
   local height = math.ceil(text_h) + padding * 2

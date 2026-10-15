@@ -538,6 +538,19 @@ function reaper_api.set_pitch_unit(unit)
   reaper.SetExtState(EXT_SECTION, "pitch_unit", unit, true)
 end
 
+-- The Stereo display is a global presentation preference. Unknown saved values
+-- keep Lissajous until a view is selected.
+function reaper_api.get_stereo_view()
+  local value = reaper.GetExtState(EXT_SECTION, "stereo_view")
+  return value == "polar_sample" and value or "lissajous"
+end
+
+function reaper_api.set_stereo_view(value)
+  if value ~= "polar_sample" and value ~= "lissajous" then return false end
+  reaper.SetExtState(EXT_SECTION, "stereo_view", value, true)
+  return true
+end
+
 -- REAPER's own version string, e.g. "7.66/x64" (core/feedback strips the
 -- platform tail for display — it is always Windows 64-bit here).
 function reaper_api.app_version()

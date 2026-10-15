@@ -53,7 +53,9 @@ function axis.draw(ctx, dl, model, input)
 
     if input.draw_live and type(model) == 'table' and type(model.live) == 'table' then
       local count = math.max(0, math.floor(tonumber(model.count) or #model.live))
-      local db = mathx.sample_log_values(model.live, count, readout_frequency, fmin, fmax)
+      local measured_min, measured_max = model.fmin or fmin, model.fmax or fmax
+      local db = readout_frequency >= measured_min and readout_frequency <= measured_max
+        and mathx.sample_log_values(model.live, count, readout_frequency, measured_min, measured_max)
       if db then
         local prefs = model.prefs or {}
         db = mathx.tilted_db(db, readout_frequency, prefs.tilt)
@@ -70,6 +72,11 @@ function axis.draw(ctx, dl, model, input)
   local last_right = gx - M.SPECTRUM_PLOT_PAD
   local label_y = graph_bottom + M.RULER_TICK_MAJOR + 2
   local falloff = M.RULER_LABEL_FADE_W
+  local end_label_left
+  if fmin <= 20000 and fmax >= 20000 then
+    local end_x = gx + mathx.frequency_fraction(20000, fmin, fmax) * gw
+    end_label_left = axis_geometry.label_left(end_x, reaper.ImGui_CalcTextSize(ctx, '20k'), gx, gx + gw)
+  end
   reaper.ImGui_DrawList_PushClipRect(dl, gx, gy, gx + gw, ruler_bottom, true)
   for _, hz in ipairs(LABELS) do
     if hz >= fmin and hz <= fmax then
@@ -77,7 +84,9 @@ function axis.draw(ctx, dl, model, input)
       local width = reaper.ImGui_CalcTextSize(ctx, text)
       local tick_x = gx + mathx.frequency_fraction(hz, fmin, fmax) * gw
       local text_x = axis_geometry.label_left(tick_x, width, gx, gx + gw)
-      if text_x >= last_right + M.ITEM_SPACING_X then
+      local leaves_end_label = hz == 20000 or not end_label_left
+        or text_x + width + M.ITEM_SPACING_X <= end_label_left
+      if leaves_end_label and text_x >= last_right + M.ITEM_SPACING_X then
         local opacity = readout and axis_geometry.label_opacity(text_x, width,
           readout_x, readout_width, falloff) or 1
         reaper.ImGui_DrawList_AddLine(dl, tick_x, graph_bottom,

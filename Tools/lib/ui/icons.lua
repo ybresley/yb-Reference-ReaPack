@@ -18,6 +18,28 @@ local T = theme.tokens
 
 local icons = {}
 
+-- Scope outlines mirror the two analysis views at compact control sizes.
+function icons.draw_stereo_polar(dl, cx, cy, colour, size)
+  local radius = size * 0.6
+  local baseline = cy + radius / 2
+  reaper.ImGui_DrawList_PathArcTo(dl, cx, baseline, radius, math.pi, math.pi * 2, 20)
+  reaper.ImGui_DrawList_PathStroke(dl, colour, 0, theme.scale)
+  reaper.ImGui_DrawList_AddLine(dl, cx - radius, baseline, cx + radius, baseline,
+    colour, theme.scale)
+  reaper.ImGui_DrawList_AddLine(dl, cx, baseline, cx, baseline - radius,
+    theme.fade(colour, 0.6), theme.scale)
+end
+
+function icons.draw_stereo_lissajous(dl, cx, cy, colour, size)
+  local radius = size / 2
+  reaper.ImGui_DrawList_AddLine(dl, cx, cy - radius, cx + radius, cy, colour, theme.scale)
+  reaper.ImGui_DrawList_AddLine(dl, cx + radius, cy, cx, cy + radius, colour, theme.scale)
+  reaper.ImGui_DrawList_AddLine(dl, cx, cy + radius, cx - radius, cy, colour, theme.scale)
+  reaper.ImGui_DrawList_AddLine(dl, cx - radius, cy, cx, cy - radius, colour, theme.scale)
+  reaper.ImGui_DrawList_AddLine(dl, cx, cy - radius, cx, cy + radius,
+    theme.fade(colour, 0.6), theme.scale)
+end
+
 -- Lucide name -> Private-Use-Area codepoint. Only the ones we actually use.
 icons.NAMES = {
   ["folder"]           = 0xE0D7,
@@ -45,6 +67,9 @@ icons.NAMES = {
   ["x"]             = 0xE1B2, -- edit mode's unpin
   ["target"]        = 0xE180, -- the match window's button (loudness tools, 2026-08-06)
   ["activity"] = 0xE038,
+  ["audio-waveform"] = 0xE55B,
+  ["diamond"] = 0xE2D2,
+  ["gauge"] = 0xE1BF,
   ["chart-no-axes-column"] = 0xE068,
   ["rotate-ccw"] = 0xE148,
   ["sliders-horizontal"] = 0xE29A,

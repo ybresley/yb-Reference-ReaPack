@@ -47,8 +47,8 @@ end
 
 function showcase.draw(ctx, res, preview)
   if not renderers then
-    renderers = { spectrum = require('ui.release_spectrum'), other = require('ui.release_examples'),
-      helper = require('ui.release_helper') }
+    renderers = { meter = require('ui.release_meter'), stereo = require('ui.release_stereo'),
+      layout = require('ui.release_panel_layout') }
   end
   local bold = theme.push_release_bold_font(ctx)
   reaper.ImGui_TextColored(ctx, T.ACCENT, 'v' .. content.version)

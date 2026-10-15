@@ -39,11 +39,11 @@ local CONTROL = {
   revision = 9,
   response_sequence = 10,
 }
-local PROTOCOL = 6
+local PROTOCOL = 11
 local SPECTRUM = {
   fft_size = 16, smoothing = 17, epoch = 18, capture_state = 19, revision = 20,
   average_seconds = 21, history_epoch = 23,
-  idle_seconds = 24, session = 25,
+  idle_seconds = 24, session = 25, stereo_enabled = 22,
   magic = 32, protocol = 33, sequence = 34, sample_rate = 35, count = 36,
   peak = 38, frame_epoch = 39, fmin = 40, fmax = 41, frame_fft = 42,
   hop = 43, active = 44, frame_smoothing = 45, frame_revision = 46,
@@ -52,6 +52,16 @@ local SPECTRUM = {
 }
 local SPECTRUM_MAGIC = 260826.1
 local SPECTRUM_TIMEOUT = 1.0
+local STEREO = {
+  active = 1093, final_serial = 1094, latest = 1095, clip_total = 1096,
+  base = 3200, stride = 16400, queue = 8,
+  sequence = 0, epoch = 1, session = 2, count = 3, revision = 4,
+  final = 5, end_sample = 6, at = 7, packet_clip_total = 8,
+  clip_before = 9, prior_clip_left = 10, prior_clip_right = 11,
+  prior_clip_at = 12, prior_clip_sample = 13, packet_sample_rate = 14,
+  left = 16, right = 8208,
+}
+local STEREO_COUNT = 8192
 local LEASE_INTERVAL = 0.20
 local HEALTH_INTERVAL = 1.0
 local ENGAGE_TIMEOUT = 0.75
@@ -79,18 +89,25 @@ local S = {
   last_settings = nil,
   last_applied_on = false,
   auto_insert = true,
+  wait_for_saved_helper = false,
   dev_sync_error = nil,
   control_ready = false,
   activation_started = nil,
   spectrum = { fft_size = 4096, smoothing_octaves = 1 / 12, epoch = 0,
     capture_state = 0, average_seconds = 0,
-    history_epoch = 0, idle_seconds = 0 },
+    history_epoch = 0, idle_seconds = 0, stereo_enabled = false },
   spectrum_revision = 0,
   spectrum_dirty = true,
   spectrum_frame = nil,
   spectrum_staging = {},
   spectrum_average_staging = {},
   spectrum_last_arrival = nil,
+  stereo_frame = nil,
+  stereo_staging_left = {},
+  stereo_staging_right = {},
+  stereo_last_arrival = nil,
+  stereo_next_serial = 1,
+  stereo_last_clip_total = 0,
   range_error = nil,
 }
 
@@ -188,6 +205,7 @@ local function view()
     message = S.message,
     available = available,
     audible = available and S.last_applied_on == true,
+    waiting_for_saved_helper = S.phase == "settling" and S.wait_for_saved_helper,
     can_restore = S.phase == "missing" or S.phase == "error"
       or S.phase == "incompatible",
     max_filter_hz = max_filter_hz(),
@@ -201,11 +219,13 @@ local function set_phase(phase, message)
     if S.control_ready then
       R.gmem_write(CONTROL.active, 0)
       R.gmem_write(SPECTRUM.capture_state, 0)
+      R.gmem_write(SPECTRUM.stereo_enabled, 0)
     end
     S.last_applied_on = false
     S.activation_started = nil
     S.next_health = now() + HEALTH_INTERVAL
     S.spectrum_frame, S.spectrum_last_arrival = nil, nil
+    S.stereo_frame, S.stereo_last_arrival = nil, nil
     S.spectrum_dirty = true
   end
 end
@@ -237,6 +257,7 @@ local function publish_spectrum()
     { SPECTRUM.history_epoch, S.spectrum.history_epoch },
     { SPECTRUM.idle_seconds, S.spectrum.idle_seconds },
     { SPECTRUM.session, S.session },
+    { SPECTRUM.stereo_enabled, S.spectrum.stereo_enabled and 1 or 0 },
   }) do
     if not control_write(value[1], value[2]) then return false end
   end
@@ -278,6 +299,8 @@ local function refresh_owned_helper(allow_incompatible)
   dry_entry(snap, entry)
   if R.TrackFX_Delete(snap.master, entry.fx) ~= true then return true, false end
 
+  -- Replacing the filter must not push the session meters out of slots 0 and 1.
+  S.replacement_slot = entry.slot
   S.stored_guid, S.bound_guid, S.slot = nil, nil, nil
   S.last_settings, S.last_applied_on = nil, false
   S.activation_started = nil
@@ -318,7 +341,8 @@ local function bind(snap, entry)
 end
 
 local function insert_helper(snap)
-  local position = R.TrackFX_AddByName(snap.master, FX_QUERY, true, -1000)
+  local slot = math.min(S.replacement_slot or 0, #snap.entries)
+  local position = R.TrackFX_AddByName(snap.master, FX_QUERY, true, -1000 - slot)
   S.auto_insert = false
   S.stable_count, S.last_signature = 0, nil
   if type(position) ~= "number" or position < 0 then
@@ -326,11 +350,12 @@ local function insert_helper(snap)
       "The helper couldn't be added to Monitor FX. Reinstall yb-Reference through ReaPack, then add the helper again.")
     return false
   end
+  S.replacement_slot = nil
   set_phase("settling", "Confirming the Monitoring Filter…")
   return true
 end
 
-local function resolve(snap, allow_insert)
+local function resolve(snap, allow_insert, missing_message)
   local matches = exact_matches(snap)
   local owned = find_guid(snap, S.stored_guid)
   local helper_count = #matches
@@ -352,7 +377,8 @@ local function resolve(snap, allow_insert)
   S.bound_guid, S.slot = nil, nil
   if allow_insert then return insert_helper(snap) end
   set_phase("missing",
-    "The helper is missing from Monitor FX. Choose Add Helper to add it back.")
+    missing_message or
+      "The saved helper is no longer in Reaper's Monitoring FX chain. Choose Add Helper to restore it.")
   return false
 end
 
@@ -568,9 +594,12 @@ local function initialise_control_session()
   S.heartbeat = finite(previous_heartbeat) and previous_heartbeat % 1000000 or 0
   control_write(CONTROL.active, 0)
   control_write(SPECTRUM.capture_state, 0)
+  control_write(SPECTRUM.stereo_enabled, 0)
   control_write(SPECTRUM.revision, 0)
   -- A prior controller's frame must never appear as a fresh startup capture.
   R.gmem_write(SPECTRUM.sequence, 0)
+  S.stereo_next_serial = (tonumber(R.gmem_read(STEREO.latest)) or 0) + 1
+  S.stereo_last_clip_total = tonumber(R.gmem_read(STEREO.clip_total)) or 0
   write_heartbeat()
 end
 
@@ -583,6 +612,7 @@ function monitor_filter.init(opts)
   S.stored_guid = R.GetExtState(EXT_SECTION, EXT_GUID)
   if S.stored_guid == "" then S.stored_guid = nil end
   S.bound_guid, S.slot = nil, nil
+  S.replacement_slot = nil
   S.next_lease, S.next_health = 0, 0
   S.last_settings, S.last_applied_on = nil, false
   S.activation_started = nil
@@ -591,14 +621,19 @@ function monitor_filter.init(opts)
   S.response_needed = false
   S.spectrum = { fft_size = 4096, smoothing_octaves = 1 / 12, epoch = 0,
     capture_state = 0, average_seconds = 0,
-    history_epoch = 0, idle_seconds = 0 }
+    history_epoch = 0, idle_seconds = 0, stereo_enabled = false }
   S.spectrum_revision, S.spectrum_dirty = 0, true
   S.spectrum_frame, S.spectrum_last_arrival = nil, nil
+  S.stereo_frame, S.stereo_last_arrival = nil, nil
+  S.stereo_next_serial, S.stereo_last_clip_total = 1, 0
   S.spectrum_staging = {}
   S.spectrum_average_staging = {}
+  S.stereo_staging_left, S.stereo_staging_right = {}, {}
   -- The saved GUID distinguishes an earlier setup from a genuinely new one.
-  -- If its helper is now absent, wait for the user's explicit recovery click.
+  -- Give Reaper's recovering Monitor FX chain time to reveal that saved helper
+  -- before offering an action that could add another copy.
   S.auto_insert = S.stored_guid == nil
+  S.wait_for_saved_helper = S.stored_guid ~= nil
   S.control_ready = R.gmem_attach ~= nil and R.gmem_read ~= nil
     and R.gmem_write ~= nil and R.gmem_attach(GMEM_NAME) ~= false
   if S.control_ready then
@@ -638,8 +673,15 @@ function monitor_filter.tick(settings)
     else
       S.last_signature, S.stable_count = snap.signature, 1
     end
-    if S.stable_count >= STABLE_SNAPSHOTS or S.frame >= MAX_SETTLE_FRAMES then
-      local resolved = resolve(snap, S.auto_insert)
+    local saved_helper_pending = S.wait_for_saved_helper
+      and not find_guid(snap, S.stored_guid) and #exact_matches(snap) == 0
+    if (S.stable_count >= STABLE_SNAPSHOTS and not saved_helper_pending)
+        or S.frame >= MAX_SETTLE_FRAMES then
+      S.wait_for_saved_helper = false
+      local missing_message = saved_helper_pending and
+        "Reaper hasn't loaded the saved helper. If you started Monitoring FX offline, reopen Reaper first."
+        or nil
+      local resolved = resolve(snap, S.auto_insert, missing_message)
       if resolved and S.phase == "ready" then health_tick(settings, true) end
     end
     return view()
@@ -683,6 +725,7 @@ function monitor_filter.restore()
   S.frame, S.stable_count = 0, 0
   S.last_signature = nil
   S.auto_insert = true
+  S.wait_for_saved_helper = false
   S.dev_sync_error = nil
   if not S.control_ready and R.gmem_attach and R.gmem_read and R.gmem_write then
     S.control_ready = R.gmem_attach(GMEM_NAME) ~= false
@@ -716,6 +759,8 @@ function monitor_filter.configure_spectrum(config)
     or tonumber(config.history_epoch)
   local idle_seconds = config.idle_seconds == nil and S.spectrum.idle_seconds
     or tonumber(config.idle_seconds)
+  local stereo_enabled = config.stereo_enabled
+  if stereo_enabled == nil then stereo_enabled = S.spectrum.stereo_enabled end
   if (fft ~= 2048 and fft ~= 4096 and fft ~= 8192)
       or (smoothing ~= 0 and smoothing ~= 1 / 24 and smoothing ~= 1 / 12 and smoothing ~= 1 / 6)
       or epoch ~= epoch or epoch < 0 or epoch > 1000000000 or epoch % 1 ~= 0
@@ -723,18 +768,26 @@ function monitor_filter.configure_spectrum(config)
       or capture_state % 1 ~= 0 or average_seconds == nil
       or history_epoch == nil or history_epoch ~= history_epoch or history_epoch < 0
       or history_epoch > 1000000000 or history_epoch % 1 ~= 0
-      or not finite(idle_seconds) or idle_seconds < 0 or idle_seconds > 1000000000 then
+      or not finite(idle_seconds) or idle_seconds < 0 or idle_seconds > 1000000000
+      or type(stereo_enabled) ~= "boolean" then
     return false
   end
   if fft ~= S.spectrum.fft_size or smoothing ~= S.spectrum.smoothing_octaves
       or epoch ~= S.spectrum.epoch or capture_state ~= S.spectrum.capture_state
       or average_seconds ~= S.spectrum.average_seconds
       or history_epoch ~= S.spectrum.history_epoch
-      or idle_seconds ~= S.spectrum.idle_seconds then
+      or idle_seconds ~= S.spectrum.idle_seconds
+      or stereo_enabled ~= S.spectrum.stereo_enabled then
+    if S.control_ready and (epoch ~= S.spectrum.epoch
+        or (stereo_enabled and not S.spectrum.stereo_enabled)) then
+      S.stereo_next_serial = (tonumber(R.gmem_read(STEREO.latest)) or 0) + 1
+      S.stereo_last_clip_total = tonumber(R.gmem_read(STEREO.clip_total)) or 0
+      S.stereo_frame, S.stereo_last_arrival = nil, nil
+    end
     S.spectrum = { fft_size = fft, smoothing_octaves = smoothing, epoch = epoch,
       capture_state = capture_state, average_seconds = average_seconds,
       history_epoch = history_epoch,
-      idle_seconds = idle_seconds }
+      idle_seconds = idle_seconds, stereo_enabled = stereo_enabled }
     S.spectrum_dirty = true
   end
   return true
@@ -828,7 +881,7 @@ function monitor_filter.read_spectrum(time)
     return nil, "waiting"
   end
   if count ~= 512 or not finite(sample_rate) or sample_rate < 1000 or sample_rate > 768000
-      or fmin ~= 10 or not finite(fmax) or fmax <= fmin or fmax > math.min(22050, sample_rate * 0.5)
+      or fmin ~= 10 or not finite(fmax) or fmax ~= math.min(22050, sample_rate * 0.5)
       or not finite(hop) or hop < fft / 4 or not finite(peak)
       or (final ~= 0 and final ~= 1) or (average_ready ~= 0 and average_ready ~= 1)
       or not finite(history_samples)
@@ -861,12 +914,144 @@ function monitor_filter.read_spectrum(time)
   return frame
 end
 
+-- Stereo packets are sealed individually. An interrupted read leaves the last
+-- accepted packet intact, and a bounded queue absorbs short UI stalls.
+function monitor_filter.read_stereo(time)
+  if not S.control_ready or S.phase ~= "ready" then return nil, "unavailable" end
+  if S.spectrum_dirty or not S.spectrum.stereo_enabled then return nil, "waiting" end
+  local t = finite(time) and time or now()
+  if R.gmem_read(SPECTRUM.magic) ~= SPECTRUM_MAGIC
+      or R.gmem_read(SPECTRUM.protocol) ~= PROTOCOL then return nil, "invalid" end
+  local newest = R.gmem_read(STEREO.latest)
+  if not finite(newest) or newest < 0 or newest % 1 ~= 0 then
+    return nil, "invalid"
+  end
+  if newest < S.stereo_next_serial - 1 then
+    -- An explicitly reloaded helper restarts its packet serial at zero.
+    -- Source and session still gate any new packet before it is accepted.
+    S.stereo_next_serial = 1
+    S.stereo_last_clip_total = 0
+    S.stereo_frame, S.stereo_last_arrival = nil, nil
+  end
+  if newest < S.stereo_next_serial then
+    if S.stereo_last_arrival and not (S.stereo_frame and S.stereo_frame.final)
+        and R.gmem_read(STEREO.active) == 1
+        and t - S.stereo_last_arrival > SPECTRUM_TIMEOUT then
+      return nil, "stale"
+    end
+    return nil, "waiting"
+  end
+  local serial = math.max(S.stereo_next_serial, newest - STEREO.queue + 1)
+  local base, seal
+  -- The writer opens the next packet immediately after publishing one. Once
+  -- the queue fills, its oldest published slot is already odd for the next
+  -- generation. Skip only when that seal proves the same slot was overwritten.
+  while serial <= newest do
+    base = STEREO.base + ((serial - 1) % STEREO.queue) * STEREO.stride
+    seal = R.gmem_read(base + STEREO.sequence)
+    if seal == serial * 2 then break end
+    if not finite(seal) or seal < 0 or seal % 1 ~= 0 then
+      return nil, "waiting"
+    end
+    local replacement = math.ceil(seal / 2)
+    if replacement < serial + STEREO.queue
+        or (replacement - serial) % STEREO.queue ~= 0 then
+      return nil, "waiting"
+    end
+    serial = serial + 1
+  end
+  if serial > newest then return nil, "waiting" end
+  local missed = serial - S.stereo_next_serial
+  local epoch, session = R.gmem_read(base + STEREO.epoch),
+    R.gmem_read(base + STEREO.session)
+  local count, revision = R.gmem_read(base + STEREO.count),
+    R.gmem_read(base + STEREO.revision)
+  local final = R.gmem_read(base + STEREO.final)
+  local end_sample, recorded_at = R.gmem_read(base + STEREO.end_sample),
+    R.gmem_read(base + STEREO.at)
+  local clip_total = R.gmem_read(base + STEREO.packet_clip_total)
+  local clip_before = R.gmem_read(base + STEREO.clip_before)
+  local prior_clip_left, prior_clip_right = R.gmem_read(base + STEREO.prior_clip_left),
+    R.gmem_read(base + STEREO.prior_clip_right)
+  local prior_clip_at = R.gmem_read(base + STEREO.prior_clip_at)
+  local prior_clip_sample = R.gmem_read(base + STEREO.prior_clip_sample)
+  local sample_rate = R.gmem_read(base + STEREO.packet_sample_rate)
+  -- Stereo audio is unchanged by Spectrum display settings. Queued packets
+  -- from an earlier complete revision remain valid through a stop transaction.
+  if epoch ~= S.spectrum.epoch or session ~= S.session then
+    -- A retired source may finish one packet after Lua starts the next one.
+    -- Consume its serial so it cannot block a later current-source packet.
+    if R.gmem_read(base + STEREO.sequence) == seal then
+      S.stereo_next_serial = serial + 1
+      if finite(clip_total) then S.stereo_last_clip_total = clip_total end
+    end
+    return nil, "waiting"
+  end
+  if not finite(revision) or revision < 0 or revision % 2 ~= 0 then
+    return nil, "invalid"
+  end
+  if revision > S.spectrum_revision then return nil, "waiting" end
+  if not finite(count) or count < 1 or count > STEREO_COUNT or count % 1 ~= 0
+      or (final ~= 0 and final ~= 1) or not finite(end_sample)
+      or not finite(recorded_at) or not finite(clip_total)
+      or not finite(clip_before) or clip_total < clip_before
+      or not finite(sample_rate) or sample_rate <= 0 then
+    return nil, "invalid"
+  end
+  local left, right = S.stereo_staging_left, S.stereo_staging_right
+  for i = 1, count do
+    local l = R.gmem_read(base + STEREO.left + i - 1)
+    local r = R.gmem_read(base + STEREO.right + i - 1)
+    if not finite(l) or not finite(r) then
+      return nil, "invalid"
+    end
+    left[i], right[i] = l, r
+  end
+  if R.gmem_read(base + STEREO.sequence) ~= seal then return nil, "waiting" end
+  -- A short final frame must not expose samples retained from a longer frame.
+  for i = count + 1, #left do left[i] = nil end
+  for i = count + 1, #right do right[i] = nil end
+  local frame = S.stereo_frame or {}
+  S.stereo_staging_left, S.stereo_staging_right = frame.left or {}, frame.right or {}
+  frame.left, frame.right = left, right
+  frame.count, frame.sequence = count, serial
+  frame.epoch, frame.session, frame.revision = epoch, session, revision
+  frame.final = final == 1 or R.gmem_read(STEREO.final_serial) == serial
+  frame.sample_rate = sample_rate
+  frame.end_sample = end_sample
+  -- Both APIs expose a system timestamp. Fall back to sample age if a host
+  -- presents different clock origins; this remains a live REAPER check.
+  frame.at = recorded_at > 0 and recorded_at <= t and t - recorded_at < 86400
+    and recorded_at or t - (newest - serial) * count / sample_rate
+  frame.missed_packets = missed
+  frame.overflow_clip = nil
+  if missed > 0 and finite(clip_before)
+      and clip_before > S.stereo_last_clip_total
+      and finite(prior_clip_left) and finite(prior_clip_right)
+      and (math.abs(prior_clip_left) >= 1 or math.abs(prior_clip_right) >= 1)
+      and finite(prior_clip_at) and finite(prior_clip_sample) then
+    frame.overflow_clip = {left = prior_clip_left, right = prior_clip_right,
+      at = prior_clip_at > 0 and prior_clip_at <= t and t - prior_clip_at < 86400
+        and prior_clip_at or frame.at - (end_sample - prior_clip_sample) / sample_rate,
+      counter = clip_before}
+  end
+  S.stereo_last_clip_total = clip_total
+  S.stereo_next_serial = serial + 1
+  S.stereo_frame, S.stereo_last_arrival = frame, t
+  return frame, missed > 0 and "overrun" or "ready"
+end
+
+function monitor_filter.session()
+  return S.session
+end
+
 function monitor_filter.shutdown()
   -- The master can disappear during shutdown; the shared dry command does not
   -- require a surviving track pointer or an FX-chain snapshot.
   if S.control_ready then
     control_write(CONTROL.active, 0)
     control_write(SPECTRUM.capture_state, 0)
+    control_write(SPECTRUM.stereo_enabled, 0)
   end
   local snap = snapshot()
   if not snap then return end
@@ -893,6 +1078,7 @@ monitor_filter._constants = {
   gmem_name = GMEM_NAME,
   protocol = PROTOCOL,
   spectrum = SPECTRUM,
+  stereo = STEREO,
 }
 
 return monitor_filter

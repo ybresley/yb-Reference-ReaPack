@@ -42,7 +42,7 @@ local T = {
   ACTIVE_CONTROL_BORDER = 0x599CE759, -- quiet accent outline around the wash
   SEARCH_MATCH_BG = 0x599CE747, -- matching text within a result row
   -- Destructive controls keep a fixed colour independent of the chosen accent.
-  -- Red accents are allowed; destructive actions also use explicit icons or labels.
+  -- Red is reserved for warnings and destructive actions, not accent choices.
   DANGER_RED   = 0xFC6B83FF,
   -- The title bar's ✕ under the cursor. The same red, THINNED over the dark
   -- title bar rather than laid on at full strength: at full strength the cross
@@ -67,6 +67,9 @@ local T = {
   SPECTRUM_GRID         = 0xE4E4E414, -- = WAVE_CENTER: quiet graph structure
   SPECTRUM_FREQ_GRID    = 0xE4E4E41F, -- = STROKE_SECONDARY: readable log-frequency guide
   SPECTRUM_LIVE         = 0x599CE7FF, -- = WAVE_PLAYED: current signal
+  STEREO_BG             = 0x202020FF, -- opaque equivalent of the panel wash; safe as a fade endpoint
+  STEREO_TRACE          = 0x52BCFFFF, -- bright blue scope history, independent of the accent
+  STEREO_CLIP           = 0xFF3030FF, -- solid full-scale markers; independent of the accent
   SPECTRUM_LIVE_FILL    = 0x599CE714, -- = ACCENT_WASH: current signal body
   SPECTRUM_AVERAGE_FILL = 0x599CE738, -- stronger accent body without an outline
   -- Outside the start/end span the picture DIMS (loudness tools, 2026-08-06):
@@ -97,7 +100,6 @@ theme.tokens = T
 -- Appearance choices follow hue order. Blue stays the default, and hover
 -- colours provide a small lift without changing the selected colour family.
 local ACCENT_OPTIONS = {
-  { id = "red",    label = "Red",    color = 0xE08080FF, hover = 0xE59393FF },
   { id = "orange", label = "Orange", color = 0xD9A06AFF, hover = 0xDFAD80FF },
   { id = "gold",   label = "Gold",   color = 0xC9B45FFF, hover = 0xD1BF77FF },
   { id = "lime",   label = "Lime",   color = 0x9CBE6DFF, hover = 0xABC883FF },
@@ -223,6 +225,8 @@ local BASE = {
   BASE_FS = 13,
   SPECTRUM_PANE_MIN_W = 300,
   SPECTRUM_SPLIT_GAP = 8,
+  REFERENCE_PANE_MIN_H = 180,
+  REFERENCE_PICKER_W = 112,
   -- Full panel heights, including rulers, before stacking becomes useful.
   SPECTRUM_STACK_WAVE_MIN_H = 140,
   SPECTRUM_STACK_MIN_H = 180,
@@ -233,11 +237,22 @@ local BASE = {
   SPECTRUM_PLOT_PAD = 8,
   SPECTRUM_OVERLAY_TRAVEL = 16,
   SPECTRUM_LEVEL_W = 32,
+  STEREO_DOT_SIZE = 1,
+  STEREO_CLIP_STROKE = 2,
+  STEREO_PAD_X = 16,
+  STEREO_PAD_Y = 18,
+  STEREO_PAD_BOTTOM = 14,
+  STEREO_HIDE_H = 134,
+  STEREO_LABEL_GAP = 8,
+  STEREO_CORRELATION_W = 34,
   SPECTRUM_SWITCH_SIZE = 20,
   SPECTRUM_SETTINGS_W = 300,
   SPECTRUM_SETTINGS_H = 459, -- opening height until the Spectrum groups are measured
   SETTINGS_TAB_FS = 14,
   SPECTRUM_OPTION_W = 132,
+  METER_READINGS_W = 112,
+  METER_READINGS_ROW_H = 40,
+  METER_READINGS_MIN_ROW_H = 36,
   FILTER_ENTRY_W = 160,
   FILTER_RESTORE_W = 22,
   -- The framed-control geometry, in one place because every square button, the
@@ -325,6 +340,7 @@ local BASE = {
   -- labels got smaller with everything else, so it simply reads as roomier now.
   RULER_H = 22,
   RULER_LABEL_FADE_W = 18,
+  RULER_LABEL_GAP = 2,
   RULER_TICK_MAJOR = 6, -- major tick length, px, pointing up from the strip's top edge
   RULER_TICK_MINOR = 4, -- minor tick length, px
   -- The reference picker (2026-08-06 redesign — it replaced the reference-tab
@@ -510,6 +526,12 @@ local BASE = {
   WN_IND      = 14,
   SET_WIN_W   = 632,
   SET_CONTENT_GAP = 12, -- separates the navigation from the content's own padding
+  SET_LAYOUT_CHOICE_H = 55,
+  SET_LAYOUT_MINI_W = 40,
+  SET_LAYOUT_MINI_H = 22,
+  SET_LAYOUT_PREVIEW_H = 105,
+  SET_LAYOUT_MINI_GAP = 5,
+  SET_LAYOUT_GRID_GAP = 6,
   -- A taller fixed surface keeps the grouped Settings layout comfortable while
   -- overflowing tabs remain reachable through the content-pane scrollbar.
   SET_WIN_H   = 480,

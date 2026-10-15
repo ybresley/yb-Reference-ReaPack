@@ -1,8 +1,8 @@
 -- One explanation and recovery action for every view of the shared helper.
 local status = {}
 local states = {
-  missing = {title = 'Helper missing from Monitor FX',
-    detail = 'Add the helper to use the spectrum and listening filter.',
+  missing = {title = 'Monitoring Filter unavailable',
+    detail = 'The saved helper is not available in Reaper. Choose Add Helper to restore it.',
     button = 'Add Helper', action = 'restore_monitor_filter'},
   bypassed = {title = 'Helper is turned off',
     detail = 'yb-Reference Monitoring Filter is bypassed in Monitor FX.',
@@ -17,11 +17,16 @@ local states = {
     detail = 'Keep one yb-Reference Monitoring Filter and remove the extra copies.'},
   settling = {title = 'Setting up spectrum and filter…',
     detail = 'Waiting for the helper in Monitor FX.'},
+  recovering = {title = 'Waiting for Monitoring FX…',
+    detail = 'Reaper is still loading the Monitoring FX chain. yb-Reference will reconnect automatically.'},
 }
 
 function status.describe(system)
   system = system or {}
   if system.available then return nil end
+  if system.phase == 'settling' and system.waiting_for_saved_helper then
+    return states.recovering
+  end
   local known = states[system.phase]
   if known then
     if system.phase == 'missing' and system.message then

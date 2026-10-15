@@ -1,0 +1,448 @@
+// Original stereo analysis helper. Samples pass through unchanged.
+// RMS and crest peak share 80 complete 5 ms slices per channel.
+// Stereo Crest Factor accumulates unweighted energy and sample peak per run.
+desc:yb-Reference Meter
+tags:analysis meter
+options:no_meter
+in_pin:Left
+in_pin:Right
+out_pin:Left
+out_pin:Right
+
+slider1:rms_l=-150<-150,24,0.01>-RMS Left (output)
+slider2:rms_r=-150<-150,24,0.01>-RMS Right (output)
+slider3:peak_l=-150<-150,24,0.01>-Peak Left (output)
+slider4:peak_r=-150<-150,24,0.01>-Peak Right (output)
+slider5:crest_l=-1<-1,100,0.01>-Crest Left (output)
+slider6:crest_r=-1<-1,100,0.01>-Crest Right (output)
+slider7:sequence=0<0,1000000000,1>-Sequence (output)
+slider8:capture_epoch=0<0,1000000000,1>-Capture epoch (output)
+slider9:live_peak_l=-150<-150,24,0.01>-Live Peak Left (output)
+slider10:live_peak_r=-150<-150,24,0.01>-Live Peak Right (output)
+slider11:lra=0<0,120,0.01>-LRA (output)
+slider12:lra_low=-150<-150,50,0.01>-LRA low (output)
+slider13:lra_high=-150<-150,50,0.01>-LRA high (output)
+slider14:lra_valid=0<-1,1,1>-LRA valid (output)
+slider15:lra_seconds=0<0,1000000000,0.01>-LRA seconds (output)
+slider16:lra_revision=0<0,1000000000,1>-LRA revision (output)
+slider17:live_m=-150<-150,50,0.01>-Momentary L/R (output)
+slider18:live_s=-150<-150,50,0.01>-Short-term L/R (output)
+slider19:peak_age_l=0<0,1,0.000001>-Peak Age Left (output)
+slider20:peak_age_r=0<0,1,0.000001>-Peak Age Right (output)
+
+slider21:integrated=-150<-150,50,0.01>-Integrated L/R (output)
+slider22:capture_mode=0<0,2,1>-Capture mode
+slider23:reset_request=0<0,1000000000,1>-Reset request
+slider24:reset_policy=7<0,7,1>-Reset policy
+slider25:loop_start=0<0,1000000000,0.001>-Project loop start
+slider26:loop_end=0<0,1000000000,0.001>-Project loop end
+slider27:loop_enabled=0<0,1,1>-Project loop enabled
+slider28:crest=-1<-1,1000,0.01>-Crest Factor (output)
+slider29:true_peak_l=-150<-150,50,0.01>-True Peak Left (output)
+slider30:true_peak_r=-150<-150,50,0.01>-True Peak Right (output)
+slider31:live_true_peak_l=-150<-150,50,0.01>-Live True Peak Left (output)
+slider32:live_true_peak_r=-150<-150,50,0.01>-Live True Peak Right (output)
+slider33:true_peak_age_l=0<0,1,0.000001>-True Peak Age Left (output)
+slider34:true_peak_age_r=0<0,1,0.000001>-True Peak Age Right (output)
+
+@init
+ext_noinit=1;
+ext_nodenorm=1;
+// The 48 kHz coefficients are from ITU-R BS.1770-5. An inverse bilinear map
+// followed by the target-rate bilinear map preserves them exactly at 48 kHz.
+function map_coeffs(src_b0 src_b1 src_b2 src_a1 src_a2 ratio)
+  instance(b0 b1 b2 a1 a2)
+  local(bc bs bq ac as aq r2 norm)
+(
+  bc=src_b0+src_b1+src_b2; bs=2*(src_b0-src_b2);
+  bq=src_b0-src_b1+src_b2;
+  ac=1+src_a1+src_a2; as=2*(1-src_a2); aq=1-src_a1+src_a2;
+  r2=ratio*ratio;
+  norm=ac+as*ratio+aq*r2;
+  this.b0=(bc+bs*ratio+bq*r2)/norm;
+  this.b1=(2*bc-2*bq*r2)/norm;
+  this.b2=(bc-bs*ratio+bq*r2)/norm;
+  this.a1=(2*ac-2*aq*r2)/norm;
+  this.a2=(ac-as*ratio+aq*r2)/norm;
+);
+function biquad(x b0 b1 b2 a1 a2)
+  instance(z1 z2)
+  local(y)
+(
+  y=b0*x+z1;
+  z1=b1*x-a1*y+z2;
+  z2=b2*x-a2*y;
+  y;
+);
+// ITU-R BS.1770-5 Annex 2 four-phase FIR: 12 samples per phase.
+// Doubled history and fixed taps keep reconstruction cheap at high rates.
+function true_peak_sample(x history_base)
+  local(sample_index h0 h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11
+    phase0 phase1 phase2 phase3)
+(
+  (history_base+tp_head)[0]=x;
+  (history_base+tp_head+12)[0]=x;
+  sample_index=history_base+tp_head+1;
+  h0=(sample_index+0)[0];
+  h1=(sample_index+1)[0];
+  h2=(sample_index+2)[0];
+  h3=(sample_index+3)[0];
+  h4=(sample_index+4)[0];
+  h5=(sample_index+5)[0];
+  h6=(sample_index+6)[0];
+  h7=(sample_index+7)[0];
+  h8=(sample_index+8)[0];
+  h9=(sample_index+9)[0];
+  h10=(sample_index+10)[0];
+  h11=(sample_index+11)[0];
+  // Fixed taps and cached samples avoid repeated address work at each phase.
+  phase0=0.001708984375*h0+0.010986328125*h1+-0.0196533203125*h2
+    +0.033203125*h3+-0.0594482421875*h4+0.1373291015625*h5
+    +0.97216796875*h6+-0.102294921875*h7+0.047607421875*h8
+    +-0.026611328125*h9+0.014892578125*h10+-0.00830078125*h11;
+  phase1=-0.0291748046875*h0+0.029296875*h1+-0.0517578125*h2
+    +0.089111328125*h3+-0.16650390625*h4+0.465087890625*h5
+    +0.77978515625*h6+-0.2003173828125*h7+0.1015625*h8
+    +-0.0582275390625*h9+0.0330810546875*h10+-0.0189208984375*h11;
+  phase2=-0.0189208984375*h0+0.0330810546875*h1+-0.0582275390625*h2
+    +0.1015625*h3+-0.2003173828125*h4+0.77978515625*h5
+    +0.465087890625*h6+-0.16650390625*h7+0.089111328125*h8
+    +-0.0517578125*h9+0.029296875*h10+-0.0291748046875*h11;
+  phase3=-0.00830078125*h0+0.014892578125*h1+-0.026611328125*h2
+    +0.047607421875*h3+-0.102294921875*h4+0.97216796875*h5
+    +0.1373291015625*h6+-0.0594482421875*h7+0.033203125*h8
+    +-0.0196533203125*h9+0.010986328125*h10+0.001708984375*h11;
+  max(abs(x),max(max(abs(phase0),abs(phase1)),max(abs(phase2),abs(phase3))));
+);
+function lra_publish(new_value new_low new_high new_valid new_seconds) (
+  lra_revision=(lra_revision+1)%1000000000;
+  lra=new_value; lra_low=new_low; lra_high=new_high;
+  lra_valid=new_valid; lra_seconds=new_seconds;
+  lra_revision=(lra_revision+1)%1000000000;
+);
+function clear_loudness(new_valid new_seconds) (
+  live_m=live_s=integrated=-150;
+  crest=-1;
+  lra=0; lra_low=lra_high=-150;
+  lra_valid=new_valid; lra_seconds=new_seconds;
+);
+function lra_reset_publish(new_valid new_seconds) (
+  lra_revision=(lra_revision+1)%1000000000;
+  clear_loudness(new_valid,new_seconds);
+  lra_revision=(lra_revision+1)%1000000000;
+);
+function lra_error() (
+  lra_valid != -1 ? lra_reset_publish(-1,lra_samples/srate);
+);
+function live_publish(new_m new_s) (
+  lra_revision=(lra_revision+1)%1000000000;
+  live_m=new_m; live_s=new_s;
+  // The display clock follows live audio, independently of the 100 ms LRA census.
+  lra_seconds=lra_samples/srate;
+  lra_revision=(lra_revision+1)%1000000000;
+);
+function live_loudness_slice()
+  local(i momentary_power short_power new_m new_s)
+(
+  (13000+live_slot)[0]=live_slice_power;
+  live_slot=(live_slot+1)%300;
+  live_slice_power=0; live_slice_count=0;
+  // Re-summing the fixed ring avoids cancellation after a loud passage fades.
+  i=0; momentary_power=0; short_power=0;
+  loop(300,
+    short_power+=(13000+i)[0];
+    i+=1;
+  );
+  i=(live_slot+260)%300;
+  loop(40,
+    momentary_power+=(13000+i)[0];
+    i=(i+1)%300;
+  );
+  new_m=momentary_power>0 ? max(-150,-0.691+10/log(10)*log(momentary_power/(srate*0.4))) : -150;
+  new_s=short_power>0 ? max(-150,-0.691+10/log(10)*log(short_power/(srate*3))) : -150;
+  live_publish(new_m,new_s);
+);
+function lra_update()
+  local(i level rank_low rank_high selected total gated low high threshold)
+(
+  // Below 20 gated observations, a percentile range is too easy to mistake
+  // for a settled programme statistic.
+  abs_count >= 20 ? (
+    threshold=-0.691+10/log(10)*log(abs_power_sum/abs_count)-20;
+    i=hist_min; total=0;
+    loop(hist_max-hist_min+1,
+      level=-70+i*0.01;
+      level >= threshold ? total+= (512+i)[0];
+      i+=1;
+    );
+    total >= 20 ? (
+      rank_low=floor((total-1)*0.10+1.5);
+      rank_high=floor((total-1)*0.95+1.5);
+      i=hist_min; selected=0; low=-150; high=-150;
+      loop(hist_max-hist_min+1,
+        level=-70+i*0.01;
+        level >= threshold ? (
+          selected+=(512+i)[0];
+          low == -150 && selected >= rank_low ? low=level;
+          high == -150 && selected >= rank_high ? high=level;
+        );
+        i+=1;
+      );
+      lra_publish(max(0,high-low),low,high,1,lra_samples/srate);
+    ) : lra_publish(0,-150,-150,0,lra_samples/srate);
+  ) : lra_publish(0,-150,-150,0,lra_samples/srate);
+);
+// BS.1770 programme gating: complete 400 ms blocks, 75% overlap,
+// an absolute -70 LUFS gate, then a relative gate 10 LU below their mean.
+// Bins retain actual power sums; only the gate boundary is quantized (0.01 LU).
+function integrated_slice()
+  local(i power level bin gate count total)
+(
+  slice_filled >= 4 ? (
+    i=(slice_slot+26)%30; power=0;
+    loop(4, power+=(320+i)[0]; i=(i+1)%30; );
+    power/=4*slice_length;
+    power > 0 ? (
+      level=-0.691+10/log(10)*log(power);
+      level > 50 ? lra_error() : level > -70 ? (
+        bin=floor((level+70)*100+0.5);
+        (14000+bin)[0]+=1;
+        (26001+bin)[0]+=power;
+        integrated_count+=1; integrated_sum+=power;
+        integrated_min=min(integrated_min,bin);
+        integrated_max=max(integrated_max,bin);
+        gate=-0.691+10/log(10)*log(integrated_sum/integrated_count)-10;
+        i=integrated_min; count=0; total=0;
+        loop(integrated_max-integrated_min+1,
+          -70+i*0.01 > gate ? (
+            count+=(14000+i)[0]; total+=(26001+i)[0];
+          );
+          i+=1;
+        );
+        lra_revision=(lra_revision+1)%1000000000;
+        integrated=count>0 ? -0.691+10/log(10)*log(total/count) : -150;
+        lra_revision=(lra_revision+1)%1000000000;
+      );
+    );
+  );
+);
+function lra_slice()
+  local(i window_power loudness bin)
+(
+  (320+slice_slot)[0]=slice_power;
+  slice_slot=(slice_slot+1)%30;
+  slice_filled=min(30,slice_filled+1);
+  slice_count=0; slice_power=0;
+  integrated_slice();
+  // Silence can leave decaying filter state at denormal magnitudes.
+  abs(shelf_l.z1)+abs(shelf_l.z2)<denorm_floor ? shelf_l.z1=shelf_l.z2=0;
+  abs(shelf_r.z1)+abs(shelf_r.z2)<denorm_floor ? shelf_r.z1=shelf_r.z2=0;
+  abs(hp_l.z1)+abs(hp_l.z2)<denorm_floor ? hp_l.z1=hp_l.z2=0;
+  abs(hp_r.z1)+abs(hp_r.z2)<denorm_floor ? hp_r.z1=hp_r.z2=0;
+  slice_filled == 30 ? (
+    i=0; window_power=0;
+    loop(30,
+      window_power+=(320+i)[0];
+      i+=1;
+    );
+    window_power/=30*slice_length;
+    window_power > 0 ? (
+      loudness=-0.691+10/log(10)*log(window_power);
+      loudness > 50 ? lra_error() : loudness >= -70 ? (
+        bin=floor((loudness+70)*100+0.5);
+        (512+bin)[0]+=1;
+        hist_min=min(hist_min,bin);
+        hist_max=max(hist_max,bin);
+        abs_count+=1;
+        abs_power_sum+=window_power;
+        lra_update();
+      ) : lra_publish(lra,lra_low,lra_high,lra_valid,lra_samples/srate);
+    ) : lra_publish(lra,lra_low,lra_high,lra_valid,lra_samples/srate);
+  ) : lra_publish(0,-150,-150,0,lra_samples/srate);
+);
+function reset_lra() (
+  memset(320,0,30);
+  memset(512,0,12001);
+  memset(13000,0,300);
+  memset(14000,0,24002);
+  integrated_count=integrated_sum=0;
+  integrated_min=12000; integrated_max=0;
+  lra_samples=0; slice_count=0; slice_power=0;
+  slice_slot=0; slice_filled=0;
+  live_slice_count=0; live_slice_power=0; live_slot=0;
+  abs_count=0; abs_power_sum=0;
+  hist_min=12000; hist_max=0;
+  denorm_floor=10^(-30);
+  input_limit=10^50;
+  power_limit=10^100;
+  shelf_l.z1=shelf_l.z2=shelf_r.z1=shelf_r.z2=0;
+  hp_l.z1=hp_l.z2=hp_r.z1=hp_r.z2=0;
+  // These tested production rates have exact 100 ms integer sample slices.
+  rate_ok=srate==44100 || srate==48000 || srate==88200
+    || srate==96000 || srate==176400 || srate==192000;
+  slice_length=rate_ok ? srate*0.1 : 1;
+  live_slice_length=rate_ok ? srate*0.01 : 1;
+  rate_ok ? (
+    shelf.map_coeffs(1.53512485958697,-2.69169618940638,1.19839281085285,
+      -1.69065929318241,0.73248077421585,srate/48000);
+    hp.map_coeffs(1,-2,1,-1.99004745483398,0.99007225036621,srate/48000);
+    clear_loudness(0,0);
+  ) : clear_loudness(-1,0);
+);
+function reset_window() (
+  // Keep every output, including peak ages and the epoch, under one reset guard.
+  lra_revision=(lra_revision+1)%1000000000;
+  memset(0,0,320);
+  memset(13300,0,160);
+  memset(38064,0,48);
+  memset(38160,0,320);
+  count=0; filled=0; slot=0;
+  sum_l=0; sum_r=0; max_l=0; max_r=0;
+  max_tp_l=max_tp_r=0;
+  meter_samples=max_sample_l=max_sample_r=0;
+  max_tp_sample_l=max_tp_sample_r=0;
+  peak_age_l=peak_age_r=0;
+  true_peak_age_l=true_peak_age_r=0;
+  live_l=live_r=0;
+  live_tp_l=live_tp_r=0;
+  tp_head=0;
+  block_length=max(1,floor(srate*0.005+0.5));
+  live_decay=exp(-log(10)/srate);
+  db_per_log=20/log(10);
+  rms_l=rms_r=peak_l=peak_r=-150;
+  live_peak_l=live_peak_r=-150;
+  true_peak_l=true_peak_r=-150;
+  live_true_peak_l=live_true_peak_r=-150;
+  crest_l=crest_r=-1;
+  crest_energy=crest_samples=crest_peak=0;
+  capture_epoch=(capture_epoch+1)%1000000000;
+  last_sr=srate;
+  reset_lra();
+  lra_revision=(lra_revision+1)%1000000000;
+);
+// The caller holds the publication guard. Stereo power is averaged before
+// accumulation; silence during playback counts, while stopped time does not.
+function update_crest() (
+  crest=crest_samples>0 && crest_energy>0 && lra_valid!=-1
+    ? max(0,db_per_log*(log(crest_peak)-0.5*log(crest_energy/crest_samples))) : -1;
+);
+reset_window();
+was_playing=0;
+expected_position=play_position;
+last_reset_request=reset_request;
+
+@block
+// Include the final partial meter slice when transport stops between updates.
+lra_revision=(lra_revision+1)%1000000000;
+update_crest();
+lra_revision=(lra_revision+1)%1000000000;
+is_playing=capture_mode==1 || (capture_mode==0 && (play_state&1)!=0);
+// Project transport edges are handled before processing their first audio block.
+jumped=capture_mode==0 && was_playing && abs(play_position-expected_position)>0.1;
+looped=capture_mode==0 && was_playing && loop_enabled && loop_end>loop_start
+  && expected_position>=loop_end-0.1 && play_position<expected_position-0.001
+  && abs(play_position-loop_start)<0.1;
+restart=is_playing && ((!was_playing && (reset_policy&1))
+  || (looped ? (reset_policy&4) : (jumped && (reset_policy&2))));
+srate != last_sr || restart || reset_request != last_reset_request ? reset_window();
+last_reset_request=reset_request;
+is_playing ? expected_position=play_position+samplesblock/srate;
+was_playing=is_playing;
+
+@sample
+// Attack follows each sample; release falls by 20 dB per second.
+live_l=max(abs(spl0),live_l*live_decay);
+live_r=max(abs(spl1),live_r*live_decay);
+tp_head=(tp_head+1)%12;
+sample_tp_l=true_peak_sample(spl0,38064);
+sample_tp_r=true_peak_sample(spl1,38088);
+live_tp_l=max(sample_tp_l,live_tp_l*live_decay);
+live_tp_r=max(sample_tp_r,live_tp_r*live_decay);
+is_playing && rate_ok && lra_valid != -1 ? (
+  !(spl0 >= -input_limit && spl0 <= input_limit
+    && spl1 >= -input_limit && spl1 <= input_limit) ? lra_error() : (
+    crest_energy+=(spl0*spl0+spl1*spl1)*0.5;
+    crest_samples+=1;
+    crest_peak=max(crest_peak,max(abs(spl0),abs(spl1)));
+    // All four filter memories are independent; the audio samples are untouched.
+    k_l=shelf_l.biquad(spl0,shelf.b0,shelf.b1,shelf.b2,shelf.a1,shelf.a2);
+    k_l=hp_l.biquad(k_l,hp.b0,hp.b1,hp.b2,hp.a1,hp.a2);
+    k_r=shelf_r.biquad(spl1,shelf.b0,shelf.b1,shelf.b2,shelf.a1,shelf.a2);
+    k_r=hp_r.biquad(k_r,hp.b0,hp.b1,hp.b2,hp.a1,hp.a2);
+    power=k_l*k_l+k_r*k_r;
+    !(power >= 0 && power <= power_limit) ? lra_error() : (
+      slice_power+=power;
+      live_slice_power+=power;
+      lra_samples+=1;
+      slice_count+=1;
+      live_slice_count+=1;
+      live_slice_count >= live_slice_length ? live_loudness_slice();
+      slice_count >= slice_length ? lra_slice();
+    );
+  );
+);
+sum_l += spl0*spl0;
+sum_r += spl1*spl1;
+meter_samples+=1;
+abs(spl0)>=max_l ? (max_l=abs(spl0); max_sample_l=meter_samples;);
+abs(spl1)>=max_r ? (max_r=abs(spl1); max_sample_r=meter_samples;);
+sample_tp_l>=max_tp_l ? (max_tp_l=sample_tp_l; max_tp_sample_l=meter_samples;);
+sample_tp_r>=max_tp_r ? (max_tp_r=sample_tp_r; max_tp_sample_r=meter_samples;);
+count += 1;
+count >= block_length ? (
+  // The peak and its age must belong to the same audio publication.
+  lra_revision=(lra_revision+1)%1000000000;
+  slot[0]=sum_l;
+  (slot+80)[0]=sum_r;
+  (slot+160)[0]=max_l;
+  (slot+240)[0]=max_r;
+  (slot+13300)[0]=max_sample_l;
+  (slot+13380)[0]=max_sample_r;
+  (slot+38160)[0]=max_tp_l;
+  (slot+38240)[0]=max_tp_r;
+  (slot+38320)[0]=max_tp_sample_l;
+  (slot+38400)[0]=max_tp_sample_r;
+  slot=(slot+1)%80;
+  filled=min(80,filled+1);
+  energy_l=energy_r=0; p_l=p_r=tp_l=tp_r=0;
+  p_sample_l=p_sample_r=tp_sample_l=tp_sample_r=0; k=0;
+  loop(filled,
+    energy_l+=k[0]; energy_r+=(k+80)[0];
+    (k+160)[0]>p_l ? (p_l=(k+160)[0]; p_sample_l=(k+13300)[0];)
+      : (k+160)[0]==p_l ? p_sample_l=max(p_sample_l,(k+13300)[0]);
+    (k+240)[0]>p_r ? (p_r=(k+240)[0]; p_sample_r=(k+13380)[0];)
+      : (k+240)[0]==p_r ? p_sample_r=max(p_sample_r,(k+13380)[0]);
+    (k+38160)[0]>tp_l ? (tp_l=(k+38160)[0]; tp_sample_l=(k+38320)[0];)
+      : (k+38160)[0]==tp_l ? tp_sample_l=max(tp_sample_l,(k+38320)[0]);
+    (k+38240)[0]>tp_r ? (tp_r=(k+38240)[0]; tp_sample_r=(k+38400)[0];)
+      : (k+38240)[0]==tp_r ? tp_sample_r=max(tp_sample_r,(k+38400)[0]);
+    k+=1;
+  );
+  peak_l=p_l>0 ? db_per_log*log(p_l) : -150;
+  peak_r=p_r>0 ? db_per_log*log(p_r) : -150;
+  peak_age_l=p_l>0 ? (meter_samples-p_sample_l)/srate : 0;
+  peak_age_r=p_r>0 ? (meter_samples-p_sample_r)/srate : 0;
+  true_peak_l=tp_l>0 ? db_per_log*log(tp_l) : -150;
+  true_peak_r=tp_r>0 ? db_per_log*log(tp_r) : -150;
+  true_peak_age_l=tp_l>0 ? (meter_samples-tp_sample_l)/srate : 0;
+  true_peak_age_r=tp_r>0 ? (meter_samples-tp_sample_r)/srate : 0;
+  filled == 80 ? (
+    rms_l=energy_l>0 ? db_per_log*0.5*log(energy_l/(block_length*80)) : -150;
+    rms_r=energy_r>0 ? db_per_log*0.5*log(energy_r/(block_length*80)) : -150;
+    crest_l=energy_l>0 ? max(0,peak_l-rms_l) : -1;
+    crest_r=energy_r>0 ? max(0,peak_r-rms_r) : -1;
+  );
+  live_peak_l=live_l>0 ? max(-150,db_per_log*log(live_l)) : -150;
+  live_peak_r=live_r>0 ? max(-150,db_per_log*log(live_r)) : -150;
+  live_true_peak_l=live_tp_l>0 ? max(-150,db_per_log*log(live_tp_l)) : -150;
+  live_true_peak_r=live_tp_r>0 ? max(-150,db_per_log*log(live_tp_r)) : -150;
+  update_crest();
+  sequence=(sequence+1)%1000000000;
+  lra_revision=(lra_revision+1)%1000000000;
+  // Notify parameter displays without writing an automation envelope.
+  sliderchange(136314879);
+  sliderchange(slider29); sliderchange(slider30);
+  sliderchange(slider31); sliderchange(slider32);
+  sliderchange(slider33); sliderchange(slider34);
+  count=0; sum_l=sum_r=max_l=max_r=max_tp_l=max_tp_r=0;
+);

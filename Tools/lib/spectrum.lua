@@ -3,12 +3,31 @@
 local core = require('core.spectrum')
 local filter = require('core.monitor_filter')
 local helper = require('monitor_filter')
+local stereo_core = require('core.stereo')
+local layout_prototype = require('core.layout_prototype')
 local spectrum = {}
 local SECTION = 'yb-Reference'
 local FILTER_KEY = 'monitor_filter_preferences_v1'
 local SPECTRUM_KEY = 'spectrum_preferences_v2'
 local LEGACY_SPECTRUM_KEY = 'spectrum_preferences_v1'
 local FINAL_DRAIN_TIMEOUT = 0.5
+
+local function stereo_enabled(state)
+  local prototype = layout_prototype.current(state.layout_prototype)
+  local panels = prototype and prototype.enabled
+    or state.reference_panels and state.reference_panels.enabled
+  if type(panels) ~= 'table' then return false end
+  for i = 1, #panels do
+    if panels[i] == 'stereo' then return true end
+  end
+  return false
+end
+
+local function helper_options(state, model)
+  local options = core.helper_options(model)
+  options.stereo_enabled = stereo_enabled(state)
+  return options
+end
 
 function spectrum.load()
   local filter_text = reaper.GetExtState(SECTION, FILTER_KEY)
@@ -78,7 +97,7 @@ function spectrum.prepare_preview(state, slot, sound_id)
     core.cancel_stop(model, now)
   end
   core.set_context(model, source_key, true, now)
-  if not helper.configure_spectrum(core.helper_options(model)) then
+  if not helper.configure_spectrum(helper_options(state, model)) then
     model.status = 'invalid'
     return false
   end
@@ -112,7 +131,7 @@ function spectrum.tick(state)
   elseif not model.playing and playing then
     core.set_context(model, source, true, now)
   end
-  helper.configure_spectrum(core.helper_options(model))
+  helper.configure_spectrum(helper_options(state, model))
   local system = helper.tick(state.monitor_filter)
   if not system.available or system.range_error then
     state.monitor_filter.on, state.monitor_filter.selected_id = false, nil
@@ -121,9 +140,23 @@ function spectrum.tick(state)
   local frame, status = helper.read_spectrum(now)
   core.update(model, frame, model.last_time and now - model.last_time or 0,
     {status = status, now = now})
+  local stereo_backlog = false
+  if state.stereo then
+    local stereo_context = {source_key = source, playing = playing, epoch = model.epoch,
+      session = helper.session(), now = now}
+    -- Process immediately: the adapter reuses its staging arrays. A bounded
+    -- drain catches up after ordinary UI jitter without monopolising a frame.
+    for packet = 1, 3 do
+      local stereo_frame, stereo_status = helper.read_stereo(now)
+      stereo_context.status = stereo_status
+      stereo_core.update(state.stereo, stereo_frame, stereo_context)
+      if not stereo_frame then break end
+      stereo_backlog = packet == 3
+    end
+  end
   local drain_failed = status == 'unavailable' or status == 'stale' or status == 'invalid'
   if model.draining and ((frame and frame.final and frame.epoch == model.epoch
-        and model.status == 'ready') or drain_failed
+        and model.status == 'ready' and not stereo_backlog) or drain_failed
       or (model.drain_deadline and now >= model.drain_deadline)) then
     core.finish_stop(model)
     model.drain_deadline = nil

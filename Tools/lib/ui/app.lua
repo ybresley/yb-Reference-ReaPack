@@ -5,6 +5,7 @@
 -- crosses over.
 
 local theme    = require("ui.theme")
+local widgets = require('ui.widgets')
 local numeric_input = require("ui.numeric_input")
 local window   = require("ui.window")
 local browser  = require("ui.browser")
@@ -17,6 +18,8 @@ local focus    = require("ui.focus")
 local walkthrough_ui = require("ui.walkthrough")
 local pitchwin = require("ui.pitchwin")
 local filterwin = require("ui.filterwin")
+local meter_controls = require('ui.meter_controls')
+local stereo_settings = require("ui.stereo_settings")
 local actions = require("core.actions")
 local refpicker = require("ui.refpicker")
 
@@ -248,6 +251,7 @@ end
 -- our windows lit up this frame, which the entry script needs before it asserts
 -- REAPER's own drag cursor (see ui/dropzone.take_hand_shown).
 function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
+  widgets.take_grab_cursor()
   -- Curves share a scratch buffer, like fonts; their measured values stay separate.
   res.spectrum_draw = state.spectrum and state.spectrum.draw
   refpicker.begin_frame()
@@ -568,6 +572,8 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- Monitoring Filter: one top-level panel shared by every monitored source.
   -- Like Pitch, it stays open while the transport and Library are used.
   local filter_action = filterwin.draw(ctx, state, res)
+  action = actions.combine(meter_controls.draw_panel(ctx, state.metering, res), action)
+  action = actions.combine(stereo_settings.draw_panel(ctx, state, res), action)
 
   -- Settings: a real top-level window since 2026-08-08 (it was a modal inside
   -- the browser panel), so it is drawn OUT here beside the other two rather than
@@ -617,7 +623,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- Finish the edit first, including before a click selects that edited band.
   return open, actions.combine(filter_action, action), dropzone.take_hand_shown(), give_focus, forward_keys,
     settings.feedback_visible(), wave_id, wave_cols, open and refpicker.preview_owner() or nil,
-    browse_wave_id, browse_wave_cols
+    browse_wave_id, browse_wave_cols, widgets.take_grab_cursor()
 end
 
 return app

@@ -341,6 +341,8 @@ function waveform.draw(ctx, state, height, opts)
   local avail_w = opts.width or select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   if avail_w < 1 then avail_w = 1 end
   local h = height or M.WAVE_MIN_H
+  -- Resizing can leave no picture area for a frame. Do not submit an empty hit target.
+  if h <= 0 then return end
   local has_ruler = opts.ruler == true
   local total_h = has_ruler and (h + M.RULER_H) or h
   local x, y = reaper.ImGui_GetCursorScreenPos(ctx)

@@ -109,6 +109,7 @@ function coordinator.new(state, callbacks, startup_alert)
     local parked = holders.paused_on(state, slot, s.id)
     if state.preview.playing and state.preview.slot == slot and state.preview.sound_id == s.id then
       local pos = fraction * (state.preview.length or 0)
+      if callbacks.before_seek then callbacks.before_seek('seek') end
       preview.seek(pos)
       state.preview.position = pos
     elseif slot == "main" then
@@ -171,6 +172,7 @@ function coordinator.new(state, callbacks, startup_alert)
       local s0, s1 = span.range(s, state.preview.length)
       local pos = state.preview.position
       if s1 > 0 and (pos >= s1 or pos < s0) then
+        if callbacks.before_seek then callbacks.before_seek('seek') end
         preview.seek(s0)
         state.preview.position = s0
       end
@@ -301,6 +303,11 @@ function coordinator.new(state, callbacks, startup_alert)
     if not pos then return end
     local prev = state.preview.position
     state.preview.position = pos
+    local loop_reported = false
+    if pos < prev and (state.loop or state.reference.active) then
+      if callbacks.before_seek then callbacks.before_seek('loop') end
+      loop_reported = true
+    end
     if state.preview.slot == "main" or state.preview.slot == "picker" then
       local s = callbacks.find(state.preview.sound_id)
       if s and (s.span_start or s.span_end) then
@@ -309,6 +316,7 @@ function coordinator.new(state, callbacks, startup_alert)
         -- remains playable until the actual file ends.
         if s1 > 0 and prev < s1 and pos >= s1 then
           if state.reference.active or state.loop then
+            if not loop_reported and callbacks.before_seek then callbacks.before_seek('loop') end
             preview.seek(s0)
             state.preview.position = s0
           else
