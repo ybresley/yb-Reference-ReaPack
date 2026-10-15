@@ -21,7 +21,20 @@ local T = theme.tokens
 local M = theme.metrics
 
 local widgets = {}
+local grab_cursor_requested = false
+
+function widgets.request_grab_cursor()
+  grab_cursor_requested = true
+end
+
+function widgets.take_grab_cursor()
+  local requested = grab_cursor_requested
+  grab_cursor_requested = false
+  return requested
+end
+
 local switch_motion, pitch_unit_motion = motion.new(), motion.new()
+local multi_switch_motion = motion.new()
 local preference_switch_motion, bloom_motion = motion.new(), motion.new()
 local value_motion, event_motion = motion.new(128), motion.new(128)
 local motion_generation = theme.motion.generation
@@ -32,6 +45,7 @@ local function motion_ready()
   if not theme.motion.enabled or not HAS_MOTION_CLOCK then return false end
   if motion_generation ~= theme.motion.generation then
     switch_motion, pitch_unit_motion, bloom_motion = motion.new(), motion.new(), motion.new()
+    multi_switch_motion = motion.new()
     value_motion, event_motion = motion.new(128), motion.new(128)
     motion_generation = theme.motion.generation
   end
@@ -239,6 +253,64 @@ function widgets.panel_button_frame(ctx, label, width, height, open)
   return clicked
 end
 
+-- Equal-sized panel choices keep their names visible beneath the identifying icon.
+function widgets.icon_label_toggle(ctx, font, id, label, icon, on, width, enabled)
+  local disabled = enabled == false
+  if disabled then reaper.ImGui_BeginDisabled(ctx) end
+  local tw, th = reaper.ImGui_CalcTextSize(ctx, label)
+  local height = M.FRAME_PAD_Y*4 + M.ICON_FS + M.FRAME_PAD_Y + th
+  local clicked = widgets.panel_button_frame(ctx, '##' .. id, width, height, on)
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1 = select(1, reaper.ImGui_GetItemRectMax(ctx))
+  local cx = (x0+x1)*0.5
+  local colour = on and T.ACCENT_HOVER or T.TEXT_SECONDARY
+  local icon_y = y0 + M.FRAME_PAD_Y*2 + M.ICON_FS*0.5
+  local painted = icons.paint_glyph(ctx, font, icon, cx, icon_y, colour, M.ICON_FS)
+  local text_y = painted and (icon_y + M.ICON_FS*0.5 + M.FRAME_PAD_Y)
+    or (y0 + (height-th)*0.5)
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx),
+    math.floor(cx-tw*0.5+0.5), math.floor(text_y+0.5), theme.fade(colour, alpha), label)
+  if disabled then reaper.ImGui_EndDisabled(ctx) end
+  return not disabled and clicked
+end
+
+-- Independent segments share the stereoscope switch's fixed track and accent face.
+function widgets.multi_switch(ctx, id, choices, width)
+  local result
+  local height = reaper.ImGui_GetFrameHeight(ctx)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  for i, choice in ipairs(choices) do
+    if i > 1 then reaper.ImGui_SameLine(ctx, 0, 0) end
+    local disabled = choice.enabled == false
+    if disabled then reaper.ImGui_BeginDisabled(ctx) end
+    local clicked = reaper.ImGui_InvisibleButton(ctx, '##' .. id .. choice.key, width / #choices, height)
+    local hovered = reaper.ImGui_IsItemHovered(ctx)
+    local active = reaper.ImGui_IsItemActive(ctx)
+    local x0,y0 = reaper.ImGui_GetItemRectMin(ctx)
+    local x1,y1 = reaper.ImGui_GetItemRectMax(ctx)
+    local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+    local on = choice.on
+    if clicked and not disabled then on = not choice.on; result = choice.key end
+    local position = on and 1 or 0
+    if motion_ready() then
+      position = motion.slide(multi_switch_motion, id .. choice.key, on,
+        reaper.ImGui_GetTime(ctx), reaper.ImGui_GetFrameCount(ctx), theme.motion.SWITCH_SLIDE)
+    end
+    local base = active and T.FILL_PRIMARY or hovered and T.FILL_TERTIARY or T.FILL_QUATERNARY
+    local selected = active and T.ACTIVE_CONTROL_HELD or hovered and T.ACTIVE_CONTROL_HOVER or T.ACTIVE_CONTROL_FILL
+    reaper.ImGui_DrawList_AddRectFilled(dl,x0,y0,x1,y1,theme.fade(theme.blend(base,selected,position),alpha),0)
+    reaper.ImGui_DrawList_AddRect(dl,x0,y0,x1,y1,
+      theme.fade(theme.blend(T.STROKE_SECONDARY,T.ACTIVE_CONTROL_BORDER,position),alpha),0,0,1)
+    local tw,th = reaper.ImGui_CalcTextSize(ctx,choice.label)
+    reaper.ImGui_DrawList_AddText(dl,x0+(x1-x0-tw)/2,y0+(y1-y0-th)/2,
+      theme.fade(theme.blend(T.TEXT_SECONDARY,T.ACCENT,position),alpha),choice.label)
+    if disabled then reaper.ImGui_EndDisabled(ctx) end
+    tips.show(ctx,hovered,choice.tip,id .. choice.key)
+  end
+  return result
+end
+
 -- An open panel uses the shared active treatment. `highlighted` also allows
 -- Pitch to keep that treatment while an adjustment remains set and the panel
 -- itself is closed.
@@ -272,10 +344,46 @@ function widgets.panel_button(ctx, font, id, icon, open, fallback, highlighted, 
   return clicked, hovered
 end
 
+-- Plot settings share Spectrum's opaque backing, hover outline and animated icon.
+-- Spectrum supplies the backing for its whole listening-control strip.
+function widgets.plot_settings_button(ctx, font, id, open, backing)
+  local size = reaper.ImGui_GetFrameHeight(ctx)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  if backing ~= false then
+    local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
+    local rounding = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding())
+    local pad = 2 * theme.scale
+    reaper.ImGui_DrawList_AddRectFilled(dl, x-pad, y-pad, x+size+pad, y+size+pad,
+      theme.fade(T.BG_POPUP, alpha), rounding+pad)
+    reaper.ImGui_DrawList_AddRect(dl, x-pad+.5, y-pad+.5, x+size+pad-.5, y+size+pad-.5,
+      theme.fade(T.STROKE_SECONDARY, alpha), rounding+pad, 0, 1)
+  end
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), open and T.ACTIVE_CONTROL_FILL or 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), open and T.ACTIVE_CONTROL_HOVER or 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), open and T.ACTIVE_CONTROL_HELD or T.FILL_PRIMARY)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), 0)
+  local clicked = reaper.ImGui_Button(ctx, '##' .. id, size, size)
+  reaper.ImGui_PopStyleColor(ctx, 4)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local colour = open and T.ACCENT_HOVER or hovered and T.TEXT_PRIMARY or T.TEXT_SECONDARY
+  if not icon_motion.paint_item(ctx, id, 'sliders-horizontal', colour, open, clicked, nil, font)
+      and not icons.paint_over_item(ctx, font, 'sliders-horizontal', {color=colour}) then
+    local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+    local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+    icons.draw_gear(dl, (x0+x1)*.5, (y0+y1)*.5, theme.fade(colour, alpha))
+  end
+  if open or hovered then
+    widgets.button_outline(ctx, open and T.ACTIVE_CONTROL_BORDER or T.STROKE_PRIMARY)
+  end
+  return clicked, hovered
+end
+
 local HAS_GROUP_CHILD = reaper.ImGui_ChildFlags_AutoResizeY ~= nil
   and reaper.ImGui_Col_Border ~= nil
 
 -- Settings windows share the heading and box; each caller owns its row layout.
+-- fill_height accepts true for remaining space, or a measured height to avoid auto-sizing.
 function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset)
   local pad_x = inset and inset.pad_x or M.WINDOW_PAD
   local pad_y = inset and inset.pad_y or M.WINDOW_PAD
@@ -291,7 +399,9 @@ function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset)
   reaper.ImGui_SetCursorPosX(ctx, x)
 
   if not HAS_GROUP_CHILD then return true, false end
-  local child_flags = fill_height and 0 or reaper.ImGui_ChildFlags_AutoResizeY()
+  local height = type(fill_height) == 'number' and fill_height
+    or (inset and inset.height or 0)
+  local child_flags = (fill_height or height > 0) and 0 or reaper.ImGui_ChildFlags_AutoResizeY()
   if reaper.ImGui_ChildFlags_Borders then
     child_flags = child_flags | reaper.ImGui_ChildFlags_Borders()
   elseif reaper.ImGui_ChildFlags_AlwaysUseWindowPadding then
@@ -301,7 +411,7 @@ function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(),
     inset and inset.border or T.STROKE_SECONDARY)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), pad_x, pad_y)
-  local opened = reaper.ImGui_BeginChild(ctx, id, 0, 0, child_flags,
+  local opened = reaper.ImGui_BeginChild(ctx, id, 0, height, child_flags,
     reaper.ImGui_WindowFlags_NoScrollbar() | reaper.ImGui_WindowFlags_NoScrollWithMouse())
   reaper.ImGui_PopStyleVar(ctx)
   reaper.ImGui_PopStyleColor(ctx, 2)
@@ -1161,16 +1271,15 @@ function widgets.cancel_semitone_drag(id)
   pitch_drag[id], reset_hold[id] = nil, nil
 end
 
--- Equal-width segments keep the Pitch header fixed when the unit changes.
-function widgets.pitch_units(ctx, id, unit, size_scale)
-  size_scale = size_scale or 1
+-- Shared two-choice control: content stays fixed while selection slides beneath it.
+function widgets.two_way_switch(ctx, id, value, choices, width, height, accented)
   local result, rects, hovered, active = nil, {}, {}, {}
-  local frame_h = reaper.ImGui_GetFrameHeight(ctx) * size_scale
+  local frame_h = height or reaper.ImGui_GetFrameHeight(ctx)
   for i = 1, 2 do
-    local key, label = i == 1 and "st" or "percent", i == 1 and "st" or "%"
+    local key, label = choices[i].value, choices[i].label
     if i == 2 then reaper.ImGui_SameLine(ctx, 0, 0) end
     if reaper.ImGui_InvisibleButton(ctx, "##" .. id .. key,
-        M.PITCH_UNIT_W * size_scale, frame_h) then
+        width / 2, frame_h) then
       result = key
     end
     local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
@@ -1179,13 +1288,13 @@ function widgets.pitch_units(ctx, id, unit, size_scale)
     hovered[i], active[i] = reaper.ImGui_IsItemHovered(ctx), reaper.ImGui_IsItemActive(ctx)
   end
 
-  local shown = result or unit
-  local target = shown == "percent" and 1 or 0
+  local shown = result or value
+  local target = shown == choices[2].value and 1 or 0
   local position = target
   if motion_ready() then
     local now, frame = reaper.ImGui_GetTime(ctx), reaper.ImGui_GetFrameCount(ctx)
-    if result and result ~= unit then
-      motion.slide(pitch_unit_motion, id, unit == "percent", now, frame,
+    if result and result ~= value then
+      motion.slide(pitch_unit_motion, id, value == choices[2].value, now, frame,
         theme.motion.PITCH_UNIT_SLIDE)
     end
     position = motion.slide(pitch_unit_motion, id, target == 1, now, frame,
@@ -1206,22 +1315,46 @@ function widgets.pitch_units(ctx, id, unit, size_scale)
   local selected_x0 = first.x0 + (second.x0 - first.x0) * position
   local selected_x1 = first.x1 + (second.x1 - first.x1) * position
   local target_hovered = hovered[target + 1] or active[target + 1]
+  local selection_fill = target_hovered and T.FILL_PRIMARY or T.FILL_SECONDARY
+  if accented then
+    selection_fill = active[target + 1] and T.ACTIVE_CONTROL_HELD
+      or (target_hovered and T.ACTIVE_CONTROL_HOVER or T.ACTIVE_CONTROL_FILL)
+  end
   reaper.ImGui_DrawList_AddRectFilled(dl, selected_x0, first.y0, selected_x1, first.y1,
-    fade(target_hovered and T.FILL_PRIMARY or T.FILL_SECONDARY, alpha), 0)
+    fade(selection_fill, alpha), 0)
   reaper.ImGui_DrawList_AddRect(dl, first.x0, first.y0, second.x1, first.y1,
     fade(T.STROKE_SECONDARY, alpha), 0, 0, 1)
   reaper.ImGui_DrawList_AddLine(dl, first.x1, first.y0, first.x1, first.y1,
     fade(T.STROKE_SECONDARY, alpha), 1)
+  if accented then
+    reaper.ImGui_DrawList_AddRect(dl, selected_x0, first.y0, selected_x1, first.y1,
+      fade(T.ACTIVE_CONTROL_BORDER, alpha), 0, 0, 1)
+  end
 
   for i = 1, 2 do
     local r = rects[i]
     local weight = i == 1 and (1 - position) or position
     local colour = theme.blend(T.TEXT_SECONDARY, T.ACCENT, weight)
-    local tw, th = reaper.ImGui_CalcTextSize(ctx, r.label)
-    reaper.ImGui_DrawList_AddText(dl, r.x0 + (r.x1 - r.x0 - tw) * 0.5,
-      r.y0 + (r.y1 - r.y0 - th) * 0.5, fade(colour, alpha), r.label)
+    if choices[i].draw then
+      choices[i].draw(dl, (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2,
+        fade(colour, alpha), math.min(r.x1 - r.x0, frame_h) * 0.7)
+    else
+      local tw, th = reaper.ImGui_CalcTextSize(ctx, r.label)
+      reaper.ImGui_DrawList_AddText(dl, r.x0 + (r.x1 - r.x0 - tw) * 0.5,
+        r.y0 + (r.y1 - r.y0 - th) * 0.5, fade(colour, alpha), r.label)
+    end
+  end
+  for i = 1, 2 do
+    tips.show(ctx, hovered[i], choices[i].tip, id .. '_' .. choices[i].value)
   end
   return result
+end
+
+local PITCH_UNITS = {{value='st', label='st'}, {value='percent', label='%'}}
+function widgets.pitch_units(ctx, id, unit, size_scale)
+  size_scale = size_scale or 1
+  return widgets.two_way_switch(ctx, id, unit, PITCH_UNITS,
+    M.PITCH_UNIT_W * 2 * size_scale, reaper.ImGui_GetFrameHeight(ctx) * size_scale)
 end
 
 -- Hoisted so the frame loop never rebuilds it (frame-allocation rule).

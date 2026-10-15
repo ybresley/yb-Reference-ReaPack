@@ -48,6 +48,15 @@ end
 
 function anchored_panel.place(ctx, res, anchor, spec)
   local work = spec.work or anchored_panel.work_area(ctx, res, anchor)
+  if spec.prefer_beside then
+    -- Keep the anchored display clear when either side has enough room.
+    local right = picker_layout.resize({left=anchor.right + spec.gap, top=anchor.top},
+      work, spec.width, spec.height, spec.margin)
+    if right.x >= anchor.right + spec.gap then return right, work end
+    local left = picker_layout.resize({left=anchor.left - spec.gap - spec.width, top=anchor.top},
+      work, spec.width, spec.height, spec.margin)
+    if left.x + left.w <= anchor.left - spec.gap then return left, work end
+  end
   local geometry = picker_layout.place(anchor, work,
     spec.width, spec.height, spec.min_height,
     spec.gap, spec.margin, spec.prefer_above)

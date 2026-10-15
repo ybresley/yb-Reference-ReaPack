@@ -62,7 +62,6 @@ function controls.update_overlay(ctx, wanted)
   return overlay_alpha
 end
 
-local visual_plate = { generation = nil, target = nil, direction = 1 }
 
 local function push_overlay_button_state(ctx, visible, selected)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(),
@@ -227,13 +226,8 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
       .. '\nChoose a supported range to dismiss this notice.'
   end
   local settings_open = settings.panel_is_open()
-  push_overlay_button_state(ctx, visible, settings_open)
-  local settings_clicked, settings_hovered = icon_segment(ctx, font, 'spectrum_settings',
-    'sliders-horizontal', settings_open and visible and T.ACCENT_HOVER or idle_icon,
-    settings_open and T.ACCENT_HOVER or T.TEXT_PRIMARY,
-    icons.draw_gear, settings_open)
-  reaper.ImGui_PopStyleColor(ctx, 4)
-  draw_segment_outline(ctx, settings_open, settings_hovered, visible)
+  local settings_clicked, settings_hovered = widgets.plot_settings_button(ctx, font,
+    'spectrum_settings', settings_open, false)
   if settings_clicked then
     local x, y = reaper.ImGui_GetItemRectMin(ctx)
     local _, bottom = reaper.ImGui_GetItemRectMax(ctx)
@@ -249,109 +243,6 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
   tips.show(ctx, settings_hovered, settings_tip, 'spectrum_settings')
   reaper.ImGui_PopStyleVar(ctx)
   return action
-end
-
-function controls.visual_switch_bounds(x, y)
-  local size, pad = M.SPECTRUM_SWITCH_SIZE, 2 * theme.scale
-  local left = x
-  local right = left + size * 2 + pad * 2
-  return {
-    x0 = left, y0 = y, x1 = right, y1 = y + size + pad * 2,
-    content_x = left + pad, content_y = y + pad, size = size, pad = pad,
-  }
-end
-
-function controls.visual_switch_input(ctx, state, bounds, visible)
-  if not visible then return end
-  local size = bounds.size
-  reaper.ImGui_SetCursorScreenPos(ctx, bounds.x0, bounds.y0)
-  reaper.ImGui_InvisibleButton(ctx, '##visual_switch',
-    bounds.x1 - bounds.x0, bounds.y1 - bounds.y0)
-  local mx, my = reaper.ImGui_GetMousePos(ctx)
-  local switch_hovered = reaper.ImGui_IsItemHovered(ctx)
-  local hovered_index = switch_hovered
-    and (mx < bounds.content_x + size and 1 or 2)
-    or nil
-  local selected_index = state.spectrum.prefs.visual == 'waveform' and 1 or 2
-  -- Resolve the choice when the normal ImGui control becomes active, before
-  -- either full-size analysis view submits its own mouse area later this frame.
-  -- This also makes the selected face respond on press, like the transport.
-  local clicked_index = reaper.ImGui_IsItemActivated(ctx) and hovered_index or nil
-  local shown_index = clicked_index or selected_index
-  if hovered_index then
-    local choice = hovered_index == 1 and 'waveform' or 'spectrum'
-    tips.show(ctx, true,
-      choice == 'waveform' and 'Show Waveform' or 'Show Spectrum',
-      'visual_' .. choice)
-    if clicked_index then
-      return {bounds = bounds, hovered_index = hovered_index, shown_index = shown_index},
-        {type = 'set_spectrum_preference', key = 'visual', value = choice}
-    end
-  end
-  return {bounds = bounds, hovered_index = hovered_index, shown_index = shown_index}
-end
-
-function controls.visual_switch(ctx, state, res, interaction)
-  if not interaction then return end
-  local bounds = interaction.bounds
-  local size, dl = bounds.size, reaper.ImGui_GetWindowDrawList(ctx)
-  local hovered_index, shown_index = interaction.hovered_index, interaction.shown_index
-  local switch_hovered = hovered_index ~= nil
-  local frame_rounding = 4 * theme.scale
-  local thumb_rounding = math.max(2 * theme.scale, frame_rounding - bounds.pad * 0.5)
-
-  -- The selected glyph changes immediately. Only its existing paint plate
-  -- travels, briefly stretching through the middle like the approved elastic
-  -- selection concept. Disabled motion bypasses both the tracker and this
-  -- little bit of animation state.
-  local plate_position, stretch = shown_index, 0
-  if theme.motion.enabled then
-    if visual_plate.generation ~= theme.motion.generation then
-      visual_plate.generation, visual_plate.target = theme.motion.generation, shown_index
-      visual_plate.direction = 1
-    elseif visual_plate.target ~= shown_index then
-      visual_plate.direction = shown_index > visual_plate.target and 1 or -1
-      visual_plate.target = shown_index
-    end
-    plate_position = widgets.motion_value(ctx, 'spectrum_visual_plate', shown_index, 0.48)
-    local travelled = math.max(0, math.min(1, 1 - math.abs(plate_position - shown_index)))
-    stretch = size * 0.18 * 4 * travelled * (1 - travelled)
-  end
-
-  -- A single framed control with one rectangular selection plate: the same
-  -- square-ended geometry and accent-icon state as the transport toggles, but
-  -- with the plate moving between its two mutually exclusive choices.
-  reaper.ImGui_DrawList_AddRectFilled(dl,
-    bounds.x0, bounds.y0, bounds.x1, bounds.y1,
-    T.BG_POPUP, frame_rounding)
-  local thumb_x = bounds.content_x + (plate_position - 1) * size
-  if visual_plate.direction < 0 then thumb_x = thumb_x - stretch end
-  reaper.ImGui_DrawList_AddRectFilled(dl,
-    thumb_x, bounds.content_y, thumb_x + size + stretch, bounds.content_y + size,
-    switch_hovered and T.ACTIVE_CONTROL_HOVER or T.ACTIVE_CONTROL_FILL, thumb_rounding)
-  reaper.ImGui_DrawList_AddRect(dl,
-    thumb_x + 0.5, bounds.content_y + 0.5,
-    thumb_x + size + stretch - 0.5, bounds.content_y + size - 0.5,
-    T.ACTIVE_CONTROL_BORDER, thumb_rounding, 0, 1)
-  reaper.ImGui_DrawList_AddRect(dl,
-    bounds.x0 + 0.5, bounds.y0 + 0.5,
-    bounds.x1 - 0.5, bounds.y1 - 0.5,
-    switch_hovered and T.STROKE_PRIMARY or T.STROKE_SECONDARY,
-    frame_rounding, 0, 1)
-
-  for i, choice in ipairs({'waveform', 'spectrum'}) do
-    local selected, hot = i == shown_index, i == hovered_index
-    local colour = selected and T.ACCENT_HOVER
-      or (hot and T.TEXT_PRIMARY or T.TEXT_TERTIARY)
-    local cx = bounds.content_x + (i - 0.5) * size
-    local cy = bounds.content_y + size * 0.5
-    local name = choice == 'waveform' and 'activity' or 'chart-no-axes-column'
-    if not icons.paint_glyph(ctx, res and res.icon_font, name,
-        cx, cy, colour, M.ICON_SM_FS) then
-      local fallback = choice == 'waveform' and icons.draw_wave or icons.draw_spectrum
-      fallback(dl, cx, cy, colour)
-    end
-  end
 end
 
 return controls

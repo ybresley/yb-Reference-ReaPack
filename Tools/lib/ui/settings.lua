@@ -28,6 +28,7 @@ local icons = require("ui.icons")
 local focus = require("ui.focus")
 local whatsnew = require("ui.whatsnew")
 local hotkeys = require("ui.hotkeys")
+local reference_settings = require("ui.reference_settings")
 local fb_core = require("core.feedback") -- message cap for the Help composer
 local T = theme.tokens
 local M = theme.metrics
@@ -518,150 +519,47 @@ local function accent_button(ctx, option, selected)
   tips.show(ctx, hovered, option.label, 'accent_' .. option.id)
   return clicked
 end
-local REFERENCE_MODES = {
-  { button = "Auto##reference_mode_auto", value = "auto" },
-  { button = "Side by Side##reference_mode_horizontal", value = "horizontal" },
-  { button = "Stacked##reference_mode_vertical", value = "vertical" },
+local METER_DISPLAY_CHOICES = {
+  { value = "all", label = "All Panels" },
+  { value = "pictures", label = "Visuals Only" },
+  { value = "meters", label = "Meters Only" },
 }
 
-local function selected_button(ctx, label, selected, width)
-  local pushed = widgets.push_soft_active(ctx, selected)
-  if selected then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER) end
-  local clicked = reaper.ImGui_Button(ctx, label, width)
-  if selected then reaper.ImGui_PopStyleColor(ctx) end
-  widgets.pop_soft_active(ctx, pushed)
-  return clicked
-end
-
-local function paint_reference_icon(ctx, name, fallback, cx, cy, color)
-  if icons.paint_glyph(ctx, icon_font, name, cx, cy, color, M.ICON_FS) then return end
-  fallback(reaper.ImGui_GetWindowDrawList(ctx), cx, cy, color)
-end
-
--- A pair of picture panes inside one stable button. Their actual left/right or
--- top/bottom placement carries the meaning; tooltips identify each arrangement.
-local function reference_order_button(ctx, id, first, stacked, selected, width)
-  local height = reaper.ImGui_GetFrameHeight(ctx) * 2 + M.ITEM_SPACING_Y
-  local pushed = widgets.push_soft_active(ctx, selected)
-  local clicked = reaper.ImGui_Button(ctx, id, width, height)
-  widgets.pop_soft_active(ctx, pushed)
-
-  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
-  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
-  local inset = M.FRAME_PAD_Y
-  x0, y0, x1, y1 = x0 + inset, y0 + inset, x1 - inset, y1 - inset
-  local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  if not selected then
-    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, T.FILL_QUATERNARY)
-  end
-  local icon_color = selected and T.ACCENT_HOVER or T.TEXT_TERTIARY
-  reaper.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, T.STROKE_SECONDARY)
-
-  local first_x, first_y, second_x, second_y
-  if stacked then
-    local mid = math.floor((y0 + y1) * 0.5 + 0.5)
-    reaper.ImGui_DrawList_AddLine(dl, x0, mid, x1, mid, T.STROKE_SECONDARY)
-    first_x, first_y = (x0 + x1) * 0.5, (y0 + mid) * 0.5
-    second_x, second_y = first_x, (mid + y1) * 0.5
-  else
-    local mid = math.floor((x0 + x1) * 0.5 + 0.5)
-    reaper.ImGui_DrawList_AddLine(dl, mid, y0, mid, y1, T.STROKE_SECONDARY)
-    first_x, first_y = (x0 + mid) * 0.5, (y0 + y1) * 0.5
-    second_x, second_y = (mid + x1) * 0.5, first_y
-  end
-
-  local first_is_waveform = first == "waveform"
-  paint_reference_icon(ctx, first_is_waveform and "activity" or "chart-no-axes-column",
-    first_is_waveform and icons.draw_wave or icons.draw_spectrum,
-    first_x, first_y, icon_color)
-  paint_reference_icon(ctx, first_is_waveform and "chart-no-axes-column" or "activity",
-    first_is_waveform and icons.draw_spectrum or icons.draw_wave,
-    second_x, second_y, icon_color)
-  return clicked
-end
-
-local function reference_mode_note(mode)
-  if mode == "horizontal" then
-    return "Keeps panels side by side when enough room is available."
-  elseif mode == "vertical" then
-    return "Keeps panels stacked when enough room is available."
-  end
-  return "Auto adapts to the available width and height."
-end
-
 local function draw_reference_layout(ctx, state)
-  local action
-  local layout = state.reference_layout
-  local mode = layout and layout.mode or "auto"
-  local horizontal_first = layout and layout.horizontal_first or "waveform"
-  local vertical_first = layout and layout.vertical_first or "waveform"
   local opened, child = begin_settings_group(ctx, "reference_view", "Reference View")
+  local action
   if opened then
-    begin_setting(ctx)
-    setting_label(ctx, "Waveform & Spectrum Layout")
-    local gap = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
-    local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-    local mode_w = (avail - gap * (#REFERENCE_MODES - 1)) / #REFERENCE_MODES
-    for i, option in ipairs(REFERENCE_MODES) do
-      if i > 1 then reaper.ImGui_SameLine(ctx) end
-      if selected_button(ctx, option.button, mode == option.value, mode_w) then
-        action = { type = "set_reference_layout", key = "mode", value = option.value }
+    local prototype_active = false
+    if state.layout_prototype then
+      action, prototype_active = require('ui.layout_prototype_settings').draw(ctx, state,
+        begin_setting, setting_label, setting_note, icon_font)
+    end
+    if not prototype_active and state.metering and state.metering.prefs then
+      begin_setting(ctx)
+      setting_label(ctx, "Meter Display")
+      local selected = state.metering.prefs.view or "all"
+      local preview = "All Panels"
+      for _, choice in ipairs(METER_DISPLAY_CHOICES) do
+        if choice.value == selected then preview = choice.label; break end
       end
+      reaper.ImGui_SetNextItemWidth(ctx, -1)
+      if reaper.ImGui_BeginCombo(ctx, "##reference_meter_display", preview) then
+        for _, choice in ipairs(METER_DISPLAY_CHOICES) do
+          if reaper.ImGui_Selectable(ctx, choice.label, selected == choice.value) then
+            action = { type = "meter_set_preference", key = "view", value = choice.value }
+          end
+        end
+        reaper.ImGui_EndCombo(ctx)
+      end
+      tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+        "Choose whether Reference View shows the visual panels, meters, or both.",
+        "reference_meter_display")
     end
-    setting_note(ctx, reference_mode_note(mode))
-
-    begin_setting(ctx)
-    local x0 = reaper.ImGui_GetCursorPosX(ctx)
-    local title_y = reaper.ImGui_GetCursorPosY(ctx)
-    local column_gap = M.ITEM_SPACING_X * 2
-    local column_w = (select(1, reaper.ImGui_GetContentRegionAvail(ctx)) - column_gap) * 0.5
-    local right_x = x0 + column_w + column_gap
-    local choice_w = (column_w - M.ITEM_SPACING_X) * 0.5
-
-    setting_label(ctx, "Side by Side Order")
-    local choices_y = reaper.ImGui_GetCursorPosY(ctx)
-    reaper.ImGui_SetCursorPos(ctx, right_x, title_y)
-    setting_label(ctx, "Stacked Order")
-    choices_y = math.max(choices_y, reaper.ImGui_GetCursorPosY(ctx))
-
-    reaper.ImGui_SetCursorPos(ctx, x0, choices_y)
-    if reference_order_button(ctx, "##reference_horizontal_waveform", "waveform", false,
-        horizontal_first == "waveform", choice_w) then
-      action = action or {
-        type = "set_reference_layout", key = "horizontal_first", value = "waveform",
-      }
+    if not prototype_active then
+      local reference_action = reference_settings.draw(ctx, state,
+        begin_setting, setting_label, setting_note)
+      action = action or reference_action
     end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
-      "Waveform on the left, spectrum on the right")
-    reaper.ImGui_SameLine(ctx)
-    if reference_order_button(ctx, "##reference_horizontal_spectrum", "spectrum", false,
-        horizontal_first == "spectrum", choice_w) then
-      action = action or {
-        type = "set_reference_layout", key = "horizontal_first", value = "spectrum",
-      }
-    end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
-      "Spectrum on the left, waveform on the right")
-
-    reaper.ImGui_SetCursorPos(ctx, right_x, choices_y)
-    if reference_order_button(ctx, "##reference_vertical_waveform", "waveform", true,
-        vertical_first == "waveform", choice_w) then
-      action = action or {
-        type = "set_reference_layout", key = "vertical_first", value = "waveform",
-      }
-    end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
-      "Waveform on top, spectrum below")
-    reaper.ImGui_SameLine(ctx)
-    if reference_order_button(ctx, "##reference_vertical_spectrum", "spectrum", true,
-        vertical_first == "spectrum", choice_w) then
-      action = action or {
-        type = "set_reference_layout", key = "vertical_first", value = "spectrum",
-      }
-    end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
-      "Spectrum on top, waveform below")
-
     end_settings_group(ctx, child)
   end
   return action
@@ -1559,6 +1457,13 @@ end
 function settings.draw(ctx, state, res)
   local action
   if not ui.open then return nil end
+  local update_phase = state.update and state.update.phase
+  if update_phase == "reopen" or update_phase == "restarting" then
+    -- ReaPack has replaced files beneath this still-running Lua instance. Keep
+    -- its loaded Settings code out of ReaImGui until the guarded restart; if
+    -- restarting fails, reopen_manual draws the existing recovery guidance.
+    return nil
+  end
   if pending_feedback then
     fbui = pending_feedback
     pending_feedback = nil

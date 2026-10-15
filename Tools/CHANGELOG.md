@@ -26,6 +26,21 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.5.0 — 2026-10-16
+
+This update adds live metering, stereo analysis and panel layout controls to Reference View, alongside monitoring and update fixes.
+
+### Highlights
+
+- **Metering** — Reference View now includes live loudness and channel meters, with loudness history, adjustable targets and retained warnings for comparing your reference playback with the Reaper project.
+- **Stereoscope** — The new Stereo panel shows the stereo image in Polar Sample or Lissajous view, with correlation, clipping markers and controls to freeze or clear the display without changing the audio.
+- **Panel Layouts** — Waveform, Spectrum, Stereo and Loudness can be arranged together in Settings. Panel choices, positions and sizes are remembered between sessions.
+
+### Fixes
+
+- **Monitoring Filter** — The helper now waits for Reaper's recovery process before it is added, avoiding a conflict during startup.
+- **Updates** — Settings no longer shows an error as an in-app update finishes.
+
 ## 0.4.1 — 2026-09-19
 
 This update adds configurable hotkeys, separate playback controls and more accent colours, alongside improved release notes and a floating-window crash fix.

@@ -3,7 +3,7 @@ author:Yoni Bresley
 tags:filter analysis utility
 options:gmem=yb_reference_monitor_filter_v1 no_meter
 
-slider1:protocol=6<1,6,1>-Protocol
+slider1:protocol=11<1,11,1>-Protocol
 slider2:filter_active=0<0,1,1{Off,On}>-Active
 slider3:reserved_mode=1<0,2,1>-Reserved
 slider4:low_hz=700<10,20000,1>-Lower boundary
@@ -195,12 +195,16 @@ activation_position = 0;
 last_filtering = 0;
 last_srate = srate;
 
-// Spectrum data uses slots 32–1087; filter controls and replies use slots 0–10.
+// Spectrum data uses slots 32–1087. Stereo packets occupy 3200–134399.
 // FFT buffers begin after 65536, outside the filter scenes.
 MAGIC = 260826.1;
-CONTRACT_VERSION = 6;
+CONTRACT_VERSION = 11;
 DATA_OFFSET = 64;
 AVERAGE_DATA_OFFSET = 576;
+STEREO_BASE = 3200;
+STEREO_PACKET_STRIDE = 16400;
+STEREO_QUEUE = 8;
+STEREO_POINTS = 8192;
 
 DEFAULT_FFT_SIZE = 4096;
 DISPLAY_BINS = 512;
@@ -243,6 +247,55 @@ pending_samples = 0;
 last_published_peak = -180;
 last_capture_active = 0;
 has_publication = 0;
+stereo_serial = 0;
+stereo_packet_count = 0;
+stereo_packet_start = 0;
+stereo_packet_samples = 0;
+stereo_clip_total = 0;
+stereo_last_clip_l = 0;
+stereo_last_clip_r = 0;
+stereo_last_clip_at = 0;
+stereo_last_clip_sample = 0;
+stereo_block_started_at = 0;
+stereo_block_start_sample = 0;
+stereo_block_rate = srate;
+stereo_last_sample_at = 0;
+stereo_enabled = 0;
+
+function begin_stereo_packet() local(slot)
+(
+  slot = stereo_serial % STEREO_QUEUE;
+  stereo_packet_start = STEREO_BASE + slot * STEREO_PACKET_STRIDE;
+  // The odd seal stays visible while samples are written across callbacks.
+  gmem[stereo_packet_start] = (stereo_serial + 1) * 2 - 1;
+  // The next packet preserves evidence of clips in packets later overwritten.
+  gmem[stereo_packet_start + 9] = stereo_clip_total;
+  gmem[stereo_packet_start + 10] = stereo_last_clip_l;
+  gmem[stereo_packet_start + 11] = stereo_last_clip_r;
+  gmem[stereo_packet_start + 12] = stereo_last_clip_at;
+  gmem[stereo_packet_start + 13] = stereo_last_clip_sample;
+  gmem[stereo_packet_start + 14] = srate;
+  stereo_packet_count = 0;
+);
+
+function publish_stereo(final_marker)
+(
+  stereo_packet_count > 0 ? (
+    gmem[stereo_packet_start + 1] = spectrum_epoch;
+    gmem[stereo_packet_start + 2] = spectrum_session;
+    gmem[stereo_packet_start + 3] = stereo_packet_count;
+    gmem[stereo_packet_start + 4] = spectrum_config_revision;
+    gmem[stereo_packet_start + 5] = final_marker;
+    gmem[stereo_packet_start + 6] = source_samples;
+    gmem[stereo_packet_start + 7] = stereo_last_sample_at;
+    gmem[stereo_packet_start + 8] = stereo_clip_total;
+    gmem[stereo_packet_start] = (stereo_serial + 1) * 2;
+    stereo_serial += 1;
+    gmem[1095] = stereo_serial;
+    gmem[1096] = stereo_clip_total;
+    stereo_packet_count = 0;
+  );
+);
 
 function reset_capture() local(i)
 (
@@ -258,6 +311,12 @@ function reset_capture() local(i)
   source_samples = 0;
   pending_samples = 0;
   capture_frames = 0;
+  stereo_packet_count = 0;
+  stereo_packet_samples = min(STEREO_POINTS, max(1, ceil(srate / 30)));
+  stereo_last_clip_l = 0;
+  stereo_last_clip_r = 0;
+  stereo_last_clip_at = 0;
+  stereo_last_clip_sample = 0;
   i = 0;
   loop(FFT_SIZE,
     RING_L[i] = 0;
@@ -313,6 +372,10 @@ loop(DISPLAY_BINS,
 gmem[32] = MAGIC;
 gmem[33] = CONTRACT_VERSION;
 gmem[34] = 0;
+gmem[1095] = 0;
+gmem[1096] = 0;
+gmem[1093] = 0;
+gmem[1094] = 0;
 gmem[35] = srate;
 gmem[36] = DISPLAY_BINS;
 gmem[44] = 0;
@@ -596,14 +659,15 @@ function prepare_final_fft(anchor, available) local(i, source_index,
   );
 );
 
-function analyse_prepared_fft(measured_samples)
+function analyse_prepared_fft(measured_samples) local(measured_max_hz)
 (
   fft_real(FFT_L, FFT_SIZE);
   fft_permute(FFT_L, FFT_SIZE / 2);
   fft_real(FFT_R, FFT_SIZE);
   fft_permute(FFT_R, FFT_SIZE / 2);
 
-  max_hz = min(MAX_HZ, srate * 0.5);
+  // JSFX names ignore case: keep the current rate's limit separate from MAX_HZ.
+  measured_max_hz = min(MAX_HZ, srate * 0.5);
   normalise = 1 / WINDOW_SUM;
   normalise_power = normalise * normalise;
   BIN_LIMIT = FFT_SIZE / 2 - 1;
@@ -621,7 +685,7 @@ function analyse_prepared_fft(measured_samples)
     fft_bin += 1;
   );
 
-  display_step_octaves = log(max_hz / MIN_HZ) / LN2 / DISPLAY_BINS;
+  display_step_octaves = log(measured_max_hz / MIN_HZ) / LN2 / DISPLAY_BINS;
   band_ratio = exp(LN2 * display_step_octaves);
   lower_hz = MIN_HZ;
   band = 0;
@@ -675,6 +739,12 @@ function publish_snapshot(final_marker) local(band)
 
 @block
 
+source_samples > stereo_block_start_sample && stereo_block_started_at > 0 ? (
+  stereo_last_sample_at = stereo_block_started_at
+    + (source_samples - stereo_block_start_sample) / stereo_block_rate;
+);
+stereo_this_block_at = time_precise();
+
 // Odd/even publication rejects a partial shape without interrupting the last
 // accepted filter. Active off remains an immediate, independent dry command.
 control_revision = gmem[9];
@@ -698,7 +768,7 @@ control_revision >= 0 && control_revision == floor(control_revision)
     );
     control_revision != accepted_revision || srate != last_srate ? (
       accepted_revision = control_revision;
-      desired_valid = control_protocol == 6 && next_mode == 1
+      desired_valid = control_protocol == 11 && next_mode == 1
         && next_low >= 10 && next_low <= 20000
         && next_high >= next_low + 1 && next_high <= min(20000, floor(srate * 0.49))
         && next_slope >= 0 && next_slope <= 3 && next_slope == floor(next_slope);
@@ -715,7 +785,7 @@ control_revision >= 0 && control_revision == floor(control_revision)
 controller_alive = time_precise() - lease_time < LEASE_TIMEOUT;
 // Recheck the device limit even while a configuration is being published.
 should_filter = accepted_active >= 0.5 && gmem[1] >= 0.5
-  && control_protocol == 6 && controller_alive && desired_valid
+  && control_protocol == 11 && controller_alive && desired_valid
   && desired_high <= min(20000, floor(srate * 0.49));
 
 should_filter && (!last_filtering || srate != last_srate) ? (
@@ -754,6 +824,7 @@ response_sequence += 1;
 gmem[10] = response_sequence;
 
 
+stereo_final_requested = 0;
 spectrum_revision = gmem[20];
 spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
   spectrum_config_changed = spectrum_revision != spectrum_config_revision;
@@ -768,6 +839,7 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
   next_average_seconds = gmem[21];
   next_history_epoch = gmem[23];
   next_idle_seconds = gmem[24];
+  next_stereo_enabled = gmem[22];
   valid_spectrum_config = next_epoch == floor(next_epoch)
     && next_epoch >= 0 && next_epoch <= 1000000000
     && next_session == floor(next_session) && next_session > 0 && next_session <= 1000000000
@@ -777,7 +849,8 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
       || next_average_seconds == 3 || next_average_seconds == -1)
     && next_history_epoch == floor(next_history_epoch)
     && next_history_epoch >= 0 && next_history_epoch <= 1000000000
-    && next_idle_seconds >= 0 && next_idle_seconds <= 1000000000;
+    && next_idle_seconds >= 0 && next_idle_seconds <= 1000000000
+    && (next_stereo_enabled == 0 || next_stereo_enabled == 1);
   spectrum_revision == gmem[20] && valid_spectrum_config ? (
     fft_changed = requested_fft != FFT_SIZE;
     rate_changed = srate != spectrum_srate;
@@ -797,11 +870,13 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
     history_changed = next_history_epoch != history_epoch || session_changed;
     (smoothing_changed || history_changed) ? reset_history();
     next_average_seconds != average_seconds ? reset_average();
+    next_stereo_enabled != stereo_enabled ? stereo_packet_count = 0;
 
     final_requested = 0;
     next_capture_state == 1 && capture_state != 1 ? reset_capture();
     next_capture_state == 2 && capture_state == 1 && same_retiring_epoch ? (
       final_requested = 1;
+      stereo_final_requested = 1;
       drain_active = 1;
       drain_available = min(source_samples, FFT_SIZE);
       drain_measured_samples = pending_samples;
@@ -829,6 +904,7 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
     average_seconds = next_average_seconds;
     history_epoch = next_history_epoch;
     idle_seconds = next_idle_seconds;
+    stereo_enabled = next_stereo_enabled;
     history_changed ? (
       applied_idle_seconds = idle_seconds;
     ) : (
@@ -853,16 +929,32 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
     );
   );
 );
+stereo_final_requested && stereo_enabled ? (
+  stereo_packet_count > 0 ? publish_stereo(1) : (
+    // Exact packet-boundary stops still give the last real packet a final mark.
+    stereo_serial > 0 && source_samples > 0 ? (
+      last_stereo_slot = STEREO_BASE
+        + ((stereo_serial - 1) % STEREO_QUEUE) * STEREO_PACKET_STRIDE;
+      gmem[last_stereo_slot + 1] == spectrum_epoch
+          && gmem[last_stereo_slot + 2] == spectrum_session
+          ? gmem[1094] = stereo_serial;
+    );
+  );
+);
 // The block callback can publish one FFT snapshot per audio block. Do not claim
 // a smaller hop than the host can actually deliver.
 HOP_SIZE = max(FFT_SIZE / 4, samplesblock);
 
 
 now = time_precise();
-active = controller_alive && control_protocol == 6 && capture_state == 1
+stereo_block_started_at = stereo_this_block_at;
+stereo_block_start_sample = source_samples;
+stereo_block_rate = srate;
+active = controller_alive && control_protocol == 11 && capture_state == 1
   && gmem[19] == 1
   && spectrum_config_revision == gmem[20];
 gmem[44] = active;
+gmem[1093] = active && stereo_enabled;
 !active && last_capture_active && !drain_active ? reset_capture();
 last_capture_active = active;
 
@@ -928,6 +1020,25 @@ sample_peak = max(sample_peak, max(abs(spl0), abs(spl1)));
 write_pos = (write_pos + 1) % FFT_SIZE;
 samples_filled = min(FFT_SIZE, samples_filled + 1);
 source_samples += 1;
+stereo_enabled ? (
+  stereo_packet_count == 0 ? begin_stereo_packet();
+  gmem[stereo_packet_start + 16 + stereo_packet_count] = spl0;
+  gmem[stereo_packet_start + 16 + STEREO_POINTS + stereo_packet_count] = spl1;
+  stereo_packet_count += 1;
+  (abs(spl0) >= 1 || abs(spl1) >= 1) ? (
+    stereo_clip_total += 1;
+    stereo_last_clip_l = spl0;
+    stereo_last_clip_r = spl1;
+    stereo_last_clip_at = stereo_block_started_at
+      + (source_samples - stereo_block_start_sample) / srate;
+    stereo_last_clip_sample = source_samples;
+  );
+  stereo_packet_count >= stereo_packet_samples ? (
+    stereo_last_sample_at = stereo_block_started_at
+      + (source_samples - stereo_block_start_sample) / srate;
+    publish_stereo(0);
+  );
+);
 pending_samples += 1;
 since_hop += 1;
 since_hop >= HOP_SIZE ? (

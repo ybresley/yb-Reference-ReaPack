@@ -2,6 +2,7 @@
 -- are a separate wash; they never feed back into the plotted values.
 local theme = require('ui.theme')
 local mathx = require('core.spectrum_math')
+local axis_geometry = require('core.spectrum_axis')
 local curve_shape = require('core.spectrum_curve')
 local filter = require('core.monitor_filter')
 local icons = require('ui.icons')
@@ -258,17 +259,50 @@ local function clear_button(ctx, res, x, y)
   if clicked then return {type = 'reset_spectrum_history'} end
 end
 
-function spectrum.draw(ctx, state, width, height, res, input_exclusion)
+-- The release guide uses the same grid without submitting live input.
+function spectrum.paint_grid(dl, gx, gy, gw, gh, bottom, fmin, fmax)
+  local graph_right, graph_bottom, scale = gx+gw, gy+gh, theme.scale
+  local zero_y = gy + mathx.db_fraction(0, 6, bottom) * gh
+  for db = 0, bottom, -5 do
+    local fy = mathx.db_fraction(db, 6, bottom)
+    local yy = gy + fy * gh
+    local colour = db % 10 == 0 and T.SPECTRUM_GRID
+      or theme.fade(T.SPECTRUM_GRID, 0.55)
+    reaper.ImGui_DrawList_AddLine(dl, gx, yy, graph_right, yy,
+      theme.fade(colour, 0.35 + 0.65 * (1 - fy) ^ 0.85))
+  end
+  for offset = -2, 2 do
+    reaper.ImGui_DrawList_AddLine(dl, gx, zero_y + offset * scale,
+      graph_right,
+      zero_y + offset * scale, theme.fade(T.SPECTRUM_GRID,
+        offset == 0 and 1 or math.abs(offset) == 1 and 0.12 or 0.05), scale)
+  end
+  for decade = 1, 4 do
+    for multiple = 1, 9 do
+      local hz = 10 ^ decade * multiple
+      if hz > fmin and hz <= fmax then
+        local xx = gx + mathx.frequency_fraction(hz, fmin, fmax) * gw
+        reaper.ImGui_DrawList_AddLine(dl, xx, gy, xx, graph_bottom,
+          theme.fade(T.SPECTRUM_FREQ_GRID, mathx.frequency_grid_prominence(multiple)))
+      end
+    end
+  end
+end
+
+function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_height)
   local model, listening = state.spectrum, state.monitor_filter
   local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
   local pad, scale = M.SPECTRUM_PLOT_PAD, theme.scale
-  local axis = height >= M.WAVE_MIN_H and M.RULER_H or 0
+  local axis = footer_height
+  if axis == nil then axis = height-M.RULER_H >= M.WAVE_MIN_H and M.RULER_H or 0 end
   local gx, gy = x + pad, y
   local gw = math.max(1, width - pad - M.SPECTRUM_LEVEL_W)
   local gh = math.max(1, height - axis)
   local graph_right, graph_bottom = gx + gw, gy + gh
-  local fmin, fmax = model.fmin or 10, model.fmax or 22050
+  local fmin, measured_max = model.fmin or 10, model.fmax or 22050
+  local fmax = axis_geometry.MAX_HZ
+  local trace_width = axis_geometry.trace_width(gw, fmin, measured_max)
   local bottom = -model.prefs.range
   local mx, my = reaper.ImGui_GetMousePos(ctx)
   local hovered = reaper.ImGui_IsWindowHovered(ctx)
@@ -288,33 +322,7 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion)
     x, y, graph_right, graph_bottom, T.SPECTRUM_BG, 3 * scale)
   reaper.ImGui_Dummy(ctx, width, height)
 
-  local zero_y = gy + mathx.db_fraction(0, 6, bottom) * gh
-  for db = 0, bottom, -5 do
-    local fy = mathx.db_fraction(db, 6, bottom)
-    local yy = gy + fy * gh
-    local colour = db % 10 == 0 and T.SPECTRUM_GRID
-      or theme.fade(T.SPECTRUM_GRID, 0.55)
-    local tick = axis > 0 and (db % 10 == 0 and M.RULER_TICK_MAJOR
-      or M.RULER_TICK_MINOR) or 0
-    reaper.ImGui_DrawList_AddLine(dl, gx, yy, graph_right + tick, yy,
-      theme.fade(colour, 0.35 + 0.65 * (1 - fy) ^ 0.85))
-  end
-  for offset = -2, 2 do
-    reaper.ImGui_DrawList_AddLine(dl, gx, zero_y + offset * scale,
-      graph_right + (axis > 0 and M.RULER_TICK_MAJOR or 0),
-      zero_y + offset * scale, theme.fade(T.SPECTRUM_GRID,
-        offset == 0 and 1 or math.abs(offset) == 1 and 0.12 or 0.05), scale)
-  end
-  for decade = 1, 4 do
-    for multiple = 1, 9 do
-      local hz = 10 ^ decade * multiple
-      if hz > fmin and hz <= fmax then
-        local xx = gx + mathx.frequency_fraction(hz, fmin, fmax) * gw
-        reaper.ImGui_DrawList_AddLine(dl, xx, gy, xx, graph_bottom,
-          theme.fade(T.SPECTRUM_FREQ_GRID, mathx.frequency_grid_prominence(multiple)))
-      end
-    end
-  end
+  spectrum.paint_grid(dl, gx, gy, gw, gh, bottom, fmin, fmax)
 
   local available = listening.system.available == true
   local draw_live = available and model.live_visible and model.ready
@@ -342,7 +350,7 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion)
   local clear_hot = show_clear and controls.contains(clear_bounds, mx, my)
   reaper.ImGui_DrawList_PushClipRect(dl, gx, gy, gx + gw, gy + gh, true)
   for i = 1, count do
-    local hz = mathx.bin_frequency(i, count, fmin, fmax)
+    local hz = mathx.bin_frequency(i, count, fmin, measured_max)
     if draw_live then values.live[i] = mathx.tilted_db(model.live[i], hz, model.prefs.tilt) end
     if draw_average then values.average[i] = mathx.tilted_db(model.average[i], hz, model.prefs.tilt) end
   end
@@ -351,11 +359,11 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion)
       and not entry.is_open() and not reaper.ImGui_IsAnyItemActive(ctx)
       and not reaper.ImGui_IsMouseDown(ctx, 0) and not reaper.ImGui_IsMouseDown(ctx, 1)
       and not reaper.ImGui_IsMouseDown(ctx, 2)
-      and mx >= gx and mx <= graph_right and my >= gy and my <= graph_bottom,
-    gx, gy, gw)
-  if draw_average then curve(dl, values.average, count, gx, gy, gw, gh, bottom,
+      and mx >= gx and mx <= gx+trace_width and my >= gy and my <= graph_bottom,
+    gx, gy, trace_width)
+  if draw_average then curve(dl, values.average, count, gx, gy, trace_width, gh, bottom,
     nil, T.SPECTRUM_AVERAGE_FILL, model.draw) end
-  paint_inspection(dl, values.live, count, gx, gy, gw, gh, bottom,
+  paint_inspection(dl, values.live, count, gx, gy, trace_width, gh, bottom,
     model.draw, capture, draw_live)
 
   local illuminate = false
@@ -451,14 +459,14 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion)
 
   local live_eligible = hovered and not input_excluded
     and not overlay_hot and not handle_hot and draw_live
-    and mx >= gx and mx <= gx + gw and my >= gy and my <= gy + gh
+    and mx >= gx and mx <= gx + trace_width and my >= gy and my <= gy + gh
   live_input.model, live_input.source_key, live_input.epoch = model, model.source_key, model.epoch
   live_input.history_epoch, live_input.tilt, live_input.draw_live =
     model.history_epoch, model.prefs.tilt, draw_live
-  live_input.fmin, live_input.fmax, live_input.bottom = fmin, fmax, bottom
-  live_input.gx, live_input.gy, live_input.gw, live_input.gh = gx, gy, gw, gh
+  live_input.fmin, live_input.fmax, live_input.bottom = fmin, measured_max, bottom
+  live_input.gx, live_input.gy, live_input.gw, live_input.gh = gx, gy, trace_width, gh
   live_input.mx, live_input.my, live_input.pad, live_input.count = mx, my, pad, count
-  hover_peaks.draw_labels(ctx, dl, gx, gy, gw, gh, bottom, input_exclusion,
+  hover_peaks.draw_labels(ctx, dl, gx, gy, trace_width, gh, bottom, input_exclusion,
     controls_drawn and overlay_bounds or nil, show_clear and clear_bounds or nil)
   axis_input.gx, axis_input.gy, axis_input.gw, axis_input.gh = gx, gy, gw, gh
   axis_input.axis, axis_input.fmin, axis_input.fmax, axis_input.bottom = axis, fmin, fmax, bottom
@@ -475,14 +483,11 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion)
   if pointer_readout and not ruler_readout then draw_live_readout(dl, live_readout, live_input) end
   if not available then
     action = action or helper_status.draw(ctx, listening.system, gx, gy, gw, gh)
-  elseif model.status == 'stale' or model.status == 'invalid'
-      or not model.fresh and not model.has_history and not draw_live
-      or not model.has_signal and not model.has_history and not draw_live then
-    local waiting = model.status == 'stale' or model.status == 'invalid'
-    local message = waiting and 'Waiting for spectrum data' or 'No Signal'
+  elseif model.playing and (model.status == 'stale' or model.status == 'invalid') then
+    local message = 'Waiting for spectrum data'
     local tw, th = reaper.ImGui_CalcTextSize(ctx, message)
     reaper.ImGui_DrawList_AddText(dl, x + math.max(pad, (width - tw) / 2), gy + math.max(0, (gh - th) / 2),
-      waiting and T.TEXT_SECONDARY or T.TEXT_QUATERNARY, message)
+      T.TEXT_SECONDARY, message)
   end
   -- Timed histories refill immediately during playback; clearing is useful
   -- for Infinite accumulation or for history left after playback stops.

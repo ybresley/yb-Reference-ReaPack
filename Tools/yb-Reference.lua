@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.4.1
+-- @version 0.5.0
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -15,10 +15,14 @@
 --   [nomain] assets/fonts/lucide.ttf
 --   [nomain] assets/fonts/LICENSE-Lucide.txt
 --   [nomain] assets/cursors/drag_copy.cur
+--   [nomain] assets/cursors/grabbing.cur
+--   [nomain] assets/cursors/grabbing.LICENSE.txt
 --   [nomain] assets/windows/folder_picker.ps1
 --   [nomain] assets/windows/folder_picker.vbs
 --   [nomain] CHANGELOG.md
 --   [effect] yb-Reference Monitoring Filter.jsfx
+--   [nomain script] Effects/yb-Reference_Meter.jsfx
+--   [effect] Effects/yb-Reference_Meter.jsfx > yb-Reference/yb-Reference_Meter.jsfx
 --   [main] yb-Reference_ToggleReferenceMode.lua
 --   [main] yb-Reference_Hotkey_PlayPause.lua
 --   [main] yb-Reference_Hotkey_PauseResume.lua
@@ -41,27 +45,26 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update adds configurable hotkeys, separate playback controls and more
---   accent colours, alongside improved release notes and a floating-window
---   crash fix.
+--   This update adds live metering, stereo analysis and panel layout controls
+--   to Reference View, alongside monitoring and update fixes.
 --    
---   Changes
---     • Hotkeys: Hotkeys are now available for yb-Reference controls and stay
---       in sync with Reaper's Actions list. Assign them in Settings →
---       Hotkeys; assigned shortcuts also appear in the matching button
---       tooltips.
---     • Reference Playback: Reference View and Library now have separate Play
---       and Pause / Resume controls. Play restarts the sound, while Pause /
---       Resume continues from the same position.
---     • Updates: Release Notes now includes every version you missed when
---       updating across several releases. Open the full history from Settings
---       → Updates.
---     • Appearance: Accent Colour now offers twelve choices in Settings →
---       Appearance.
+--   Highlights
+--     • Metering: Reference View now includes live loudness and channel
+--       meters, with loudness history, adjustable targets and retained
+--       warnings for comparing your reference playback with the Reaper
+--       project.
+--     • Stereoscope: The new Stereo panel shows the stereo image in Polar
+--       Sample or Lissajous view, with correlation, clipping markers and
+--       controls to freeze or clear the display without changing the audio.
+--     • Panel Layouts: Waveform, Spectrum, Stereo and Loudness can be arranged
+--       together in Settings. Panel choices, positions and sizes are
+--       remembered between sessions.
 --    
 --   Fixes
---     • Window: Moving yb-Reference beyond the edges of Reaper's window no
---       longer crashes the tool.
+--     • Monitoring Filter: The helper now waits for Reaper's recovery process
+--       before it is added, avoiding a conflict during startup.
+--     • Updates: Settings no longer shows an error as an in-app update
+--       finishes.
 --
 -- RELEASE NOTES ARE GENERATED — never hand-write them here. CHANGELOG.md is the
 -- single source of truth (2026-08-08); `lua scripts/gen_header.lua` writes the
@@ -549,6 +552,13 @@ local pitch      = require("core.pitch")    -- semitone limits and playback-rate
 local monitor_filter_core = require("core.monitor_filter") -- listening-range rules and remembered shape
 local spectrum_core = require("core.spectrum")
 local spectrum = require("spectrum")
+local metering = require('metering')
+local reference_layout_core = require("core.reference_layout")
+local layout_prototype = require("core.layout_prototype")
+local panel_layout_settings = require("panel_layout_settings")
+local reference_panels = require("reference_panels")
+local stereo_core = require("core.stereo")
+local stereo_settings = require("stereo_settings")
 local wave_view  = require("core.wave_view") -- Reference View waveform pan and zoom range
 local techfacts  = require("core.techfacts") -- the armed sound's tech line for the bar
 local preview    = require("preview")  -- SWS audio-preview adapter (playback)
@@ -570,11 +580,13 @@ local fb_core      = require("core.feedback")  -- report payload building (pure)
 local walkthrough  = require("core.walkthrough") -- first-open walkthrough state machine (pure)
 local walkthrough_ui = require("ui.walkthrough")  -- asked ONE question here: can its card draw on this ReaImGui
 local app = require("ui.app")
+local panel_drag_cursor = require("panel_drag_cursor")
 local ctx = app.create_context(icon_font_path, CONTEXT_NAME, reaper_api.monitor_work_area)
 
 -- The drag-out cursor travels with the script the same way. Handed over once
 -- here because reaper_api has no business knowing where the script lives.
 reaper_api.set_drag_cursor_file(table.concat({ root, "assets", "cursors", "drag_copy.cur" }, SEP))
+panel_drag_cursor.prepare(table.concat({root, "assets", "cursors", "grabbing.cur"}, SEP))
 
 -- The Loudness column can show any of the three measurements we store; which one is
 -- remembered between runs. Anything unrecognised falls back to the default rather
@@ -588,6 +600,11 @@ if saved_browser.sound_id and not stored_browser.sound_id then
 end
 local open_library_on_startup = reaper_api.get_open_library_on_startup()
 local stored_monitor_filter, stored_spectrum = spectrum.load()
+local stored_reference_panels, reference_panels_error = reference_panels.load(stored_spectrum.prefs)
+local stored_metering = metering.load()
+local stored_panel_layout, stored_meter_splits, panel_layout_error = panel_layout_settings.load(
+  stored_reference_panels, reference_panels_error, stored_metering.prefs)
+local stored_stereo_preferences, stereo_preferences_error = stereo_settings.load()
 
 -- Released copies receive the helper through ReaPack's [effect] package entry.
 -- DEV/Main copies also keep a source beside the script, so the adapter mirrors
@@ -670,10 +687,14 @@ local state = {
   -- (ui/browser.lua clamps it to the window each frame, so a value saved on a
   -- big screen can't crush the sound list on a small one).
   browser_wave_h = reaper_api.get_browser_wave_h(),
-  -- The vertical Reference View divider. It is an app preference rather than
-  -- spectrum data, so compatible DEV builds can keep sharing their spectrum JSON.
-  reference_stack_split = reaper_api.get_reference_stack_split(),
-  reference_layout = reaper_api.get_reference_layout(),
+  reference_panels = stored_reference_panels,
+  layout_prototype = stored_panel_layout,
+  layout_meter_splits = stored_meter_splits,
+  panel_layout_error = panel_layout_error,
+  reference_panels_error = reference_panels_error,
+  stereo_view = reaper_api.get_stereo_view(),
+  stereo_preferences = stored_stereo_preferences,
+  stereo_preferences_error = stereo_preferences_error,
   visible_sounds = {},                           -- library sounds for the view (filtered + sorted, cached)
   -- Playback (Phase 3). auto_audition on by default = clicking a sound plays it.
   auto_audition  = true,
@@ -708,6 +729,8 @@ local state = {
     },
   },
   spectrum = stored_spectrum,
+  metering = stored_metering,
+  stereo = stereo_core.new(),
   master_db      = math.max(-60, math.min(0, reaper_api.get_master_db())), -- preview level, clamped to -60..0 dB
 
   -- The browser's own selection (Phase 5.9 — independent browsing): a LIBRARY
@@ -964,7 +987,13 @@ end
 local playback = playback_coordinator.new(state, {
   find = find_sound, path = sound_path,
   before_start = function(slot, sound_id)
+    -- Analysis failure remains visible in its panel without silencing preview.
+    metering.prepare_preview(state, slot, sound_id)
     return spectrum.prepare_preview(state, slot, sound_id)
+  end,
+  before_seek = function(kind)
+    local ok, err = metering.transport_event(state, kind)
+    if not ok and err then state.status = err end
   end,
 }, reference_alerted)
 
@@ -1838,34 +1867,52 @@ local function handle_action(a)
       state.browser_wave_h = h
       reaper_api.set_browser_wave_h(h)
     end
-  elseif a.type == "set_reference_layout" then
-    local previous = state.reference_layout[a.key]
-    if previous ~= a.value and reaper_api.set_reference_layout(a.key, a.value) then
-      state.reference_layout[a.key] = a.value
-      -- Divider shares were historically stored against the waveform. Reverse
-      -- the matching share when content order changes so the two frames and the
-      -- gap stay in place while only their contents trade sides.
-      if a.key == "horizontal_first" then
-        local ok, err = spectrum_core.set_preference(
-          state.spectrum, "split", 1 - state.spectrum.prefs.split)
-        if ok then ok, err = spectrum.save(state.spectrum) end
-        if not ok then state.status = err end
-      elseif a.key == "vertical_first" then
-        state.reference_stack_split = 1 - state.reference_stack_split
-        reaper_api.set_reference_stack_split(state.reference_stack_split)
+  elseif a.type == "layout_prototype" then
+    local ok, err = panel_layout_settings.apply(state, a)
+    if err then state.status = err end
+    if ok and a.operation and a.operation.type == "edit" and a.operation.value then
+      settings.close()
+    end
+  elseif a.type == "reference_panels" then
+    local operation = a.operation
+    local prefs, err
+    if operation and operation.type == "reset" then
+      prefs = reference_layout_core.defaults()
+    elseif not state.reference_panels_error then
+      prefs, err = reference_layout_core.update(state.reference_panels, operation)
+    else
+      err = state.reference_panels_error
+    end
+    if prefs then
+      state.reference_panels = prefs
+      if a.commit ~= false then
+        local ok
+        ok, err = reference_panels.save(prefs,
+          operation.type ~= "reset" and state.reference_panels_error or nil)
+        if ok then state.reference_panels_error = nil end
       end
     end
-  elseif a.type == "set_reference_stack_split" then
-    -- Drag frames update the view immediately without writing preferences. The
-    -- release action omits commit=false and always writes, including when the
-    -- last drag frame already put this exact value in state.
-    local value = a.value
-    local valid = type(value) == "number" and value == value
-      and math.abs(value) < math.huge and value >= 0.2 and value <= 0.8
-    if valid then
-      state.reference_stack_split = value
-      if a.commit ~= false then
-        reaper_api.set_reference_stack_split(value)
+    if err then state.status = err end
+  elseif a.type == "stereo_clear_display" then
+    stereo_core.clear_display(state.stereo)
+    state.stereo.raster = nil
+  elseif a.type == "stereo_setting" or a.type == "stereo_reset_settings"
+      or a.type == "stereo_reset_all_settings" or a.type == "stereo_freeze" then
+    local ok, err = stereo_settings.apply(state, a)
+    if not ok then state.status = err end
+  elseif a.type == "stereo_view" then
+    if reaper_api.set_stereo_view(a.value) then
+      state.stereo_view = a.value
+      -- A wider view can trigger a compact layout. Keep the view the user just
+      -- selected visible without changing the full arrangement or enabled set.
+      if not layout_prototype.current(state.layout_prototype) and not state.reference_panels_error then
+        local prefs = reference_layout_core.update(state.reference_panels,
+          {type="set_single", id="stereo"})
+        if prefs then
+          state.reference_panels = prefs
+          local ok, err = reference_panels.save(prefs)
+          if not ok then state.status = err end
+        end
       end
     end
   elseif a.type == "preview_pin" then
@@ -1954,6 +2001,28 @@ local function handle_action(a)
       value, err = monitor_filter_core.edit_preset(state.monitor_filter, a.id, a.low_hz, a.high_hz)
     else value, err = monitor_filter_core.restore_preset(state.monitor_filter, a.id) end
     if value then replace_monitor_filter(value, true) else state.status = err end
+  elseif a.type == 'meter_panel_swap' or a.type == 'meter_panel_split' then
+    local ok, err = panel_layout_settings.apply(state, a)
+    if not ok and err then state.status = err end
+  elseif a.type == 'meter_set_preference' then
+    local ok, err = metering.set_preference(state.metering, a.key, a.value, a.commit)
+    if not ok and err then state.status = err end
+  elseif a.type == 'meter_reset_page' then
+    local ok, err = metering.reset_page(state.metering, a.page)
+    if not ok and err then state.status = err end
+  elseif a.type == 'meter_reset' or a.type == 'meter_reconnect' then
+    local run = a.type == 'meter_reset' and metering.reset or metering.reconnect
+    local ok, err = run(state)
+    if not ok and err then state.status = err end
+  elseif a.type == 'meter_clear_warnings' then
+    metering.clear_warnings(state)
+  elseif a.type == 'meter_save_display_preset' or a.type == 'meter_load_display_preset'
+      or a.type == 'meter_reset_settings' then
+    local run = a.type == 'meter_save_display_preset' and metering.save_display_preset
+      or a.type == 'meter_load_display_preset' and metering.load_display_preset
+      or metering.reset_settings
+    local ok, err = run(state.metering)
+    if not ok and err then state.status = err end
   elseif a.type == "set_spectrum_preference" then
     local ok, err = spectrum_core.set_preference(state.spectrum, a.key, a.value)
     if ok and a.commit ~= false then ok, err = spectrum.save(state.spectrum) end
@@ -2327,6 +2396,8 @@ end
 reaper_api.mark_action_running(CMD_ID, true)
 reaper.atexit(function()
   reference.cleanup(); pcall(monitoring_filter.shutdown)
+  pcall(panel_drag_cursor.shutdown)
+  pcall(metering.shutdown)
   pcall(hotkeys.stop)
   if import_job then import_job:cancel() end
   preview.stop(); peaks.cancel(); wave_detail.close(); loudness.cancel()
@@ -2338,6 +2409,9 @@ reaper.atexit(function()
   -- startup deletion because it could remove later user work.
   dragout.hide_ghost()
   reaper_api.mark_action_running(CMD_ID, false)
+  stereo_settings.flush(state, true)
+  local layout_saved, layout_error = panel_layout_settings.flush(state, true)
+  if not layout_saved then reaper_api.message(layout_error, "Panel Layout") end
 end)
 
 state.hotkeys = hotkeys.start(root)
@@ -2405,6 +2479,11 @@ local function loop()
 
   -- Playback transitions are settled before requesting a fresh analysis window.
   local filter_view = spectrum.tick(state)
+  metering.tick(state)
+  local stereo_saved, stereo_save_error = stereo_settings.flush(state)
+  if not stereo_saved then state.status = stereo_save_error end
+  local layout_saved, layout_save_error = panel_layout_settings.flush(state)
+  if not layout_saved then state.status = layout_save_error end
   if filter_view.phase ~= monitor_filter_phase_was then
     if filter_view.phase ~= "ready" and filter_view.phase ~= "settling" then
       state.status = filter_view.message
@@ -2519,7 +2598,7 @@ local function loop()
   end
   state.mouse_modifiers = reaper_api.mouse_modifiers()
   local open, action, over_target, give_focus, forward_keys, feedback_visible,
-    wave_id, wave_cols, picker_owner, browse_wave_id, browse_wave_cols = app.frame(
+    wave_id, wave_cols, picker_owner, browse_wave_id, browse_wave_cols, panel_grabbing = app.frame(
     ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   picker_preview.set_context(state, picker_owner)
   actions.dispatch(action, handle_action)
@@ -2599,6 +2678,8 @@ local function loop()
   -- (user-reported 2026-08-07). Over one of ours the tag drops its destination
   -- line entirely: the zone's own dashed outline and pill already name where the
   -- sound is going, in the place the user is looking.
+  local cursor_ok, cursor_error = panel_drag_cursor.update(open and panel_grabbing and not state.drag)
+  if not cursor_ok then state.status = cursor_error end
   if state.drag then
     reaper_api.show_drag_cursor(state.drag.over_arrange or over_target)
     dragout.show_tag(state.drag.name, not over_target and state.drag.hint or nil)
@@ -2619,6 +2700,7 @@ local function loop()
     reference.cleanup() -- window closed: never leave the project muted behind us
     pcall(hotkeys.stop)
     pcall(monitoring_filter.shutdown) -- return Monitoring FX to exact dry immediately
+    pcall(metering.shutdown)
     if import_job then import_job:cancel() end
     preview.stop()      -- then stop any sound still playing
     peaks.cancel()      -- and free any half-finished waveform build

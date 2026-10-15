@@ -1,6 +1,7 @@
--- Static dB labels share the spectrum ruler's font and fixed right gutter.
+-- Level ticks start at the filled plot edge, like the frequency ruler below it.
 local theme = require('ui.theme')
 local mathx = require('core.spectrum_math')
+local axis_geometry = require('core.spectrum_axis')
 
 local T, M = theme.tokens, theme.metrics
 local level_axis = {}
@@ -18,37 +19,22 @@ function level_axis.draw(ctx, dl, input)
   reaper.ImGui_DrawList_PushClipRect(dl, gx, gy,
     input.level_right + label_gap, graph_bottom, true)
 
+  local edge=gx+input.gw
+  local label_width=reaper.ImGui_CalcTextSize(ctx,'−'..tostring(math.ceil(math.abs(bottom))))
   local function level_label(text, yy)
-    local width = reaper.ImGui_CalcTextSize(ctx, text)
+    local width=reaper.ImGui_CalcTextSize(ctx,text)
     local label_y = yy - level_h * 0.5
-    reaper.ImGui_DrawList_AddText(dl, input.level_right - width, label_y,
+    reaper.ImGui_DrawList_AddLine(dl,edge,yy,edge+M.RULER_TICK_MAJOR,yy,T.SPECTRUM_GRID)
+    reaper.ImGui_DrawList_AddText(dl, edge+M.RULER_TICK_MAJOR+M.RULER_LABEL_GAP+label_width-width, label_y,
       T.TEXT_TERTIARY, text)
     return label_y + level_h
   end
 
-  local zero_y = gy + mathx.db_fraction(0, 6, bottom) * gh
-  local label_step = 10
-  while label_step * gh / (6 - bottom) < level_h + label_gap do
-    label_step = label_step + 10
-  end
-
-  local zero_top = zero_y - level_h * 0.5
-  local zero_bottom = zero_top + level_h
-  if zero_top >= gy and zero_bottom <= graph_bottom then
-    level_label('0', zero_y)
-    if gy + level_h + label_gap <= zero_top then
-      local plus_width = reaper.ImGui_CalcTextSize(ctx, '+6')
-      reaper.ImGui_DrawList_AddText(dl, input.level_right - plus_width, gy,
-        T.TEXT_TERTIARY, '+6')
-    end
-    local last_bottom = zero_bottom
-    for db = -label_step, bottom, -label_step do
-      local yy = gy + mathx.db_fraction(db, 6, bottom) * gh
-      local top = yy - level_h * 0.5
-      if top >= last_bottom + label_gap and top + level_h <= graph_bottom then
-        last_bottom = level_label(tostring(db), yy)
-      end
-    end
+  local ticks = axis_geometry.level_ticks(gh, bottom, level_h, label_gap)
+  for _, db in ipairs(ticks) do
+    local yy = gy + mathx.db_fraction(db, 6, bottom) * gh
+    local label = db == 0 and '0' or tostring(db):gsub('^-','−')
+    level_label(label, yy)
   end
 
   reaper.ImGui_DrawList_PopClipRect(dl)
