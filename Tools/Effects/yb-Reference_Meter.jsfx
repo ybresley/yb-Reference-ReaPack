@@ -3,7 +3,7 @@
 // Stereo Crest Factor accumulates unweighted energy and sample peak per run.
 desc:yb-Reference Meter
 tags:analysis meter
-options:no_meter
+options:no_meter gmem=yb_reference_monitor_filter_v1
 in_pin:Left
 in_pin:Right
 out_pin:Left
@@ -44,10 +44,16 @@ slider31:live_true_peak_l=-150<-150,50,0.01>-Live True Peak Left (output)
 slider32:live_true_peak_r=-150<-150,50,0.01>-Live True Peak Right (output)
 slider33:true_peak_age_l=0<0,1,0.000001>-True Peak Age Left (output)
 slider34:true_peak_age_r=0<0,1,0.000001>-True Peak Age Right (output)
+slider35:true_peak_max=-150<-150,50,0.01>-True Peak Max (output)
+slider36:control_protocol=1<1,1,1>-Control protocol (output)
+slider37:instance_token=0<0,1000000000,1>-Instance token (output)
+slider38:control_session=0<0,1000000000,1>-Control session (output)
 
 @init
 ext_noinit=1;
 ext_nodenorm=1;
+function valid_number(x) (x == x && x >= 0 && x <= 1000000000);
+function valid_counter(x) (valid_number(x) && x >= 0 && x < 1000000000 && x == floor(x));
 // The 48 kHz coefficients are from ITU-R BS.1770-5. An inverse bilinear map
 // followed by the target-rate bilinear map preserves them exactly at 48 kHz.
 function map_coeffs(src_b0 src_b1 src_b2 src_a1 src_a2 ratio)
@@ -313,9 +319,12 @@ function reset_window() (
   live_peak_l=live_peak_r=-150;
   true_peak_l=true_peak_r=-150;
   live_true_peak_l=live_true_peak_r=-150;
+  tp_max=0;
+  true_peak_max=-150;
   crest_l=crest_r=-1;
   crest_energy=crest_samples=crest_peak=0;
   capture_epoch=(capture_epoch+1)%1000000000;
+  control_session=accepted_session;
   last_sr=srate;
   reset_lra();
   lra_revision=(lra_revision+1)%1000000000;
@@ -326,15 +335,116 @@ function update_crest() (
   crest=crest_samples>0 && crest_energy>0 && lra_valid!=-1
     ? max(0,db_per_log*(log(crest_peak)-0.5*log(crest_energy/crest_samples))) : -1;
 );
+control_protocol=1;
+owned_token=(atomic_add(gmem[140013],1)-1)%999999999+1;
+instance_token=owned_token;
+accepted_session=0;
+control_session=0;
+seen_heartbeat=gmem[140003];
+foreign_heartbeat=-1;
+meter_active=0;
+lease_expired=1;
+requires_fresh=1;
 reset_window();
 was_playing=0;
 expected_position=play_position;
 last_reset_request=reset_request;
 
 @block
+control_protocol=1;
+instance_token=owned_token;
+// An inactive or foreign command silences analysis even during a partial write.
+raw_active=gmem[140001];
+raw_target=gmem[140004];
+raw_active != 1 ? (
+  meter_active=0;
+  requires_fresh=1;
+  time_precise()-lease_at > 0.75 ? lease_expired=1;
+) : raw_target != owned_token ? (
+  meter_active=0;
+  lease_expired=1;
+  requires_fresh=1;
+  foreign_heartbeat=gmem[140003];
+) : (
+  command_revision=gmem[140005];
+  valid_counter(command_revision) && command_revision % 2 == 0 ? (
+    next_protocol=gmem[140000];
+    next_active=gmem[140001];
+    next_session=gmem[140002];
+    next_heartbeat=gmem[140003];
+    next_target=gmem[140004];
+    next_mode=gmem[140006];
+    next_reset=gmem[140007];
+    next_policy=gmem[140008];
+    next_loop_start=gmem[140009];
+    next_loop_end=gmem[140010];
+    next_loop_enabled=gmem[140011];
+    command_revision == gmem[140005]
+        && next_protocol == 1 && next_active == 1
+        && next_target == owned_token
+        && valid_counter(next_session) && next_session > 0
+        && valid_counter(next_heartbeat)
+        && valid_counter(next_mode) && next_mode <= 2
+        && valid_counter(next_reset)
+        && valid_counter(next_policy) && next_policy <= 7
+        && valid_number(next_loop_start) && next_loop_start >= 0
+        && next_loop_start <= 1000000000
+        && valid_number(next_loop_end) && next_loop_end >= 0
+        && next_loop_end <= 1000000000
+        && valid_counter(next_loop_enabled) && next_loop_enabled <= 1 ? (
+      now=time_precise();
+      fresh_heartbeat=next_heartbeat != seen_heartbeat
+        && next_heartbeat != foreign_heartbeat;
+      fresh_heartbeat ? (
+        seen_heartbeat=next_heartbeat;
+        foreign_heartbeat=-1;
+        lease_at=now;
+      );
+      fresh_heartbeat || (!requires_fresh && !lease_expired && now-lease_at <= 0.75) ? (
+        next_session != accepted_session && !fresh_heartbeat ? (
+          meter_active=0;
+          lease_expired=1;
+          requires_fresh=1;
+        ) : (
+          capture_mode=next_mode;
+          reset_request=next_reset;
+          reset_policy=next_policy;
+          loop_start=next_loop_start;
+          loop_end=next_loop_end;
+          loop_enabled=next_loop_enabled;
+          next_session != accepted_session || lease_expired ? (
+            accepted_session=next_session;
+            reset_window();
+            last_reset_request=reset_request;
+            was_playing=capture_mode==1 || (capture_mode==0 && (play_state&1)!=0);
+            expected_position=play_position;
+          );
+          meter_active=1;
+          lease_expired=0;
+          requires_fresh=0;
+        );
+      ) : (
+        meter_active=0;
+        lease_expired=1;
+        requires_fresh=1;
+      );
+    ) : (
+      meter_active=0;
+      lease_expired=1;
+      requires_fresh=1;
+    );
+  );
+  meter_active && time_precise()-lease_at > 0.75 ? (
+    meter_active=0;
+    lease_expired=1;
+    requires_fresh=1;
+  );
+);
+meter_active ? (
 // Include the final partial meter slice when transport stops between updates.
 lra_revision=(lra_revision+1)%1000000000;
 update_crest();
+true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
 lra_revision=(lra_revision+1)%1000000000;
 is_playing=capture_mode==1 || (capture_mode==0 && (play_state&1)!=0);
 // Project transport edges are handled before processing their first audio block.
@@ -348,8 +458,10 @@ srate != last_sr || restart || reset_request != last_reset_request ? reset_windo
 last_reset_request=reset_request;
 is_playing ? expected_position=play_position+samplesblock/srate;
 was_playing=is_playing;
+);
 
 @sample
+meter_active ? (
 // Attack follows each sample; release falls by 20 dB per second.
 live_l=max(abs(spl0),live_l*live_decay);
 live_r=max(abs(spl1),live_r*live_decay);
@@ -361,6 +473,7 @@ live_tp_r=max(sample_tp_r,live_tp_r*live_decay);
 is_playing && rate_ok && lra_valid != -1 ? (
   !(spl0 >= -input_limit && spl0 <= input_limit
     && spl1 >= -input_limit && spl1 <= input_limit) ? lra_error() : (
+    tp_max=max(tp_max,max(sample_tp_l,sample_tp_r));
     crest_energy+=(spl0*spl0+spl1*spl1)*0.5;
     crest_samples+=1;
     crest_peak=max(crest_peak,max(abs(spl0),abs(spl1)));
@@ -436,6 +549,7 @@ count >= block_length ? (
   live_peak_r=live_r>0 ? max(-150,db_per_log*log(live_r)) : -150;
   live_true_peak_l=live_tp_l>0 ? max(-150,db_per_log*log(live_tp_l)) : -150;
   live_true_peak_r=live_tp_r>0 ? max(-150,db_per_log*log(live_tp_r)) : -150;
+  true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
   update_crest();
   sequence=(sequence+1)%1000000000;
   lra_revision=(lra_revision+1)%1000000000;
@@ -444,5 +558,7 @@ count >= block_length ? (
   sliderchange(slider29); sliderchange(slider30);
   sliderchange(slider31); sliderchange(slider32);
   sliderchange(slider33); sliderchange(slider34);
+  sliderchange(slider35);
   count=0; sum_l=sum_r=max_l=max_r=max_tp_l=max_tp_r=0;
+);
 );

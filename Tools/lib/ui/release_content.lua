@@ -2,8 +2,10 @@
 -- Edit description text between [=[ and ]=]; apostrophes and quotation marks are safe inside.
 return {
   version = '0.5.0',
-  compatible_versions = {},
-  supplements = {},
+  compatible_versions = { '0.5.1' },
+  supplements = {
+    ['0.5.1'] = { title = 'Playback stability' },
+  },
   features = {
     {
       title = 'Metering',

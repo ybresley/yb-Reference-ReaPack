@@ -223,8 +223,7 @@ function session.update(state, snapshot, dt)
     return state
   end
 
-  -- True peak can change between stereo helper publications. Read it each
-  -- frame; chart storage has its own cadence.
+  -- The helper retains run maxima even when the interface misses publications.
   -- The audio clock keeps measurement time accurate even when redraws are delayed.
   local audio_seconds = reading(snapshot.lra_seconds)
   if audio_seconds and audio_seconds >= 0 then

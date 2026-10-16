@@ -299,7 +299,7 @@ local function refresh_owned_helper(allow_incompatible)
   dry_entry(snap, entry)
   if R.TrackFX_Delete(snap.master, entry.fx) ~= true then return true, false end
 
-  -- Replacing the filter must not push the session meters out of slots 0 and 1.
+  -- Replacing the filter must keep the analysis meter at the front of the chain.
   S.replacement_slot = entry.slot
   S.stored_guid, S.bound_guid, S.slot = nil, nil, nil
   S.last_settings, S.last_applied_on = nil, false
