@@ -26,7 +26,7 @@ local function ensure(model)
   local ok, reason = backend:attach()
   model.attached, model.error = ok, ok and nil or reason
   if ok then
-    -- A newly attached helper has no audio history to continue.
+    -- Each controller session starts a fresh measurement, including a reused helper.
     session.reset(model)
     model.capture_mode, model.capture_epoch, model.measured_source = nil, nil, nil
     model.last_sequence, model.progress_at = nil, nil
@@ -126,8 +126,9 @@ end
 
 local function reset_backend(model, mode)
   if not ensure(model) then return false, model.error end
-  local ok, reason = backend:reset()
-  if ok then ok, reason = backend:configure(model.prefs, reaper.EnumProjects(-1)) end
+  -- Reset measurements inside the existing helper. Adding or removing Monitor FX
+  -- can block REAPER for seconds on some audio setups.
+  local ok, reason = backend:configure(model.prefs, reaper.EnumProjects(-1))
   if ok then ok, reason = backend:capture(mode, true) end
   if not ok then model.error = reason; return false, reason end
   model.capture_epoch = nil
@@ -180,7 +181,14 @@ function metering.reconnect(state)
   local model = state.metering
   if not model then return false end
   if backend then
-    local ok, reason = backend:close()
+    -- A healthy reconnect reuses the sleeping helper. Replacement is reserved
+    -- for an explicit recovery of a missing, incompatible or failed connection.
+    local ok, reason
+    if model.error and model.error ~= 'existing_instance' then
+      ok, reason = backend:repair()
+    else
+      ok, reason = backend:close()
+    end
     if not ok then model.error = reason; return false, reason end
   end
   backend = nil
@@ -228,7 +236,7 @@ function metering.tick(state)
   local started, stopped = playing and not model.playing, not playing and model.playing
   if stopped then
     -- A short preview can finish between drawing frames. Consume its last
-    -- publication before clearing the analysis instances for the next source.
+    -- publication before marking playback stopped.
     local final = backend:poll()
     if final.pending_publication then return end
     if final.ready then
@@ -238,12 +246,11 @@ function metering.tick(state)
       session.animate(model, dt, scale.loudness(model.prefs))
     end
   end
-  -- Arm a fresh helper while stopped; project Play itself resets before sample one.
-  -- Preview preparation runs before its routes start and has already done this work.
-  if (stopped and model.prefs.auto_reset == 'On Play')
-      or (playing and changed and model.prefs.auto_reset == 'New Reference') then
+  -- Project Play resets in the helper before sample one. Preview preparation
+  -- requests its own reset before the routes start.
+  if playing and changed and model.prefs.auto_reset == 'New Reference' then
     if not reset_backend(model, mode) then return end
-    if playing then session.reset(model) end
+    session.reset(model)
   elseif model.capture_mode ~= mode then
     local ok, reason = backend:capture(mode, false)
     if not ok then model.error = reason; return end
@@ -256,14 +263,6 @@ function metering.tick(state)
   if snapshot.ready then
     if playing and model.capture_epoch and snapshot.capture_epoch ~= model.capture_epoch then
       session.reset(model)
-      -- The audio helper resets loudness at a project transport boundary. The
-      -- stock true-peak meter needs a separate reset when that boundary is a seek.
-      if not started then
-        local ok, reason = backend:reset_true_peak()
-        if ok then ok, reason = backend:configure(model.prefs, project) end
-        if not ok then model.error = reason; return end
-        snapshot.tp_max = nil
-      end
     end
     model.capture_epoch = snapshot.capture_epoch
     if model.last_sequence ~= snapshot.sequence then

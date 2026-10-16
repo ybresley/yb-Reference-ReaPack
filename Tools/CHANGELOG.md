@@ -26,6 +26,22 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.5.1 — 2026-10-16
+
+This update addresses freezes related to live metering.
+
+### Changes
+
+- **Loudness** — Removed the separate True Peak meter from Monitor FX.
+  TP Max now measures the same left/right pair as the other meters.
+- **Loudness** — The meter stays in Monitor FX and sleeps when yb-Reference closes.
+  Reopening reuses it instead of loading another copy.
+
+### Fixes
+
+- **Loudness** — Fixed freezes when starting or stopping playback with live metering enabled.
+- **Window** — Fixed repeated pauses when reopening or closing yb-Reference with live metering enabled.
+
 ## 0.5.0 — 2026-10-16
 
 This update adds live metering, stereo analysis and panel layout controls to Reference View, alongside monitoring and update fixes.

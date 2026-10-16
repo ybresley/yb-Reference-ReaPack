@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.5.0
+-- @version 0.5.1
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -45,26 +45,20 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update adds live metering, stereo analysis and panel layout controls
---   to Reference View, alongside monitoring and update fixes.
+--   This update addresses freezes related to live metering.
 --    
---   Highlights
---     • Metering: Reference View now includes live loudness and channel
---       meters, with loudness history, adjustable targets and retained
---       warnings for comparing your reference playback with the Reaper
---       project.
---     • Stereoscope: The new Stereo panel shows the stereo image in Polar
---       Sample or Lissajous view, with correlation, clipping markers and
---       controls to freeze or clear the display without changing the audio.
---     • Panel Layouts: Waveform, Spectrum, Stereo and Loudness can be arranged
---       together in Settings. Panel choices, positions and sizes are
---       remembered between sessions.
+--   Changes
+--     • Loudness: Removed the separate True Peak meter from Monitor FX.
+--         TP Max now measures the same left/right pair as the other meters.
+--     • Loudness: The meter stays in Monitor FX and sleeps when yb-Reference
+--       closes.
+--         Reopening reuses it instead of loading another copy.
 --    
 --   Fixes
---     • Monitoring Filter: The helper now waits for Reaper's recovery process
---       before it is added, avoiding a conflict during startup.
---     • Updates: Settings no longer shows an error as an in-app update
---       finishes.
+--     • Loudness: Fixed freezes when starting or stopping playback with live
+--       metering enabled.
+--     • Window: Fixed repeated pauses when reopening or closing yb-Reference
+--       with live metering enabled.
 --
 -- RELEASE NOTES ARE GENERATED — never hand-write them here. CHANGELOG.md is the
 -- single source of truth (2026-08-08); `lua scripts/gen_header.lua` writes the
