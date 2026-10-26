@@ -34,10 +34,9 @@ local function operation(value)
   return { type = "reference_panels", operation = value }
 end
 
-local function rects(mode, count, width, height, gap, shares, order, stereo_aspect)
+local function rects(mode, count, width, height, gap, shares, order)
   local geometry = reference_layout.geometry(mode, count, width, height, shares,
-    { gap = gap, min_width = 0, min_height = 0,
-      stereo_aspect = stereo_aspect }, order)
+    { gap = gap, min_width = 0, min_height = 0 }, order)
   return geometry and geometry.rects or {}
 end
 
@@ -136,7 +135,7 @@ local function layout_choices(ctx, layout, begin_setting, setting_label, setting
   return action
 end
 
-local function position_choices(ctx, layout, mode, stereo_aspect,
+local function position_choices(ctx, layout, mode,
     begin_setting, setting_label, setting_note)
   local action
   begin_setting(ctx)
@@ -153,8 +152,7 @@ local function position_choices(ctx, layout, mode, stereo_aspect,
   reaper.ImGui_Dummy(ctx, width, M.SET_LAYOUT_PREVIEW_H)
   local shares = layout.splits and layout.splits[mode .. "_" .. #visible]
   for i, rect in ipairs(rects(mode, #visible, width,
-      M.SET_LAYOUT_PREVIEW_H, M.SET_LAYOUT_GRID_GAP, shares, visible,
-      stereo_aspect)) do
+      M.SET_LAYOUT_PREVIEW_H, M.SET_LAYOUT_GRID_GAP, shares, visible)) do
     local id = visible[i]
     if id then
       reaper.ImGui_SetCursorScreenPos(ctx, px + rect.x, py + rect.y)
@@ -225,7 +223,6 @@ function reference_settings.draw(ctx, state, begin_setting, setting_label, setti
     begin_setting, setting_label, setting_note)
   action = action or layout_action
   local position_action = position_choices(ctx, layout, mode,
-    state.stereo_view == "polar_sample" and 2 or 1,
     begin_setting, setting_label, setting_note)
   action = action or position_action
   if error_message then

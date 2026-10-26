@@ -533,8 +533,7 @@ function transport.draw(ctx, state, res)
   -- References-folder square that used to sit in this slot became a Settings
   -- row (2026-08-10, `.brief/settings-move`).
   reaper.ImGui_SetCursorPos(ctx, row_x0 + g.library_x, row_y0 + g.ctrl_y)
-  -- Walkthrough stop 1's target — and the frozen state's ring, since this is
-  -- the button that reopens the Library. Geometry-noted (see the latch).
+  -- A closed Library card points to the button that reopens it.
   local lib_x, lib_y = reaper.ImGui_GetCursorScreenPos(ctx)
   walkthrough_ui.note_rect(ctx, state.walkthrough, "library_button",
     lib_x, lib_y, lib_x + ctrl, lib_y + ctrl)
@@ -552,6 +551,9 @@ function transport.draw(ctx, state, res)
   -- — and it's now visible without the browser open, which the old placement
   -- never managed.
   reaper.ImGui_SetCursorPos(ctx, row_x0 + g.gear_x, row_y0 + g.ctrl_y)
+  local gear_x, gear_y = reaper.ImGui_GetCursorScreenPos(ctx)
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "settings_button",
+    gear_x, gear_y, gear_x + ctrl, gear_y + ctrl)
   local update_due = state.update and state.update.available ~= nil
   -- Settings changes state on the button's release, so its motion must start
   -- from that same release. Starting it on mouse-down lets the intervening

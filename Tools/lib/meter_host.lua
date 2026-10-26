@@ -7,11 +7,13 @@ local MONITOR_FX = 0x1000000
 local EXT_SECTION = "yb-Reference"
 local EXT_GUID = "meter_helper_guid_v1"
 local EXT_ORIGINAL = "meter_helper_original_v1"
+local CREST_IDENT = "yb-Reference/yb-Reference_Meter.jsfx"
 -- A newly installed helper may not yet appear in REAPER's description cache.
-local CREST_QUERY = "JS: yb-Reference/yb-Reference_Meter.jsfx"
+local CREST_QUERY = "JS: " .. CREST_IDENT
 local LEGACY_NATIVE_LABEL = "yb-Reference True Peak (session)"
 local OLD_CREST_LABEL = "yb-Reference Meter (session)"
 local CREST_LABEL = "yb-Reference Meter"
+local HISTORY_BASE, HISTORY_ROWS, HISTORY_CAPACITY, HISTORY_STRIDE = 150000, 150032, 1000, 5
 
 local CREST_NAMES = {
   rms_l = "RMS Left (output)",
@@ -49,9 +51,24 @@ local CREST_NAMES = {
 }
 
 local OUTPUT_NAMES = {}
+local OLD_CREST_NAMES = {
+  capture_mode = "Capture mode", reset_request = "Reset request",
+  reset_policy = "Reset policy", loop_start = "Project loop start",
+  loop_end = "Project loop end", loop_enabled = "Project loop enabled",
+}
+local PROTOCOL_ONE_NAMES = {}
+for key, value in pairs(CREST_NAMES) do PROTOCOL_ONE_NAMES[key] = value end
+for _, key in ipairs({ 'capture_mode', 'reset_request', 'reset_policy',
+    'loop_start', 'loop_end', 'loop_enabled' }) do
+  PROTOCOL_ONE_NAMES[key] = OLD_CREST_NAMES[key]
+end
 for key, value in pairs(CREST_NAMES) do
   if key ~= "control_protocol" and key ~= "instance_token" then
     OUTPUT_NAMES[key] = value
+  end
+  if key ~= "tp_max" and key ~= "control_protocol" and key ~= "instance_token"
+      and key ~= "control_session" then
+    OLD_CREST_NAMES[key] = value
   end
 end
 
@@ -79,6 +96,8 @@ local function expected_original(kind, original)
   end
   return original == "yb-Reference Meter"
     or original == "JS: yb-Reference Meter"
+    or original == "yb-Reference Meter [yb-Reference/yb-Reference_Meter.jsfx]"
+    or original == "JS: yb-Reference Meter [yb-Reference/yb-Reference_Meter.jsfx]"
     or original == "yb-Reference/yb-Reference_Meter.jsfx"
     or original == "JS: yb-Reference/yb-Reference_Meter.jsfx"
     or original == "yb-Reference/yb-Reference_Meter"
@@ -133,8 +152,16 @@ function host.new(R, options)
     return { project = project, master = master, count = count }
   end
 
+  local function meter_present(snap, fx, original_ok, original)
+    if original_ok and expected_original("crest", original) then return true end
+    -- The installed filename still reveals a meter after its name check fails.
+    -- This blocks extra insertions; it does not grant ownership or deletion.
+    local ok, ident = R.TrackFX_GetNamedConfigParm(snap.master, fx, "fx_ident")
+    return ok and ident == CREST_IDENT
+  end
+
   local function scan_owned(snap)
-    local found = { same_original = 0, known_labels = 0 }
+    local found = { meter_count = 0, known_labels = 0 }
     local crest_guid = self.owned.crest and self.owned.crest.guid
     for slot = 0, snap.count - 1 do
       local guid = R.TrackFX_GetFXGUID(snap.master, MONITOR_FX + slot)
@@ -142,8 +169,8 @@ function host.new(R, options)
         snap.master, MONITOR_FX + slot, "fx_name")
       local label_ok, label = R.TrackFX_GetNamedConfigParm(
         snap.master, MONITOR_FX + slot, "renamed_name")
-      if original_ok and expected_original("crest", original) then
-        found.same_original = found.same_original + 1
+      if meter_present(snap, MONITOR_FX + slot, original_ok, original) then
+        found.meter_count = found.meter_count + 1
       end
       if label_ok and (label == CREST_LABEL or label == OLD_CREST_LABEL
           or label == LEGACY_NATIVE_LABEL) then
@@ -211,10 +238,37 @@ function host.new(R, options)
     if not params then return nil, "crest_parameters_missing" end
     local protocol = R.TrackFX_GetParam(snap.master, entry.fx, params.control_protocol)
     local token = R.TrackFX_GetParam(snap.master, entry.fx, params.instance_token)
-    if protocol ~= 1 or not valid_counter(token) or token == 0 then
+    if protocol ~= 2 or not valid_counter(token) then
       return nil, "control_incompatible"
     end
+    if token == 0 then return nil, "initializing" end
     return params, token
+  end
+
+  local function known_older_helper(snap, entry)
+    -- Both shipped layouts have an exact signature. Unknown controls stay manual.
+    local params = find_params(snap, entry.fx, PROTOCOL_ONE_NAMES)
+    if params then
+      if R.TrackFX_GetParam(snap.master, entry.fx,
+          params.control_protocol) ~= 1 then return false end
+      local token = R.TrackFX_GetParam(snap.master, entry.fx, params.instance_token)
+      if not valid_counter(token) or token == 0 then return false end
+    else
+      params = find_params(snap, entry.fx, OLD_CREST_NAMES)
+      if not params then return false end
+    end
+    local known = {}
+    for _, param in pairs(params) do known[param] = true end
+    if R.TrackFX_GetParamFromIdent then
+      for _, ident in ipairs({ ":bypass", ":wet", ":delta" }) do
+        local param = R.TrackFX_GetParamFromIdent(snap.master, entry.fx, ident)
+        if type(param) == "number" and param >= 0 then known[param] = true end
+      end
+    end
+    for param = 0, R.TrackFX_GetNumParams(snap.master, entry.fx) - 1 do
+      if not known[param] then return false end
+    end
+    return true
   end
 
   local function remove_created(guid, original)
@@ -273,6 +327,18 @@ function host.new(R, options)
       return false, reason or "no_master"
     end
     local params, token = validate_params(latest, entry)
+    -- REAPER can expose the sliders before the audio callback assigns a token.
+    -- Remember only the exact instance we inserted; never claim token zero.
+    if not params and token == "initializing" then
+      local stored, store_reason = store_identity(self.owned[kind])
+      if stored then
+        self.owned[kind].initializing = true
+        return false, "initializing"
+      end
+      self.owned[kind] = nil
+      remove_created(guid, original)
+      return false, store_reason
+    end
     if not params then
       self.owned[kind] = nil
       remove_created(guid, original)
@@ -294,14 +360,20 @@ function host.new(R, options)
     end
     self.owned[kind].params = params
     self.pending_epoch = nil
+    self.history_cursor, self.header_pending_at = nil, nil
     return true
   end
 
-  function self:attach()
-    if not self.options.crest_source then return false, "crest_source_unreadable" end
-    local installer = self.options.install_crest or install_crest
-    local ok, reason = installer(R, self.options.crest_source)
-    if not ok then return false, reason end
+  function self:attach(reuse_only)
+    if self.auto_upgrade_failed_reason and not saved_identity() then
+      return false, self.auto_upgrade_failed_reason
+    end
+    if not reuse_only then
+      if not self.options.crest_source then return false, "crest_source_unreadable" end
+      local installer = self.options.install_crest or install_crest
+      local ok, reason = installer(R, self.options.crest_source)
+      if not ok then return false, reason end
+    end
     local snap = self:snapshot()
     if not snap then return false, "no_master" end
     local available, lease_reason = self.control:available()
@@ -311,13 +383,13 @@ function host.new(R, options)
     if self.owned.crest and saved and self.owned.crest.guid ~= saved.guid then
       return false, "changed"
     end
-    local originals, remembered, labels = 0, 0, 0
+    local meters, remembered, labels = 0, 0, 0
     for slot = 0, snap.count - 1 do
       local fx = MONITOR_FX + slot
       local original_ok, original = R.TrackFX_GetNamedConfigParm(snap.master, fx, "fx_name")
       local label_ok, label = R.TrackFX_GetNamedConfigParm(snap.master, fx, "renamed_name")
       local guid = R.TrackFX_GetFXGUID(snap.master, fx)
-      if original_ok and expected_original("crest", original) then originals = originals + 1 end
+      if meter_present(snap, fx, original_ok, original) then meters = meters + 1 end
       if label_ok and (label == LEGACY_NATIVE_LABEL or label == OLD_CREST_LABEL
           or label == CREST_LABEL) then labels = labels + 1 end
       if saved and guid == saved.guid then remembered = remembered + 1 end
@@ -325,7 +397,7 @@ function host.new(R, options)
         return false, "existing_instance"
       end
     end
-    if originals > 1 or remembered > 1 or labels > 1 then return false, "ambiguous" end
+    if meters > 1 or remembered > 1 or labels > 1 then return false, "ambiguous" end
     if saved then
       if remembered == 0 then return false, "missing" end
       self.owned.crest = self.owned.crest or saved
@@ -333,21 +405,49 @@ function host.new(R, options)
       if not entry then return false, found_reason end
       if entry.slot ~= 0 then return false, "moved" end
       local params, token = validate_params(snap, entry)
-      if not params then return false, token end
+      if not params then
+        self.owned.crest.initializing = token == "initializing" or nil
+        if token == "initializing" then return false, token end
+        if reuse_only or self.auto_upgrade_attempted or self.control_claimed
+            or not known_older_helper(snap, entry) then return false, token end
+        self.auto_upgrade_attempted = true
+        local repaired, repair_reason = self:repair(true)
+        if not repaired then
+          self.auto_upgrade_failed_reason = repair_reason
+          return false, repair_reason
+        end
+        local added, add_reason = self:add(0)
+        if not added then
+          if add_reason ~= "initializing" then self.auto_upgrade_failed_reason = add_reason end
+          return false, add_reason
+        end
+        self.control_claimed = true
+        local ready, ready_reason = self:operational(self:snapshot())
+        return ready ~= nil, ready_reason
+      end
       self.owned.crest.params = params
       if not self.control_claimed then
         local claimed, claim_reason = self.control:claim(token)
         if not claimed then return false, claim_reason end
         self.control_claimed = true
+        self.history_cursor, self.header_pending_at = nil, nil
       end
+      self.owned.crest.initializing = nil
     else
-      if originals > 0 or labels > 0 then return false, "existing_instance" end
+      if reuse_only then return false, "missing" end
+      if meters > 0 or labels > 0 then return false, "existing_instance" end
       local added, add_reason = self:add(0)
       if not added then return false, add_reason end
       self.control_claimed = true
     end
     local ready, reason = self:operational(self:snapshot())
     return ready ~= nil, reason
+  end
+
+  -- A delayed master or control connection may retry a saved helper without any
+  -- installer, insertion, deletion, or replacement of Monitor FX.
+  function self:retry_attach()
+    return self:attach(true)
   end
 
   -- This is an explicit recovery path for leftovers after another app copy has
@@ -444,15 +544,21 @@ function host.new(R, options)
     if not snap then return nil, "no_master" end
     if not self.owned.crest then return nil, "detached" end
     local scanned = scan_owned(snap)
-    if scanned.same_original > 1 or scanned.known_labels > 1 then
+    if scanned.meter_count > 1 or scanned.known_labels > 1 then
       return nil, "ambiguous"
     end
     local crest, reason = self:locate(snap, "crest", false, scanned)
     if not crest then return nil, reason end
     if crest.slot ~= 0 then return nil, "moved" end
+    if self.owned.crest.initializing then
+      local params, token = validate_params(snap, crest)
+      if not params then return nil, token end
+      -- Only attach may acquire control after the instance becomes ready.
+      return nil, "initializing"
+    end
     if not self.owned.crest.params then return nil, "crest_parameters_missing" end
     local params = self.owned.crest.params
-    if R.TrackFX_GetParam(snap.master, crest.fx, params.control_protocol) ~= 1
+    if R.TrackFX_GetParam(snap.master, crest.fx, params.control_protocol) ~= 2
         or R.TrackFX_GetParam(snap.master, crest.fx, params.instance_token)
           ~= self.control.token then
       return nil, "control_incompatible"
@@ -472,12 +578,22 @@ function host.new(R, options)
     local renewed, renew_reason = self.control:renew()
     if not renewed then result.status = renew_reason; return result end
     local params = self.owned.crest.params
-    local coherent, readings = false, {}
+    local coherent, readings, header = false, {}, nil
     for _ = 1, 3 do
       local before = R.TrackFX_GetParam(snap.master, crest.fx, params.lra_revision)
       local epoch = R.TrackFX_GetParam(snap.master, crest.fx, params.capture_epoch)
       if not valid_counter(epoch) then result.status = "capture_invalid"; return result end
       read_outputs(snap, crest, params, OUTPUT_NAMES, readings)
+      header = {
+        protocol = R.gmem_read(HISTORY_BASE),
+        token = R.gmem_read(HISTORY_BASE + 1),
+        session = R.gmem_read(HISTORY_BASE + 2),
+        epoch = R.gmem_read(HISTORY_BASE + 3),
+        latest = R.gmem_read(HISTORY_BASE + 4),
+        m_max = R.gmem_read(HISTORY_BASE + 5),
+        s_max = R.gmem_read(HISTORY_BASE + 6),
+        capacity = R.gmem_read(HISTORY_BASE + 7),
+      }
       if not valid_counter(readings.capture_epoch) then
         result.status = "capture_invalid"
         return result
@@ -504,6 +620,60 @@ function host.new(R, options)
       end
       self.pending_epoch = nil
     end
+    if header.protocol ~= 2 or header.token ~= self.control.token
+        or header.session ~= self.control.session
+        or header.epoch ~= readings.capture_epoch then
+      local now = R.time_precise()
+      self.header_pending_at = self.header_pending_at or now
+      if now - self.header_pending_at >= 1.5 then
+        result.status = 'capture_invalid'
+      else
+        result.status, result.pending_publication = 'waiting', true
+      end
+      return result
+    end
+    self.header_pending_at = nil
+    if not valid_counter(header.latest) or header.capacity ~= HISTORY_CAPACITY
+        or not finite(header.m_max) or not finite(header.s_max) then
+      result.status = 'capture_invalid'
+      return result
+    end
+    local cursor = self.history_cursor
+    if not cursor or cursor.token ~= header.token or cursor.session ~= header.session
+        or cursor.epoch ~= header.epoch then
+      cursor = { token=header.token, session=header.session, epoch=header.epoch, sequence=0 }
+    end
+    local first = math.max(cursor.sequence + 1, header.latest - HISTORY_CAPACITY + 1)
+    local history = {}
+    for sequence = first, header.latest do
+      local row = HISTORY_ROWS + ((sequence - 1) % HISTORY_CAPACITY) * HISTORY_STRIDE
+      local seal = R.gmem_read(row)
+      if seal ~= sequence then
+        result.status, result.pending_publication = 'waiting', true
+        return result
+      end
+      local point = {
+        t = R.gmem_read(row + 1), m = R.gmem_read(row + 2),
+        s = R.gmem_read(row + 3), i = R.gmem_read(row + 4),
+      }
+      if R.gmem_read(row) ~= sequence then
+        result.status, result.pending_publication = 'waiting', true
+        return result
+      end
+      if not finite(point.t) or point.t < 0 or not finite(point.m)
+          or not finite(point.s) or not finite(point.i) then
+        result.status = 'capture_invalid'
+        return result
+      end
+      history[#history + 1] = point
+    end
+    if R.gmem_read(HISTORY_BASE) ~= header.protocol
+        or R.gmem_read(HISTORY_BASE + 1) ~= header.token
+        or R.gmem_read(HISTORY_BASE + 2) ~= header.session
+        or R.gmem_read(HISTORY_BASE + 3) ~= header.epoch then
+      result.status, result.pending_publication = 'waiting', true
+      return result
+    end
     for key, value in pairs(readings) do result[key] = value end
     if result.lra_valid == -1 then result.status = "lra_invalid"; return result end
     if not finite(result.lra_seconds) or result.lra_seconds < 0 then
@@ -520,6 +690,7 @@ function host.new(R, options)
     end
     -- Every reading comes from the same stereo capture and reset boundary.
     result.m, result.s, result.i = result.live_m, result.live_s, result.integrated
+    result.history, result.m_max, result.s_max = history, header.m_max, header.s_max
     -- Silence is a valid meter reading. The session owns audio-arrival timing.
     result.ready = result.m ~= nil and result.s ~= nil and result.i ~= nil
       and result.tp_max ~= nil and result.rms_l ~= nil and result.rms_r ~= nil
@@ -532,6 +703,10 @@ function host.new(R, options)
         and finite(result.true_peak_age_l) and result.true_peak_age_l >= 0
         and finite(result.true_peak_age_r) and result.true_peak_age_r >= 0
     result.status = result.ready and "ready" or "waiting"
+    if result.ready then
+      cursor.sequence = header.latest
+      self.history_cursor = cursor
+    end
     return result
   end
 
@@ -553,7 +728,10 @@ function host.new(R, options)
     })
     if not published then return false, publish_reason end
     self.reset_request = request
-    if reset then self.pending_epoch = epoch end
+    if reset then
+      self.pending_epoch = epoch
+      self.header_pending_at = nil
+    end
     return true
   end
 
@@ -582,12 +760,15 @@ function host.new(R, options)
     self.control_claimed = nil
     self.owned = {}
     self.pending_epoch = nil
+    self.history_cursor = nil
+    self.header_pending_at = nil
     self.reset_request = 0
     return closed, reason
   end
 
-  -- Replacement is only available through the user's explicit Reconnect action.
-  function self:repair()
+  -- Automatic repair is limited to a verified, enabled old helper in slot zero.
+  -- Explicit repair retains its broader recovery behaviour.
+  function self:repair(automatic)
     local available, lease_reason = self.control:available()
     if not available then return false, lease_reason end
     local saved = saved_identity()
@@ -596,26 +777,49 @@ function host.new(R, options)
     local snap = self:snapshot()
     if not snap then return false, "no_master" end
     self.owned.crest = saved
-    local entry, reason = self:locate(snap, "crest", true)
+    local entry, reason = self:locate(snap, "crest", not automatic)
     if not entry and reason ~= "missing" then return false, reason end
+    if automatic and (not entry or entry.slot ~= 0) then
+      return false, entry and "moved" or "missing"
+    end
     local count = 0
     for slot = 0, snap.count - 1 do
       local fx = MONITOR_FX + slot
       local ok, original = R.TrackFX_GetNamedConfigParm(snap.master, fx, "fx_name")
       local label_ok, label = R.TrackFX_GetNamedConfigParm(snap.master, fx, "renamed_name")
-      if ok and expected_original("crest", original) then count = count + 1 end
+      if meter_present(snap, fx, ok, original) then count = count + 1 end
       if label_ok and (label == LEGACY_NATIVE_LABEL or label == OLD_CREST_LABEL) then
         return false, "existing_instance"
       end
     end
     if count > 1 or (not entry and count > 0) then return false, "ambiguous" end
+    if automatic then
+      local scanned = scan_owned(snap)
+      if scanned.crest == false or scanned.meter_count ~= 1
+          or scanned.known_labels ~= 1 or not known_older_helper(snap, entry) then
+        return false, "ambiguous"
+      end
+    end
     local closed, close_reason = self.control:close()
     if not closed then return false, close_reason end
     self.control_claimed = nil
     if entry then
       local latest = self:snapshot()
-      local current, current_reason = latest and self:locate(latest, "crest", true)
+      local current, current_reason
+      if latest then current, current_reason = self:locate(latest, "crest", not automatic) end
       if not current then return false, current_reason or "no_master" end
+      if automatic then
+        local latest_saved = saved_identity()
+        local scanned = scan_owned(latest)
+        if not latest_saved or latest_saved == false
+            or latest_saved.guid ~= saved.guid or latest_saved.original ~= saved.original then
+          return false, "changed"
+        end
+        if current.slot ~= 0 then return false, "moved" end
+        if scanned.crest == false or scanned.meter_count ~= 1
+            or scanned.known_labels ~= 1 then return false, "ambiguous" end
+        if not known_older_helper(latest, current) then return false, "changed" end
+      end
       if R.TrackFX_Delete(latest.master, current.fx) ~= true then
         return false, "delete_failed"
       end
@@ -624,8 +828,13 @@ function host.new(R, options)
     if not forgotten then return false, forget_reason end
     self.owned = {}
     self.pending_epoch = nil
+    self.history_cursor, self.header_pending_at = nil, nil
     self.configuration = nil
     self.reset_request = 0
+    if not automatic then
+      self.auto_upgrade_attempted = nil
+      self.auto_upgrade_failed_reason = nil
+    end
     return true
   end
 

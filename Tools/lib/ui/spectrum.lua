@@ -289,7 +289,7 @@ function spectrum.paint_grid(dl, gx, gy, gw, gh, bottom, fmin, fmax)
   end
 end
 
-function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_height)
+function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_height, background_painted)
   local model, listening = state.spectrum, state.monitor_filter
   local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
@@ -318,8 +318,10 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_h
   -- Match the waveform: the filled picture stops before its ruler. Frequency
   -- labels sit below it on the window background, and level labels sit in the
   -- bare gutter to its right. Both pictures now end on the same horizontal line.
-  reaper.ImGui_DrawList_AddRectFilled(dl,
-    x, y, graph_right, graph_bottom, T.SPECTRUM_BG, 3 * scale)
+  if not background_painted then
+    reaper.ImGui_DrawList_AddRectFilled(dl,
+      x, y, graph_right, graph_bottom, T.SPECTRUM_BG, 3 * scale)
+  end
   reaper.ImGui_Dummy(ctx, width, height)
 
   spectrum.paint_grid(dl, gx, gy, gw, gh, bottom, fmin, fmax)

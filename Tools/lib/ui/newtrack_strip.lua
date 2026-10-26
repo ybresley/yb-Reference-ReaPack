@@ -68,17 +68,21 @@ local function push_strip_font(ctx)
   return false
 end
 
--- `zone` is { x, y, w, h } in SCREEN pixels, or nil for "nothing to show".
+-- `zone` uses native coordinates; y_direction says which way the strip extends.
 function newtrack_strip.draw(ctx, zone)
   if not OK or not zone then return end
   if zone.w < 1 or zone.h < 1 then return end
 
-  reaper.ImGui_SetNextWindowPos(ctx, zone.x, zone.y, reaper.ImGui_Cond_Always())
-  reaper.ImGui_SetNextWindowSize(ctx, zone.w, zone.h, reaper.ImGui_Cond_Always())
+  local x0, y0 = reaper.ImGui_PointConvertNative(ctx, zone.x, zone.y)
+  local x1, y1 = reaper.ImGui_PointConvertNative(ctx,
+    zone.x + zone.w, zone.y + zone.h * (zone.y_direction or 1))
+  local x, y = math.min(x0, x1), math.min(y0, y1)
+  local w, h = math.abs(x1 - x0), math.abs(y1 - y0)
+  reaper.ImGui_SetNextWindowPos(ctx, x, y, reaper.ImGui_Cond_Always())
+  reaper.ImGui_SetNextWindowSize(ctx, w, h, reaper.ImGui_Cond_Always())
   if not reaper.ImGui_Begin(ctx, "##yb_newtrack_strip", nil, FLAGS) then return end
 
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  local x, y, w, h = zone.x, zone.y, zone.w, zone.h
   reaper.ImGui_DrawList_AddRectFilled(dl, x, y, x + w, y + h, STRIP_BG)
   reaper.ImGui_DrawList_AddLine(dl, x, y, x + w, y, STRIP_EDGE)
   reaper.ImGui_DrawList_AddLine(dl, x, y + h - 1, x + w, y + h - 1, STRIP_EDGE)

@@ -402,11 +402,22 @@ function layout.measure(width, height, prefs, options)
       or ratio >= 1.1 and {'grid','row','top','bottom','left','right','stack'}
       or {'stack','left','right','grid','top','bottom','row'}
   end
+  local candidate_fits = false
   if candidates then
     mode = candidates[1]
     for _, candidate in ipairs(candidates) do
-      if fits(candidate,count,width,height,gap,mw,mh) then mode=candidate; break end
+      if fits(candidate,count,width,height,gap,mw,mh) then
+        mode, candidate_fits = candidate, true
+        break
+      end
     end
+  end
+  if count > 1 and prefs.mode == 'auto' and not candidate_fits then
+    -- Keep undersized layouts from changing shape at aspect-ratio boundaries.
+    -- Row remains useful when the full panel widths fit; otherwise grid keeps
+    -- the two picture columns available while their heights compress evenly.
+    local row_width = required_size('row',count,gap,mw,mh)
+    mode = width >= row_width and 'row' or 'grid'
   end
   if count > 1 and prefs.mode == 'auto' then
     local ratio = width/math.max(height,1)
@@ -446,9 +457,12 @@ function layout.measure(width, height, prefs, options)
   -- Measure the full arrangement first so reclaiming the scope's space cannot
   -- make it alternate between visible and hidden on successive frames.
   if count > 1 and options.stereo_hide_height then
+    local hide_height = options.stereo_hidden
+      and math.max(options.stereo_hide_height, options.stereo_restore_height or 0)
+      or options.stereo_hide_height
     for _, pane in ipairs(panels) do
       if pane.id == 'stereo'
-          and pane.h-(options.header_height or 0) < options.stereo_hide_height then
+          and pane.h-(options.header_height or 0) < hide_height-.0001 then
         local visible = {}
         for _, id in ipairs(order) do
           if id ~= 'stereo' then visible[#visible+1] = id end

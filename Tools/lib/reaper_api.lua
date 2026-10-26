@@ -63,6 +63,11 @@ function reaper_api.is_windows()
   return os_name == "Win32" or os_name == "Win64"
 end
 
+function reaper_api.is_macos()
+  local os_name = reaper.GetOS()
+  return os_name:match("^OSX") ~= nil or os_name:match("^macOS") ~= nil
+end
+
 function reaper_api.check_deps()
   return {
     imgui      = reaper.APIExists("ImGui_CreateContext"),
@@ -79,7 +84,7 @@ function reaper_api.check_deps()
     file_drag_rescue = reaper.APIExists("JS_Mouse_GetState"),
     -- Windows' modern folder-only dialog is launched through ExecProcess. The
     -- old js tree dialog remains a fallback if the Windows helper is blocked.
-    folder_picker = reaper.APIExists("ExecProcess")
+    folder_picker = (reaper_api.is_windows() and reaper.APIExists("ExecProcess"))
       or reaper.APIExists("JS_Dialog_BrowseForFolder"),
   }
 end
@@ -278,6 +283,7 @@ end
 function reaper_api.parent_dir(path)
   if type(path) ~= "string" or path == "" then return nil end
   local parent = path:match("^(.*)[\\/][^\\/]+$")
+  if parent == "" and path:sub(1, 1) == "/" then return "/" end
   if parent and parent:match("^%a:$") then return parent .. SEP end
   return parent
 end
@@ -299,7 +305,8 @@ function reaper_api.browse_for_folder(title, initial, script_root, force_initial
   local helper_error
   local vbs = script_root and reaper_api.join(script_root, "assets", "windows", "folder_picker.vbs")
   local ps1 = script_root and reaper_api.join(script_root, "assets", "windows", "folder_picker.ps1")
-  if reaper.APIExists("ExecProcess") and readable_file(vbs) and readable_file(ps1) then
+  if reaper_api.is_windows() and reaper.APIExists("ExecProcess")
+    and readable_file(vbs) and readable_file(ps1) then
     local result_path = folder_picker_result_path()
     remove_folder_picker_files(result_path)
     local args = {
@@ -551,8 +558,7 @@ function reaper_api.set_stereo_view(value)
   return true
 end
 
--- REAPER's own version string, e.g. "7.66/x64" (core/feedback strips the
--- platform tail for display — it is always Windows 64-bit here).
+-- REAPER's version string includes its architecture; feedback formats it for display.
 function reaper_api.app_version()
   return reaper.GetAppVersion()
 end
@@ -956,7 +962,7 @@ end
 -- victim before a single byte arrived. A refusal loses nothing.
 function reaper_api.copy_file(src, dest, pause)
   if reaper_api.path_exists(dest) then
-    return false, "Couldn't copy the file because a file that Windows considers the same name " ..
+    return false, "Couldn't copy the file because a file with the same name " ..
       "already exists at the destination: " .. dest .. "."
   end
   local inp, ierr = io.open(src, "rb")
@@ -1047,13 +1053,17 @@ function reaper_api.path_exists(path)
 end
 
 function reaper_api.directory_exists(path)
+  if type(path) ~= "string" or path == "" then return false end
   if SEP == "\\" then
     local probe = io.open(path .. "\\nul", "r")
     if not probe then return false end
     probe:close()
     return true
   end
-  return os.rename(path, path) == true
+  -- POSIX requires a trailing slash to name a directory. Without it, a regular
+  -- file also passes the rename-to-itself check and can be accepted as a library.
+  local directory = path:gsub("/+$", "") .. "/"
+  return os.rename(directory, directory) == true
 end
 
 -- A new library may only be created in a directory with no files or child
@@ -1147,14 +1157,24 @@ end
 function reaper_api.pick_files()
   if reaper.APIExists("JS_Dialog_BrowseForOpenFiles") then
     local ok, list = reaper.JS_Dialog_BrowseForOpenFiles("Add Sounds to Library", "", "", "", true)
-    if not ok or not list or list == "" then return nil end
-    -- js returns either a single full path, or a folder followed by zero-separated
-    -- filenames when several are picked. (Lua 5.4 dropped %z — match literal \0.)
+    if ok ~= 1 or not list or list == "" then return nil end
+    -- macOS may return an empty folder followed by absolute paths, including
+    -- selections from different folders. Preserve those paths verbatim.
     local parts = {}
     for s in (list .. "\0"):gmatch("([^\0]*)\0") do parts[#parts + 1] = s end
+    while #parts > 1 and parts[#parts] == "" do parts[#parts] = nil end
     if #parts <= 1 then return parts end
     local dir, files = parts[1], {}
-    for i = 2, #parts do files[#files + 1] = reaper_api.join(dir, parts[i]) end
+    for i = 2, #parts do
+      local name = parts[i]
+      if name ~= "" then
+        if dir == "" or name:match("^[/\\]") or name:match("^%a:[/\\]") then
+          files[#files + 1] = name
+        else
+          files[#files + 1] = dir .. (dir:match("[/\\]$") and "" or SEP) .. name
+        end
+      end
+    end
     return files
   end
   local ok, fn = reaper.GetUserFileNameForRead("", "Add a Sound to Library", "")

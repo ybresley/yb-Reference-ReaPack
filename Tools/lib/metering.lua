@@ -12,6 +12,9 @@ local module_path = debug.getinfo(1, 'S').source:sub(2)
 local module_dir = module_path:match('^(.*)[/\\][^/\\]+$') or '.'
 local root = module_dir:match('^(.*)[/\\][^/\\]+$') or '.'
 local backend
+local ATTACH_RETRY_SECONDS = 1
+local RETRY_ATTACH = {no_master=true,configuration_failed=true,bypassed=true,offline=true}
+local STARTUP_TIMEOUT = 3
 
 local function measuring_enabled(state)
   -- Four-panel visibility belongs to the layout and does not stop a measurement
@@ -21,11 +24,31 @@ end
 
 local function ensure(model)
   if model.attached then return true end
-  if model.error then return false, model.error end
+  local retry = model.error ~= nil and model.error ~= 'initializing'
+  if retry and (not RETRY_ATTACH[model.error] or not backend or not backend.retry_attach) then
+    return false, model.error
+  end
+  local now = reaper.time_precise()
+  if not retry then
+    model.startup_at = model.startup_at or now
+    if now - model.startup_at >= STARTUP_TIMEOUT then
+      model.error = 'startup_failed'
+      return false, model.error
+    end
+  end
+  if retry and model.next_attach_retry and now < model.next_attach_retry then
+    return false, model.error
+  end
   backend = backend or meter_host.new(reaper, { crest_source = root .. '/Effects/yb-Reference_Meter.jsfx' })
-  local ok, reason = backend:attach()
+  -- A transient connection failure may recheck the saved helper, but retries
+  -- never install, remove, enable or replace an effect in Monitor FX.
+  local ok, reason
+  if retry then ok, reason = backend:retry_attach()
+  else ok, reason = backend:attach() end
   model.attached, model.error = ok, ok and nil or reason
+  model.next_attach_retry = not ok and now + ATTACH_RETRY_SECONDS or nil
   if ok then
+    model.startup_at = nil
     -- Each controller session starts a fresh measurement, including a reused helper.
     session.reset(model)
     model.capture_mode, model.capture_epoch, model.measured_source = nil, nil, nil
@@ -180,11 +203,13 @@ end
 function metering.reconnect(state)
   local model = state.metering
   if not model then return false end
+  model.startup_at = nil
   if backend then
     -- A healthy reconnect reuses the sleeping helper. Replacement is reserved
     -- for an explicit recovery of a missing, incompatible or failed connection.
     local ok, reason
-    if model.error and model.error ~= 'existing_instance' then
+    if model.error and model.error ~= 'existing_instance' and model.error ~= 'initializing'
+      and model.error ~= 'startup_failed' then
       ok, reason = backend:repair()
     else
       ok, reason = backend:close()
@@ -218,6 +243,8 @@ function metering.tick(state)
   local dt = model.last_time and math.max(0, now - model.last_time) or 0
   model.last_time = now
   if not measuring_enabled(state) then
+    model.startup_at = nil
+    if model.error == 'initializing' then model.error = nil end
     if backend and model.attached then
       local ok, reason = backend:close()
       if not ok then model.error = reason end
@@ -240,6 +267,10 @@ function metering.tick(state)
     local final = backend:poll()
     if final.pending_publication then return end
     if final.ready then
+      if model.capture_epoch and final.capture_epoch ~= model.capture_epoch then
+        session.reset(model)
+      end
+      model.capture_epoch = final.capture_epoch
       final.playing = true
       session.update(model, final, dt)
       warnings.update(model.warnings, model.values, model.prefs, dt)
@@ -261,7 +292,7 @@ function metering.tick(state)
   local snapshot = backend:poll()
   snapshot.playing = playing
   if snapshot.ready then
-    if playing and model.capture_epoch and snapshot.capture_epoch ~= model.capture_epoch then
+    if model.capture_epoch and snapshot.capture_epoch ~= model.capture_epoch then
       session.reset(model)
     end
     model.capture_epoch = snapshot.capture_epoch
@@ -273,6 +304,13 @@ function metering.tick(state)
   end
   if snapshot.ready then model.error = nil
   elseif not snapshot.pending_publication then model.error = snapshot.status end
+  if snapshot.ready and not playing and snapshot.history and #snapshot.history > 0 then
+    -- A whole run can start and stop between interface ticks. Drain its audio
+    -- windows before the stopped display releases live readings.
+    snapshot.playing = true
+    session.update(model, snapshot, 0)
+    snapshot.playing = false
+  end
   session.update(model, snapshot, dt)
   warnings.update(model.warnings, model.values, model.prefs, dt)
   local floor = scale.loudness(model.prefs)

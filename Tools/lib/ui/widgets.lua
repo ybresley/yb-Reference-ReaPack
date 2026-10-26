@@ -382,9 +382,35 @@ end
 local HAS_GROUP_CHILD = reaper.ImGui_ChildFlags_AutoResizeY ~= nil
   and reaper.ImGui_Col_Border ~= nil
 
+-- Untitled panels use the title bar's quiet cross and inset red hover chip.
+function widgets.close_button(ctx, id)
+  local size = reaper.ImGui_GetFrameHeight(ctx)
+  local clicked = reaper.ImGui_InvisibleButton(ctx, '##' .. id, size, size)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local held = reaper.ImGui_IsItemActive(ctx)
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  x0, y0 = math.floor(x0 + M.CLOSE_INSET), math.floor(y0 + M.CLOSE_INSET)
+  x1, y1 = math.floor(x1 - M.CLOSE_INSET), math.floor(y1 - M.CLOSE_INSET)
+  if hovered then
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1,
+      theme.fade(held and T.CLOSE_HELD or T.CLOSE_HOVER, alpha), M.CLOSE_ROUNDING)
+  end
+  local cx, cy = (x0 + x1) * .5, (y0 + y1) * .5
+  local arm = (x1 - x0) * .21
+  local colour = theme.fade(hovered and T.TEXT_PRIMARY or T.TEXT_TERTIARY, alpha)
+  reaper.ImGui_DrawList_AddLine(dl, cx-arm, cy-arm, cx+arm, cy+arm, colour, M.CLOSE_STROKE)
+  reaper.ImGui_DrawList_AddLine(dl, cx-arm, cy+arm, cx+arm, cy-arm, colour, M.CLOSE_STROKE)
+  tips.show(ctx, hovered, 'Close', id)
+  return clicked
+end
+
 -- Settings windows share the heading and box; each caller owns its row layout.
 -- fill_height accepts true for remaining space, or a measured height to avoid auto-sizing.
-function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset)
+-- close_id adds a frame-height close control beside the heading.
+function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset, close_id)
   local pad_x = inset and inset.pad_x or M.WINDOW_PAD
   local pad_y = inset and inset.pad_y or M.WINDOW_PAD
   if not first then
@@ -392,13 +418,20 @@ function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset)
       reaper.ImGui_GetCursorPosY(ctx) + M.ITEM_SPACING_Y)
   end
   local x = reaper.ImGui_GetCursorPosX(ctx)
+  local width = close_id and reaper.ImGui_GetContentRegionAvail(ctx)
   reaper.ImGui_SetCursorPosX(ctx, x + pad_x)
+  if close_id then reaper.ImGui_AlignTextToFramePadding(ctx) end
   local bold = theme.push_bold_font(ctx)
   reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, title:upper())
   if bold then reaper.ImGui_PopFont(ctx) end
+  local closed
+  if close_id then
+    reaper.ImGui_SameLine(ctx, x + width - reaper.ImGui_GetFrameHeight(ctx))
+    closed = widgets.close_button(ctx, close_id)
+  end
   reaper.ImGui_SetCursorPosX(ctx, x)
 
-  if not HAS_GROUP_CHILD then return true, false end
+  if not HAS_GROUP_CHILD then return true, false, closed end
   local height = type(fill_height) == 'number' and fill_height
     or (inset and inset.height or 0)
   local child_flags = (fill_height or height > 0) and 0 or reaper.ImGui_ChildFlags_AutoResizeY()
@@ -416,7 +449,7 @@ function widgets.begin_settings_group(ctx, id, title, first, fill_height, inset)
   reaper.ImGui_PopStyleVar(ctx)
   reaper.ImGui_PopStyleColor(ctx, 2)
   -- ReaImGui ends a clipped child itself; only an opened child needs EndChild.
-  return opened, opened
+  return opened, opened, closed
 end
 
 function widgets.end_settings_group(ctx, child)
@@ -454,6 +487,28 @@ function widgets.attached_tab(ctx, label, id, selected, width, height)
     math.floor((x0 + x1 - tw) * 0.5 + 0.5), math.floor((y0 + y1 - th) * 0.5 + 0.5),
     theme.fade(selected and T.ACCENT or T.TEXT_PRIMARY, alpha), label)
   if bold then reaper.ImGui_PopFont(ctx) end
+  return clicked
+end
+
+-- Clickable labels keep the same quiet appearance as nearby readouts.
+function widgets.text_button(ctx, id, label, width, height, size, tip)
+  local x,y=reaper.ImGui_GetCursorScreenPos(ctx)
+  local clicked=reaper.ImGui_InvisibleButton(ctx,id,width,height)
+  local hovered=reaper.ImGui_IsItemHovered(ctx)
+  local font=theme.push_release_font(ctx,size)
+  local tw,th=reaper.ImGui_CalcTextSize(ctx,label)
+  local colour=hovered and T.TEXT_PRIMARY or T.TEXT_SECONDARY
+  local alpha=reaper.ImGui_GetStyleVar(ctx,reaper.ImGui_StyleVar_Alpha())
+  local dl=reaper.ImGui_GetWindowDrawList(ctx)
+  local text_x=x+(width-tw)/2
+  reaper.ImGui_DrawList_AddText(dl,text_x,y,theme.fade(colour,alpha),label)
+  if hovered then
+    local underline_y=y+th+theme.scale
+    reaper.ImGui_DrawList_AddLine(dl,text_x,underline_y,text_x+tw,underline_y,
+      theme.fade(T.TEXT_TERTIARY,alpha),theme.scale)
+  end
+  if font then reaper.ImGui_PopFont(ctx) end
+  tips.show(ctx,hovered,tip,id)
   return clicked
 end
 

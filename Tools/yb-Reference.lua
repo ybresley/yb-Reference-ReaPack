@@ -1,12 +1,12 @@
 -- @description yb-Reference
--- @version 0.5.1
+-- @version 0.5.2
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
 --   inside Reaper, with instant preview through Monitor FX and Reference mode
 --   for comparing sounds with your project.
 --
---   **Windows only.** Requires the free [SWS](https://www.sws-extension.org/)
+--   Windows, with macOS support in testing. Requires the free [SWS](https://www.sws-extension.org/)
 --   and [ReaImGui](https://github.com/cfillion/reaimgui) extensions.
 --
 --   Support: [yoni.ybtools@gmail.com](mailto:yoni.ybtools@gmail.com)
@@ -45,20 +45,38 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update addresses freezes related to live metering.
+--   This update adds macOS support and improves live metering and small-window
+--   layouts.
 --    
 --   Changes
---     • Loudness: Removed the separate True Peak meter from Monitor FX.
---         TP Max now measures the same left/right pair as the other meters.
---     • Loudness: The meter stays in Monitor FX and sleeps when yb-Reference
---       closes.
---         Reopening reuses it instead of loading another copy.
+--     • macOS: yb-Reference can now run on macOS.
+--     • Loudness: When space is tight, meter bars switch to numeric M/S/I
+--       readings and the highest true peak since reset.
+--     • Loudness: Extra Readings adds RMS and Target Diff alongside Crest
+--       Factor. Click Target Diff to switch between Integrated, Momentary and
+--       Short-Term loudness.
+--     • Loudness: L/R peak bars are brighter.
+--     • Setup: The tutorial now starts in Reference View and introduces its
+--       display panels and the feedback form.
+--     • Settings: Spectrum/Filter Settings, Stereo Settings and Loudness
+--       Settings now have a Close button.
 --    
 --   Fixes
---     • Loudness: Fixed freezes when starting or stopping playback with live
---       metering enabled.
---     • Window: Fixed repeated pauses when reopening or closing yb-Reference
---       with live metering enabled.
+--     • Loudness: Reconnect no longer adds duplicate meters to Monitor FX
+--       after a connection failure.
+--     • Window: Loudness and Stereo keep measuring through brief interface
+--       pauses.
+--     • Window: Switching between Lissajous and Polar Sample no longer resizes
+--       the other panels.
+--     • Spectrum Analyser: Stopping playback no longer adds false
+--       high-frequency energy to the display.
+--     • Spectrum Analyser: Starting a reference again now clears its previous
+--       Average trace.
+--     • Updates: ReaPack update reports now separate the release notes for
+--       each version.
+--    
+--   ------------------------------------------------
+--    
 --
 -- RELEASE NOTES ARE GENERATED — never hand-write them here. CHANGELOG.md is the
 -- single source of truth (2026-08-08); `lua scripts/gen_header.lua` writes the
@@ -122,6 +140,11 @@ else
     copy_label = "MAIN"
   end
 end
+local mac_test = io.open(root .. SEP .. "MAC-TEST.txt", "r")
+if mac_test then
+  mac_test:close()
+  copy_label = "MAC TEST"
+end
 local COPY_TITLE = copy_label
   and ("yb-Reference  [" .. copy_label .. "]")
   or "yb-Reference"
@@ -158,16 +181,14 @@ end
 
 --------------------------------------------------------------- dependencies
 
--- The tool relies on Windows-only shell, focus and update paths. Stop before
--- loading anything further rather than letting another system enter a session
--- where some features appear to work and others fail later. Crash recovery stays
--- above this gate so an unsupported system can still repair a project left muted.
-if not reaper_api.is_windows() then
+-- Platform adapters cover Windows and macOS. Recovery stays above this gate so
+-- an unsupported system can still repair a project left muted.
+if not (reaper_api.is_windows() or reaper_api.is_macos()) then
   reaper_api.message(
-    "yb-Reference supports Windows only.\n\n" ..
+    "This build of yb-Reference runs on Windows and macOS.\n\n" ..
     "The tool has stopped because this operating system is not supported.\n\n" ..
     "Support: yoni.ybtools@gmail.com",
-    "yb-Reference \u{00B7} Windows required")
+    "yb-Reference \u{00B7} Operating system not supported")
   return
 end
 
@@ -885,7 +906,7 @@ end
 -- case, so a later ReaImGui update still gets its first open.
 if not reaper_api.walkthrough_seen() and walkthrough_ui.can_draw() then
   walkthrough.begin_welcome(state.walkthrough)
-  state.browser_open = true
+  state.browser_open = false
   reaper_api.set_walkthrough_seen()
 end
 
@@ -980,10 +1001,10 @@ end
 
 local playback = playback_coordinator.new(state, {
   find = find_sound, path = sound_path,
-  before_start = function(slot, sound_id)
+  before_start = function(slot, sound_id, resuming)
     -- Analysis failure remains visible in its panel without silencing preview.
     metering.prepare_preview(state, slot, sound_id)
-    return spectrum.prepare_preview(state, slot, sound_id)
+    return spectrum.prepare_preview(state, slot, sound_id, resuming)
   end,
   before_seek = function(kind)
     local ok, err = metering.transport_event(state, kind)
@@ -1763,6 +1784,8 @@ local function handle_action(a)
     if state.browser_open then close_browser() else state.browser_open = true end
   elseif a.type == "open_browser" then
     state.browser_open = true
+  elseif a.type == "open_feedback" then
+    settings.open(state, { section = "feedback" })
   elseif a.type == "close_browser" then
     close_browser()
   elseif a.type == "dock_changed" then
@@ -2244,8 +2267,9 @@ local function handle_action(a)
     elseif a.ev == "next" then
       walkthrough.next(state.walkthrough)
     elseif a.ev == "show" then
-      walkthrough.begin_stops(state.walkthrough)
-      state.browser_open = true
+      walkthrough.begin_welcome(state.walkthrough)
+      close_browser()
+      settings.close()
     else
       -- Anything else is a REAL-ACTION report the card noticed itself (today:
       -- the match window standing open) — it goes to the state machine as the
@@ -2411,11 +2435,11 @@ end)
 state.hotkeys = hotkeys.start(root)
 local hotkeys_refresh_at = 0
 
--- The browser's open/closed EDGE feeds the walkthrough (stop 1 advances on the
--- real open; a browser stop freezes while it's closed). Watched here, on the
--- state itself, because more than one action can change it (toggle, Esc, the
--- ✕, "Show in library") — one comparison catches every door.
+-- The browser's open/closed edge keeps the Library card's reopen hint current.
+-- Watching the state catches every route, including the toggle, Esc, the close
+-- button and Show in Library.
 local walk_browser_was = false
+local walk_feedback_was = false
 -- ...and the walkthrough's own POSITION edge keeps the correct host visible:
 -- main-window stops close the Library so it cannot cover their target, while
 -- going Back to a browser stop reopens it. nil while inactive so a replay can't
@@ -2572,13 +2596,17 @@ local function loop()
     end
   end
 
-  -- The walkthrough's browser edge (see walk_browser_was above). Before the
-  -- frame draws, so the stop that advances on "the Library opened" rings its
-  -- new target the same frame the window appears.
+  -- Update the walkthrough's Library state before drawing its card.
   if state.browser_open ~= walk_browser_was then
     walk_browser_was = state.browser_open
     walkthrough.event(state.walkthrough,
       state.browser_open and "browser_opened" or "browser_closed")
+  end
+  local walk_feedback_open = settings.feedback_visible()
+  if walk_feedback_open ~= walk_feedback_was then
+    walk_feedback_was = walk_feedback_open
+    walkthrough.event(state.walkthrough,
+      walk_feedback_open and "feedback_opened" or "feedback_closed")
   end
 
   -- ReaImGui reports a false mouse release when an OS file drag crosses between
@@ -2623,17 +2651,21 @@ local function loop()
   end
 
   -- Keep the current stop's host visible after a real transition (see
-  -- walk_pos_was above). After handle_action, so Next, Back, or a real deed has
-  -- already moved the position this same frame. Starting the tour never changes
-  -- a window the user already had open.
+  -- walk_pos_was above). After handle_action, so Next and Back have already
+  -- moved the position this same frame.
   if state.walkthrough.active then
     if walk_pos_was ~= state.walkthrough.pos then
       local cur = walkthrough.current(state.walkthrough)
       if type(cur) == "table" then
-        if cur.window == "main" and state.browser_open then
+        if cur.window ~= "browser" and state.browser_open then
           close_browser()
         elseif cur.window == "browser" and not state.browser_open then
           state.browser_open = true
+        end
+        if cur.window == "settings" then
+          settings.open(state, { section = "feedback" })
+        elseif walk_pos_was and walkthrough.STOPS[walk_pos_was].window == "settings" then
+          settings.close()
         end
       end
       walk_pos_was = state.walkthrough.pos

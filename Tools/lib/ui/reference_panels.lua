@@ -19,12 +19,11 @@ local function contains(r, x, y)
   return x >= r.x0 and x <= r.x1 and y >= r.y0 and y <= r.y1
 end
 
-function panels.measure(width, height, prefs, stereo_view, show_correlation)
+function panels.measure(width, height, prefs, _stereo_view, show_correlation)
   metrics.gap = M.SPECTRUM_SPLIT_GAP
   metrics.min_width, metrics.min_height = M.SPECTRUM_PANE_MIN_W, M.REFERENCE_PANE_MIN_H
   metrics.hide_height = M.WAVE_HIDE_H
   metrics.footer_height = M.RULER_H
-  metrics.stereo_aspect = stereo_view == 'polar_sample' and 2 or 1
   metrics.stereo_side_width = show_correlation and M.STEREO_CORRELATION_W or 0
   local geometry = core.measure(width, height, prefs, last_mode, metrics,
     drag and drag.intended)

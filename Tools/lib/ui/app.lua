@@ -251,6 +251,10 @@ end
 -- our windows lit up this frame, which the entry script needs before it asserts
 -- REAPER's own drag cursor (see ui/dropzone.take_hand_shown).
 function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
+  -- Physical mouse reads use native coordinates; every UI drop target uses ImGui.
+  if file_mouse_x ~= nil and file_mouse_y ~= nil then
+    file_mouse_x, file_mouse_y = reaper.ImGui_PointConvertNative(ctx, file_mouse_x, file_mouse_y)
+  end
   widgets.take_grab_cursor()
   -- Curves share a scratch buffer, like fonts; their measured values stay separate.
   res.spectrum_draw = state.spectrum and state.spectrum.draw
@@ -340,6 +344,15 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- fold away to, so the arrow was one more thing to hit by accident. It also
   -- stops a double-click on the title bar collapsing the window.
   local main_flags = HAS_NO_COLLAPSE and reaper.ImGui_WindowFlags_NoCollapse() or 0
+  -- The Reference View fits the viewport; a native scrollbar must not change
+  -- its measured width or carry an old scroll offset into a smaller layout.
+  if reaper.ImGui_WindowFlags_NoScrollbar then
+    main_flags = main_flags | reaper.ImGui_WindowFlags_NoScrollbar()
+  end
+  if reaper.ImGui_WindowFlags_NoScrollWithMouse then
+    main_flags = main_flags | reaper.ImGui_WindowFlags_NoScrollWithMouse()
+  end
+  if reaper.ImGui_SetNextWindowScroll then reaper.ImGui_SetNextWindowScroll(ctx, 0, 0) end
   -- Centred title. This REVERSES the 2026-08-07 split that gave the Loudness panel
   -- a centred title and left the two big windows' titles reading as a label on
   -- the left — the user's call on 2026-08-08: every panel in the tool wears its

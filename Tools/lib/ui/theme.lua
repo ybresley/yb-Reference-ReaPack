@@ -243,6 +243,7 @@ local BASE = {
   STEREO_PAD_Y = 18,
   STEREO_PAD_BOTTOM = 14,
   STEREO_HIDE_H = 134,
+  STEREO_RESTORE_H = 166,
   STEREO_LABEL_GAP = 8,
   STEREO_CORRELATION_W = 34,
   SPECTRUM_SWITCH_SIZE = 20,
@@ -251,8 +252,6 @@ local BASE = {
   SETTINGS_TAB_FS = 14,
   SPECTRUM_OPTION_W = 132,
   METER_READINGS_W = 112,
-  METER_READINGS_ROW_H = 40,
-  METER_READINGS_MIN_ROW_H = 36,
   FILTER_ENTRY_W = 160,
   FILTER_RESTORE_W = 22,
   -- The framed-control geometry, in one place because every square button, the
@@ -468,11 +467,15 @@ local BASE = {
   PITCH_UNIT_W = 32,
   PITCH_VALUE_W = 78,
   PANEL_ANCHOR_GAP = 2,
+  CLOSE_INSET = 2,
+  CLOSE_ROUNDING = 4,
+  CLOSE_STROKE = 1,
   -- Small confirmations fit their text; cap long names so they wrap.
   POPUP_MAX_W = 280,
   -- A consistent card width gives the broader lessons room to breathe.
   WALK_CARD_W   = 340,
   WALK_CARD_PAD = 12, -- its inner padding (spacing scale)
+  WALK_BUTTON_W = 112, -- fits Start Tutorial without shifting the footer between cards
   WALK_RING_PAD = 4,  -- accent ring's inflation around the target (spacing scale)
   WALK_RING_RADIUS = 5,
   -- What's New and release history share a fixed reading width.

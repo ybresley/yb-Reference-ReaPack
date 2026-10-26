@@ -55,7 +55,6 @@ local function representative(variant, state, mode)
   local geometry = core.measure(width, height, prefs, {
     scale=theme.scale, gap=M.SPECTRUM_SPLIT_GAP,
     min_width=M.SPECTRUM_PANE_MIN_W, min_height=M.REFERENCE_PANE_MIN_H,
-    stereo_aspect=state.stereo_view == 'polar_sample' and 2 or 1,
     stereo_side_width=state.stereo_preferences and state.stereo_preferences.show_correlation
       and M.STEREO_CORRELATION_W or 0,
   })

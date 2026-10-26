@@ -23,14 +23,22 @@ function prototype.measure(ctx, state, width, height)
     and (meter_prefs.show_loudness ~= false or meter_prefs.show_lr ~= false)
   local toolbar = model.editing and frame + M.ITEM_SPACING_Y or 0
   local header = model.editing and frame + M.ITEM_SPACING_Y or 0
+  local previous=state.layout_prototype_geometry
+  local arrangement=prefs.mode..'/'..table.concat(prefs.order,',')..'/'..table.concat(prefs.enabled,',')
+  local same_arrangement=previous and previous.prototype_variant==model.active
+    and previous.arrangement==arrangement and not model.editing and not previous.editing
+  -- Each plot fits inside its frame; changing views must not move dividers.
   local geometry = core.measure(width, math.max(0, height-toolbar), prefs, {
     scale=theme.scale, gap=M.SPECTRUM_SPLIT_GAP,
     min_width=M.SPECTRUM_PANE_MIN_W, min_height=M.REFERENCE_PANE_MIN_H,
     header_height=header,
     stereo_hide_height=M.STEREO_HIDE_H,
+    -- Dock resizing can briefly report a taller viewport while shrinking.
+    -- Require extra room to restore a scope that has already yielded its space.
+    stereo_restore_height=M.STEREO_RESTORE_H,
+    stereo_hidden=same_arrangement and previous.hidden and previous.hidden.stereo or false,
     loudness_min_height=meter_history and 228*theme.scale or 200*theme.scale,
     previous_mode=previous_modes[model.active],
-    stereo_aspect=state.stereo_view=='polar_sample' and 2 or 1,
     stereo_side_width=state.stereo_preferences and state.stereo_preferences.show_correlation
       and M.STEREO_CORRELATION_W or 0,
   })
@@ -38,6 +46,7 @@ function prototype.measure(ctx, state, width, height)
   geometry.toolbar_h, geometry.frame_h = toolbar, frame
   geometry.visual_h, geometry.count = height, #geometry.panels
   geometry.width, geometry.prototype_variant = width, model.active
+  geometry.arrangement=arrangement
   geometry.intended = prefs.mode
   geometry.editing = model.editing
   for _, pane in ipairs(geometry.panels) do

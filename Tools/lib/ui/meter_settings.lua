@@ -16,7 +16,7 @@ local SAVED_DISPLAY_HINT = 'One saved display setup. Restoring it keeps your pla
 local RESET_HINT = 'Reset All Settings to Defaults to enable changes.'
 -- Row counts match the controls in each group. Wrapped paragraphs are measured separately.
 local PAGE_GROUPS = {
-  {{'display_visible',4}},
+  {{'display_visible',5}},
   {{'loudness_bars',6},{'loudness_target',4}},
   {{'lr_levels',8}},
   {{'history_plot',6}},
@@ -69,6 +69,8 @@ local OPTIONS = {
   ms_hold = {{'Off',0}, {'0.5 s',.5}, {'1.5 s',1.5}, {'3 s',3}, {'Until Restart',-1}},
   lr_contents = {{'RMS + Peak','RMS + Peak'}, {'Peak Only','Peak Only'}, {'RMS Only','RMS Only'}},
   peak_measurement = {{'True Peak','True Peak'}, {'Sample Peak','Sample Peak'}},
+  target_difference_measurement = {
+    {'Integrated','Integrated'}, {'Momentary','Momentary'}, {'Short-Term','Short-Term'}},
   lr_floor = {{'-48 dB',-48}, {'-60 dB',-60}, {'-90 dB',-90}},
   lr_hold = {{'Off',0}, {'0.5 s',.5}, {'1.5 s',1.5}, {'3 s',3}},
   peak_fall = {{'Fast','Fast'}, {'Normal','Normal'}, {'Slow','Slow'}},
@@ -87,7 +89,8 @@ local HINTS = {
   history_position='Arranges the meters and history side by side or stacked. Automatic chooses based on the available space.',
   show_target='Shows the dotted target line on the meters and history.',
   tolerance='Shows a band around the target. This is a visual guide, not a compliance check.',
-  extra_readings='Shows M Max, S Max, TP Max and Crest Factor when space allows.',
+  extra_readings='Shows maxima above the meters, plus Crest Factor, RMS and Target Diff when space allows.',
+  target_difference_measurement='Shows the chosen loudness measurement minus the target in LU. Positive values are above the target; negative values are below it. This does not change the audio.',
   ms_hold='Keeps momentary and short-term peak marks visible for the selected time, or until playback restarts.',
   clip_hold='Until Cleared keeps clipping marks until you clear warnings.',
   keep_integrated='Keeps the integrated reading visible after playback stops. Stopping and starting playback begins a new measurement. Jumping to another position during playback keeps the current measurement.',
@@ -124,7 +127,7 @@ local function record_target(key)
     left=x0,top=y0,right=x1,bottom=y1}
 end
 
-local function option_row(ctx, prefs, key, label, disabled)
+local function option_row(ctx, prefs, key, label, disabled, disabled_hint)
   local width = M.SPECTRUM_OPTION_W
   row_label(ctx, label, key, width)
   if disabled then R.ImGui_BeginDisabled(ctx) end
@@ -152,7 +155,8 @@ local function option_row(ctx, prefs, key, label, disabled)
   record_target(key)
   if disabled then R.ImGui_EndDisabled(ctx) end
   tips.show(ctx, R.ImGui_IsItemHovered(ctx, R.ImGui_HoveredFlags_AllowWhenDisabled()),
-    disabled and 'Show this meter group to change the setting.' or HINTS[key], 'meter_option_' .. key)
+    disabled and (disabled_hint or 'Show this meter group to change the setting.')
+      or HINTS[key], 'meter_option_' .. key)
   return action
 end
 
@@ -266,6 +270,8 @@ local function display_page(ctx, prefs)
       {{'show_loudness','Loudness'},{'show_lr','L/R'}}, not prefs.show_meters))
     result = accept(result, option_row(ctx,prefs,'history_position','Panel Layout',not prefs.show_history))
     result = accept(result, switch_row(ctx,prefs,'extra_readings','Extra Readings'))
+    result = accept(result, option_row(ctx,prefs,'target_difference_measurement','Target Diff',
+      not prefs.extra_readings, 'Turn on Extra Readings to change this setting.'))
     return result
   end)
 end
@@ -399,7 +405,7 @@ local function draw_content(ctx, model, res, view)
   view = view or ui
   local frame = R.ImGui_GetFrameHeight(ctx)
   local width = R.ImGui_GetContentRegionAvail(ctx)
-  R.ImGui_SetNextItemWidth(ctx,width-frame-M.ITEM_SPACING_X)
+  R.ImGui_SetNextItemWidth(ctx,width-2*(frame+M.ITEM_SPACING_X))
   local section_open = R.ImGui_BeginCombo(ctx,'##meter_section',pages[view.page])
   if section_open then
     section_items(ctx, view)
@@ -431,6 +437,8 @@ local function draw_content(ctx, model, res, view)
   R.ImGui_SameLine(ctx)
   local reset_page = icons.button(ctx,res and res.icon_font,'meter_reset_page','rotate-ccw',
     {size=frame,fallback=icons.draw_reset,tip='Reset '..pages[view.page]..' settings to defaults'})
+  R.ImGui_SameLine(ctx)
+  local closed = widgets.close_button(ctx, 'meter_settings_close')
   R.ImGui_SetCursorPosY(ctx,R.ImGui_GetCursorPosY(ctx)+M.ITEM_SPACING_Y)
   local failed = model.preference_error ~= nil
   if failed and view.page ~= 6 then R.ImGui_BeginDisabled(ctx) end
@@ -447,7 +455,7 @@ local function draw_content(ctx, model, res, view)
       action = {type='meter_reset_settings'}
     end
   end
-  return action
+  return action, closed
 end
 
 function settings.is_open()
@@ -579,10 +587,10 @@ function settings.draw_panel(ctx, model, res)
   local ww, wh = R.ImGui_GetWindowSize(ctx)
   ui.bounds = {left=wx, top=wy, right=wx+ww, bottom=wy+wh}
   local dismiss = anchored_panel.dismissed(ctx, ui)
-  local action = draw_content(ctx, model, res)
+  local action, closed = draw_content(ctx, model, res)
   if ui.closing or dismiss then ui.open, ui.closing = false, nil end
-  if R.ImGui_IsWindowFocused(ctx, R.ImGui_FocusedFlags_RootAndChildWindows())
-      and R.ImGui_IsKeyPressed(ctx, R.ImGui_Key_Escape()) then
+  if closed or (R.ImGui_IsWindowFocused(ctx, R.ImGui_FocusedFlags_RootAndChildWindows())
+      and R.ImGui_IsKeyPressed(ctx, R.ImGui_Key_Escape())) then
     ui.open = false
     focus.request()
   end

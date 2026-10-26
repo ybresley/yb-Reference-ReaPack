@@ -10,8 +10,8 @@ local text,line,rect=drawing.text,drawing.line,drawing.rect
 local number,loudness_number=drawing.number,drawing.loudness_number
 local bars={}
 local LOUDNESS_ENTRIES={
-  {label='M',key='m',detail='Momentary · L/R · 400 ms',maximum='m_max',setting='show_m'},
-  {label='S',key='s',detail='Short-term · L/R · 3 seconds',maximum='s_max',setting='show_s'},
+  {label='M',key='m',detail='Momentary · 400 ms',maximum='m_max',setting='show_m'},
+  {label='S',key='s',detail='Short-term · 3 seconds',maximum='s_max',setting='show_s'},
   {label='I',key='i',detail='Integrated · this playback',setting='show_i'},
 }
 -- Grid marks and bar geometry share this mapping at every size and scale.
@@ -82,9 +82,8 @@ local function lra_bracket(ctx,dl,model,opts,cx,width,top,bottom,compact,present
   text(ctx,dl,x-5*s,cy-15*s,'LRA',gold,(compact and 11 or 12)*s,'right',label_w)
   text(ctx,dl,x-5*s,cy+1*s,number(values.lra),gold,(compact and 12 or 14)*s,'right',label_w)
   return meter_tooltip(ctx,{x=x-label_w-6*s,y=top,w=label_w+14*s,h=bottom-top},
-    'L/R loudness range · this playback\nLower: '..loudness_number(values.lra_low,opts)..' '..scale.unit(opts)
-    ..'\nUpper: '..loudness_number(values.lra_high,opts)..' '..scale.unit(opts)
-    ..'\n10th to 95th percentile after loudness gating. Bracket movement is smoothed; readings are measured values.','lra_bracket',presentation)
+    'Loudness range\nLow: '..loudness_number(values.lra_low,opts)..' '..scale.unit(opts)
+    ..'\nHigh: '..loudness_number(values.lra_high,opts)..' '..scale.unit(opts),'lra_bracket',presentation)
 end
 
 local function meter_click(ctx, x, top, width, bottom, id, presentation)
@@ -115,23 +114,22 @@ function bars.loudness(ctx,dl,r,model,opts,readout_size,presentation)
   local s=theme.scale
   local side=r.axis_side or 'left'
   local plot_left,plot_right=drawing.meter_bounds(r,side)
-  local left=plot_left+(side=='left' and 3 or 0)*s
-  local divider=r.x+r.w
+  local left=plot_left+(side=='left' and not r.compact and 3 or 0)*s
   local col,reserve,compact=loudness_columns(r.w,s)
   local visible=0
   for _,entry in ipairs(LOUDNESS_ENTRIES) do
     if opts[entry.setting]~=false then visible=visible+1 end
   end
-  local separate_lra=opts.show_lra~=false and opts.show_i==false
+  local separate_lra=not r.compact and opts.show_lra~=false and opts.show_i==false
   if separate_lra then visible=visible+1 end
-  local legacy_spacing=visible==3 and not separate_lra
+  local legacy_spacing=not r.compact and visible==3 and not separate_lra
   if not legacy_spacing and visible>0 then
-    col=(r.w-43*s)/visible
+    col=(r.compact and plot_right-plot_left or r.w-43*s)/visible
     reserve=0
   end
   readout_size=readout_size or bars.readout_size()
   local width=math.min(32*s,col*.45)
-  local pair_cell=math.max(col*.84,style.readout_spacing*s)
+  local pair_cell=r.compact and col or math.max(col*.84,style.readout_spacing*s)
   -- Keep the M/S readout spacing without pushing M against the plot edge.
   local pair_centre=left+math.max(col,pair_cell/2+width/2+5*s)
   local integrated_width=width*1.2
@@ -144,7 +142,7 @@ function bars.loudness(ctx,dl,r,model,opts,readout_size,presentation)
   local vals=model.values or {}
   local moving=model.display or vals
   drawing.loudness_axis(ctx,dl,plot_left,plot_right,top,bottom,opts,side)
-  local bracket_hover=opts.show_lra~=false
+  local bracket_hover=not r.compact and opts.show_lra~=false
     and lra_bracket(ctx,dl,model,opts,integrated_x,integrated_width,top,bottom,compact,presentation)
   local slot=0
   for i,e in ipairs(LOUDNESS_ENTRIES) do
@@ -160,6 +158,14 @@ function bars.loudness(ctx,dl,r,model,opts,readout_size,presentation)
     end
     local over=raw and raw>=opts.target
     drawing.meter_readout(ctx,dl,r,cx,e.label,loudness_number(raw,opts),loudness_colour(model,opts,e.key,raw),readout_size)
+    if opts.extra_readings and not r.compact and e.maximum then
+      local maximum=model[e.maximum]
+      text(ctx,dl,cx,r.y,loudness_number(maximum,opts),maximum and T.ACCENT or T.TEXT_TERTIARY,
+        12*s,'number',nil,style.plot_top*s)
+      meter_tooltip(ctx,{x=cx-cell/2,y=r.y,w=cell,h=style.plot_top*s},
+        (e.key=='m' and 'Momentary' or 'Short-term')..' maximum since reset ('..scale.unit(opts)..').',
+        'meter_maximum_'..e.key,presentation)
+    end
     action=meter_click(ctx,cx-cell/2,top,cell,r.y+r.h,'lufs_'..e.key,presentation) or action
     rect(dl,cx-bar_width/2,top,bar_width,bottom-top,T.FILL_QUATERNARY,2*s)
     if value and value>low then
@@ -183,19 +189,23 @@ function bars.loudness(ctx,dl,r,model,opts,readout_size,presentation)
       local hy=map(held,bottom,top,low,high)
       line(dl,cx-bar_width/2-2*s,hy,cx+bar_width/2+2*s,hy,T.TEXT_PRIMARY,2*s)
     end
-    if not bracket_hover then meter_tooltip(ctx,{x=cx-cell/2,y=r.y,w=cell,h=r.h},e.detail
+    if not bracket_hover then meter_tooltip(ctx,{x=cx-cell/2,y=top,w=cell,h=r.y+r.h-top},e.detail
       ..'\nTarget '..number(opts.target)..' LUFS'
-      ..(e.maximum and model[e.maximum] and '\nMaximum '..loudness_number(model[e.maximum],opts)..' '..scale.unit(opts) or '')
-      ..(e.key~='i' and opts.ms_hold~=0 and (opts.ms_hold==-1
-        and '\nWhite mark: peak held until playback restarts.'
-        or string.format('\nWhite mark: peak held for %g seconds, then disappearing.',opts.ms_hold or 1.5)) or '')
-      ..'\nClick a bar to clear retained warnings. Fill colour shows the current level.','meter_'..e.label,presentation) end
+      ..'\nClick to clear warnings.','meter_'..e.label,presentation) end
   end
   end
-  local heading=scale.unit(opts)
-  local heading_right=math.min(plot_right,divider-(r.controls and 35 or 8)*s)
-  text(ctx,dl,(left+heading_right)/2,r.y,heading,T.TEXT_TERTIARY,11*s,'center',heading_right-left,style.plot_top*s)
   return action
+end
+
+local function true_peak_maximum(ctx,dl,r,model,left,right,presentation)
+  if not model.prefs.extra_readings or r.compact then return end
+  local s=theme.scale
+  local value=model.tp_max
+  local colour=value and (warnings.active(model.warnings,'tp') and T.DANGER_RED or T.ACCENT) or T.TEXT_TERTIARY
+  text(ctx,dl,(left+right)/2,r.y,lr_number(value),colour,12*s,'number',nil,style.plot_top*s)
+  meter_tooltip(ctx,{x=left,y=r.y,w=right-left,h=style.plot_top*s},
+    'True-peak maximum since reset (dBTP).',
+    'meter_maximum_tp',presentation)
 end
 
 local function stereo_bounds(r)
@@ -236,7 +246,7 @@ function bars.stereo(ctx,dl,r,model,opts,readout_size,presentation)
     rect(dl,cx-bar_w/2,top,bar_w,bottom-top,T.FILL_QUATERNARY,2*s)
     if peak and content~='RMS Only' then
       local py=meter_y(peak,bottom,top,floor,0)
-      local colour=content=='Peak Only' and T.ACCENT or theme.fade(T.ACCENT,.26)
+      local colour=content=='Peak Only' and T.ACCENT or theme.fade(T.ACCENT,.46)
       lr_layer(dl,opts,cx-bar_w/2,bar_w,top,bottom,py,colour)
     end
     if rms and content~='Peak Only' then
@@ -254,17 +264,14 @@ function bars.stereo(ctx,dl,r,model,opts,readout_size,presentation)
       end
     end
     R.ImGui_DrawList_PopClipRect(dl)
-    local hold_note=opts.lr_hold~=0 and string.format(
-      '\nWhite mark: peak held for %g seconds, then falling.',opts.lr_hold or 1.5) or ''
-    local clip_note=opts.show_clipping~=false and '\nRed mark: clipped peak.' or ''
-    meter_tooltip(ctx,{x=cx-channel_w/2,y=r.y,w=channel_w,h=r.h},
+    meter_tooltip(ctx,{x=cx-channel_w/2,y=top,w=channel_w,h=r.y+r.h-top},
       (ch=='l' and 'Left' or 'Right')..' channel · '..peak_unit
-      ..'\nAverage (RMS): '..number(vals['rms_'..ch])..' dBFS'
+      ..'\nRMS: '..number(vals['rms_'..ch])..' dBFS'
       ..'\n'..peak_name..' (400 ms): '..number(vals['peak_'..ch])
       ..' '..(peak_name=='True Peak' and 'dBTP' or 'dBFS')
-      ..hold_note..clip_note..'\nClick a bar to clear retained peak and loudness warnings.', 'stereo_'..ch,presentation)
+      ..'\nClick to clear warnings.', 'stereo_'..ch,presentation)
   end
-  text(ctx,dl,(channel_left+channel_right)/2,r.y,peak_unit,T.TEXT_TERTIARY,11*s,'center',nil,style.plot_top*s)
+  true_peak_maximum(ctx,dl,r,model,channel_left,channel_right,presentation)
   return action
 end
 
@@ -314,7 +321,7 @@ function bars.k_system(ctx,dl,r,model,opts,readout_size,presentation)
       if peak_value then
         local py=meter_y(peak_value+offset,bottom,top,low,offset)
         lr_layer(dl,opts,cx-width/2,width,top,bottom,py,
-          content=='Peak Only' and T.ACCENT or theme.fade(T.ACCENT,.26))
+          content=='Peak Only' and T.ACCENT or theme.fade(T.ACCENT,.46))
       end
     end
     if content~='Peak Only' then
@@ -333,18 +340,16 @@ function bars.k_system(ctx,dl,r,model,opts,readout_size,presentation)
       end
     end
     R.ImGui_DrawList_PopClipRect(dl)
-    local hold_note=opts.lr_hold~=0 and string.format(
-      ' White mark: peak held for %g seconds, then falling.',opts.lr_hold or 1.5) or ''
-    local clip_note=opts.show_clipping~=false and ' Red mark: clipped peak.' or ''
-    meter_tooltip(ctx,{x=cx-col/2,y=r.y,w=col,h=r.h},
-      '400 ms RMS is sine calibrated. '..peak_name..' uses '..peak_unit..'.'
-      ..hold_note..clip_note
-      ..'\n0 on '..opts.mode..' equals −'..offset..' dBFS for RMS and −'..offset..' '
-      ..peak_unit..' for peaks. Monitor calibration is separate.'
-      ..'\nClick a bar to clear retained warnings.','k_'..ch,presentation)
+    meter_tooltip(ctx,{x=cx-col/2,y=top,w=col,h=r.y+r.h-top},
+      'RMS · 400 ms · sine calibrated'
+      ..'\n0 on '..opts.mode..' = −'..offset..' dBFS (RMS), −'..offset..' '..peak_unit..' ('..peak_name..').'
+      ..'\nClick to clear warnings.','k_'..ch,presentation)
   end
-  text(ctx,dl,(left+right)/2,r.y,opts.mode,
-    T.TEXT_TERTIARY,11*s,'center',nil,style.plot_top*s)
+  if opts.extra_readings then
+    true_peak_maximum(ctx,dl,r,model,left,right,presentation)
+  else
+    text(ctx,dl,(left+right)/2,r.y,opts.mode,T.TEXT_TERTIARY,11*s,'center',nil,style.plot_top*s)
+  end
   return action
 end
 

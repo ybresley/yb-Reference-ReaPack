@@ -353,7 +353,9 @@ function waveform.draw(ctx, state, height, opts)
   -- 2026-08-06 brief round: the interim chrome band made the ruler the darkest
   -- zone in the window). The fill-stop edge IS the 0 dBFS line — bars clamp
   -- exactly there. With no ruler, total_h == h and this is the whole panel.
-  reaper.ImGui_DrawList_AddRectFilled(dl, x, y, x + avail_w, y + h, T.WAVE_BG, 4)
+  if not opts.background_painted then
+    reaper.ImGui_DrawList_AddRectFilled(dl, x, y, x + avail_w, y + h, T.WAVE_BG, 4)
+  end
 
   -- Where the playhead sits (0..1 of the file), only while the sound being shown
   -- is the one this preview slot actually owns (auto-audition off, or the OTHER

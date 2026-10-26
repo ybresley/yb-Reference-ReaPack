@@ -80,7 +80,9 @@ function history.draw(ctx,dl,r,model,opts,guide)
   local ruler_height=footer_height>0 and (r.inset_time and style.caption_height*s or footer_height) or 0
   local bottom=r.inset_time and ruler_height>0 and drawing.meter_bottom(r) or background_bottom
   local low,high,map=scale.loudness(opts)
-  drawing.surface(dl,{x=l,y=r.y,w=right-l,h=background_bottom-r.y})
+  if not r.surface_painted then
+    drawing.surface(dl,{x=l,y=r.y,w=right-l,h=background_bottom-r.y})
+  end
   local show_m=opts.history_m~=false
   local show_s=opts.history_s~=false
   local show_i=opts.history_integrated==true and (model.playing~=false or opts.keep_integrated~=false or model.hold)

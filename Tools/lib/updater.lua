@@ -47,6 +47,7 @@
 -- safety invariant (never leave the repo broken without a recovery path).
 
 local update_check = require("core.update_check")
+local mac_process = require("mac_process")
 
 local updater = {}
 
@@ -107,7 +108,7 @@ local function discard_installed_notes(installed)
 end
 
 local function can_watch_report()
-  return reaper.BR_Win32_FindWindowEx ~= nil
+  return not mac_process.is_mac() and reaper.BR_Win32_FindWindowEx ~= nil
     and reaper.BR_Win32_IsWindow ~= nil
 end
 
@@ -242,6 +243,15 @@ end
 -- around them inside VBS strings is safe; the PowerShell arguments are
 -- single-quoted with any single quotes doubled.
 local function write_shim()
+  if mac_process.is_mac() then
+    local f = io.open(P.vbs, "wb")
+    if not f then return false end
+    local wrote = f:write("#!/bin/sh\nexec /usr/bin/curl -f -s -L --max-time 15 -o "
+      .. mac_process.quote(P.tmp) .. " -- " .. mac_process.quote(P.url) .. "\n")
+    local closed = f:close()
+    if not wrote or not closed then os.remove(P.vbs) return false end
+    return true
+  end
   local ps_url = (P.url:gsub("'", "''"))
   local ps_out = (P.tmp:gsub("'", "''"))
   local lines = {
@@ -348,7 +358,7 @@ function updater.init(own_path)
 
   local res = reaper.GetResourcePath()
   P.tmp = res .. SEP .. "yb_reference_update_check.xml"
-  P.vbs = res .. SEP .. "yb_reference_update_fetch.vbs"
+  P.vbs = res .. SEP .. "yb_reference_update_fetch" .. (mac_process.is_mac() and ".sh" or ".vbs")
   os.remove(P.tmp) -- stale leftovers from a run that died mid-fetch
   os.remove(P.vbs)
   P.next_check = 0 -- first check on the first frame (design: at tool startup)
@@ -416,7 +426,9 @@ function updater.tick()
     P.next_check = now + CHECK_EVERY
     os.remove(P.tmp) -- a stale complete file must not satisfy the poll instantly
     if write_shim() then
-      local ret = reaper.ExecProcess('wscript.exe //B "' .. P.vbs .. '"', -1)
+      local command = mac_process.is_mac() and mac_process.command(P.vbs)
+        or (not mac_process.is_mac() and ('wscript.exe //B "' .. P.vbs .. '"'))
+      local ret = command and reaper.ExecProcess(command, -1) or nil
       -- -1 = fire and forget; a launch returns the string "259" (STILL_ACTIVE,
       -- U6) and nil means it never started — then there is nothing to wait
       -- for, and the shim it would have read is cleaned up right here (Codex,

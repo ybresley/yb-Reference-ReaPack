@@ -26,6 +26,28 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.5.2 — 2026-10-26
+
+This update adds macOS support and improves live metering and small-window layouts.
+
+### Changes
+
+- **macOS** — yb-Reference can now run on macOS.
+- **Loudness** — When space is tight, meter bars switch to numeric M/S/I readings and the highest true peak since reset.
+- **Loudness** — Extra Readings adds RMS and Target Diff alongside Crest Factor. Click Target Diff to switch between Integrated, Momentary and Short-Term loudness.
+- **Loudness** — L/R peak bars are brighter.
+- **Setup** — The tutorial now starts in Reference View and introduces its display panels and the feedback form.
+- **Settings** — Spectrum/Filter Settings, Stereo Settings and Loudness Settings now have a Close button.
+
+### Fixes
+
+- **Loudness** — Reconnect no longer adds duplicate meters to Monitor FX after a connection failure.
+- **Window** — Loudness and Stereo keep measuring through brief interface pauses.
+- **Window** — Switching between Lissajous and Polar Sample no longer resizes the other panels.
+- **Spectrum Analyser** — Stopping playback no longer adds false high-frequency energy to the display.
+- **Spectrum Analyser** — Starting a reference again now clears its previous Average trace.
+- **Updates** — ReaPack update reports now separate the release notes for each version.
+
 ## 0.5.1 — 2026-10-16
 
 This update addresses freezes related to live metering.
