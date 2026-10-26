@@ -4,6 +4,7 @@
 
 local fb_core = require("core.feedback")
 local store = require("core.library_store")
+local mac_process = require("mac_process")
 
 local feedback = {}
 
@@ -33,7 +34,7 @@ local P = {
 local function send_files(n)
   return P.base .. "_payload" .. n .. ".json",
     P.base .. "_reply" .. n .. ".txt",
-    P.base .. "_send" .. n .. ".vbs"
+    P.base .. "_send" .. n .. (mac_process.is_mac() and ".sh" or ".vbs")
 end
 
 local function select_files(n)
@@ -114,6 +115,12 @@ local function curl_cmd()
 end
 
 local function write_shim()
+  if mac_process.is_mac() then
+    local quote = mac_process.quote
+    return write_file(P.vbs, "#!/bin/sh\nexec /usr/bin/curl -s -L --max-time " .. CURL_SECS
+      .. " -H 'Content-Type: application/json' --data-binary " .. quote("@" .. P.payload)
+      .. " -o " .. quote(P.reply) .. " -- " .. quote(feedback.URL) .. "\n")
+  end
   return write_file(P.vbs, 'On Error Resume Next\r\n'
     .. 'Set sh = CreateObject("WScript.Shell")\r\n'
     .. 'sh.Run "' .. curl_cmd():gsub('"', '""') .. '", 0, True\r\n')
@@ -315,7 +322,9 @@ function feedback.start(payload_json, message)
   end
 
   S.phase = "sending"
-  local launched = reaper.ExecProcess('wscript.exe //B "' .. P.vbs .. '"', -1) ~= nil
+  local command = mac_process.is_mac() and mac_process.command(P.vbs)
+    or (not mac_process.is_mac() and ('wscript.exe //B "' .. P.vbs .. '"'))
+  local launched = command and reaper.ExecProcess(command, -1) ~= nil
   if not launched then
     fail("Delivery couldn’t start.")
     return

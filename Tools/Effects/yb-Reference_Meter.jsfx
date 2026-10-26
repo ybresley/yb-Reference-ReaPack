@@ -45,7 +45,7 @@ slider32:live_true_peak_r=-150<-150,50,0.01>-Live True Peak Right (output)
 slider33:true_peak_age_l=0<0,1,0.000001>-True Peak Age Left (output)
 slider34:true_peak_age_r=0<0,1,0.000001>-True Peak Age Right (output)
 slider35:true_peak_max=-150<-150,50,0.01>-True Peak Max (output)
-slider36:control_protocol=1<1,1,1>-Control protocol (output)
+slider36:control_protocol=2<2,2,1>-Control protocol (output)
 slider37:instance_token=0<0,1000000000,1>-Instance token (output)
 slider38:control_session=0<0,1000000000,1>-Control session (output)
 
@@ -54,6 +54,42 @@ ext_noinit=1;
 ext_nodenorm=1;
 function valid_number(x) (x == x && x >= 0 && x <= 1000000000);
 function valid_counter(x) (valid_number(x) && x >= 0 && x < 1000000000 && x == floor(x));
+HISTORY_BASE=150000;
+HISTORY_DATA=150032;
+HISTORY_CAPACITY=1000;
+// Only the addressed owner publishes here. Unclaimed Monitor FX instances must
+// not erase another instance's history when REAPER initializes them.
+function history_owned() (
+  accepted_session>0 && gmem[140004]==owned_token
+    && gmem[140002]==accepted_session;
+);
+function history_header() (
+  gmem[HISTORY_BASE]=2;
+  gmem[HISTORY_BASE+1]=owned_token;
+  gmem[HISTORY_BASE+2]=accepted_session;
+  gmem[HISTORY_BASE+3]=capture_epoch;
+  gmem[HISTORY_BASE+4]=history_sequence;
+  gmem[HISTORY_BASE+5]=momentary_max;
+  gmem[HISTORY_BASE+6]=short_term_max;
+  gmem[HISTORY_BASE+7]=HISTORY_CAPACITY;
+);
+function history_publish() local(address) (
+  history_owned() ? (
+    lra_revision=(lra_revision+1)%1000000000;
+    momentary_max=max(momentary_max,live_m);
+    short_term_max=max(short_term_max,live_s);
+    history_sequence+=1;
+    address=HISTORY_DATA+((history_sequence-1)%HISTORY_CAPACITY)*5;
+    gmem[address]=-history_sequence;
+    gmem[address+1]=lra_samples/srate;
+    gmem[address+2]=live_m;
+    gmem[address+3]=live_s;
+    gmem[address+4]=integrated;
+    gmem[address]=history_sequence;
+    history_header();
+    lra_revision=(lra_revision+1)%1000000000;
+  );
+);
 // The 48 kHz coefficients are from ITU-R BS.1770-5. An inverse bilinear map
 // followed by the target-rate bilinear map preserves them exactly at 48 kHz.
 function map_coeffs(src_b0 src_b1 src_b2 src_a1 src_a2 ratio)
@@ -327,6 +363,9 @@ function reset_window() (
   control_session=accepted_session;
   last_sr=srate;
   reset_lra();
+  history_sequence=0;
+  momentary_max=short_term_max=-150;
+  history_owned() ? history_header();
   lra_revision=(lra_revision+1)%1000000000;
 );
 // The caller holds the publication guard. Stereo power is averaged before
@@ -335,7 +374,7 @@ function update_crest() (
   crest=crest_samples>0 && crest_energy>0 && lra_valid!=-1
     ? max(0,db_per_log*(log(crest_peak)-0.5*log(crest_energy/crest_samples))) : -1;
 );
-control_protocol=1;
+control_protocol=2;
 owned_token=(atomic_add(gmem[140013],1)-1)%999999999+1;
 instance_token=owned_token;
 accepted_session=0;
@@ -343,7 +382,7 @@ control_session=0;
 seen_heartbeat=gmem[140003];
 foreign_heartbeat=-1;
 meter_active=0;
-lease_expired=1;
+reset_required=1;
 requires_fresh=1;
 reset_window();
 was_playing=0;
@@ -351,7 +390,7 @@ expected_position=play_position;
 last_reset_request=reset_request;
 
 @block
-control_protocol=1;
+control_protocol=2;
 instance_token=owned_token;
 // An inactive or foreign command silences analysis even during a partial write.
 raw_active=gmem[140001];
@@ -359,10 +398,9 @@ raw_target=gmem[140004];
 raw_active != 1 ? (
   meter_active=0;
   requires_fresh=1;
-  time_precise()-lease_at > 0.75 ? lease_expired=1;
 ) : raw_target != owned_token ? (
   meter_active=0;
-  lease_expired=1;
+  reset_required=1;
   requires_fresh=1;
   foreign_heartbeat=gmem[140003];
 ) : (
@@ -380,7 +418,7 @@ raw_active != 1 ? (
     next_loop_end=gmem[140010];
     next_loop_enabled=gmem[140011];
     command_revision == gmem[140005]
-        && next_protocol == 1 && next_active == 1
+        && next_protocol == 2 && next_active == 1
         && next_target == owned_token
         && valid_counter(next_session) && next_session > 0
         && valid_counter(next_heartbeat)
@@ -392,18 +430,18 @@ raw_active != 1 ? (
         && valid_number(next_loop_end) && next_loop_end >= 0
         && next_loop_end <= 1000000000
         && valid_counter(next_loop_enabled) && next_loop_enabled <= 1 ? (
-      now=time_precise();
       fresh_heartbeat=next_heartbeat != seen_heartbeat
         && next_heartbeat != foreign_heartbeat;
       fresh_heartbeat ? (
         seen_heartbeat=next_heartbeat;
         foreign_heartbeat=-1;
-        lease_at=now;
       );
-      fresh_heartbeat || (!requires_fresh && !lease_expired && now-lease_at <= 0.75) ? (
+      // Measurement follows the accepted capture command, not window updates.
+      // Explicit close still sleeps immediately; a fresh owner resets the run.
+      fresh_heartbeat || (!requires_fresh && !reset_required) ? (
         next_session != accepted_session && !fresh_heartbeat ? (
           meter_active=0;
-          lease_expired=1;
+          reset_required=1;
           requires_fresh=1;
         ) : (
           capture_mode=next_mode;
@@ -412,7 +450,7 @@ raw_active != 1 ? (
           loop_start=next_loop_start;
           loop_end=next_loop_end;
           loop_enabled=next_loop_enabled;
-          next_session != accepted_session || lease_expired ? (
+          next_session != accepted_session || reset_required ? (
             accepted_session=next_session;
             reset_window();
             last_reset_request=reset_request;
@@ -420,24 +458,19 @@ raw_active != 1 ? (
             expected_position=play_position;
           );
           meter_active=1;
-          lease_expired=0;
+          reset_required=0;
           requires_fresh=0;
         );
       ) : (
         meter_active=0;
-        lease_expired=1;
+        reset_required=1;
         requires_fresh=1;
       );
     ) : (
       meter_active=0;
-      lease_expired=1;
+      reset_required=1;
       requires_fresh=1;
     );
-  );
-  meter_active && time_precise()-lease_at > 0.75 ? (
-    meter_active=0;
-    lease_expired=1;
-    requires_fresh=1;
   );
 );
 meter_active ? (
@@ -489,8 +522,10 @@ is_playing && rate_ok && lra_valid != -1 ? (
       lra_samples+=1;
       slice_count+=1;
       live_slice_count+=1;
-      live_slice_count >= live_slice_length ? live_loudness_slice();
+      history_due=live_slice_count >= live_slice_length;
+      history_due ? live_loudness_slice();
       slice_count >= slice_length ? lra_slice();
+      history_due ? history_publish();
     );
   );
 );

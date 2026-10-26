@@ -51,13 +51,11 @@ local rects = {}
 local hosts = {}
 local card_position
 
--- The stop the ring and card belong to right now. While frozen the target is
--- the LIBRARY BUTTON — the card parks on the main window asking for a reopen,
--- and ringing the button that does it is the whole hint.
+-- A closed tutorial window points to its reopen control in Reference View.
 local function effective_target(ws)
   local cur = wt.current(ws)
   if not cur then return nil, cur end
-  if wt.is_frozen(ws) then return "library_button", cur end
+  if wt.is_frozen(ws) then return cur.reopen.target, cur end
   return cur.id, cur
 end
 
@@ -279,10 +277,8 @@ function walkthrough.card(ctx, ws)
   local frozen = wt.is_frozen(ws)
   local frame = reaper.ImGui_GetFrameCount(ctx)
 
-  -- A frozen Library step points to the reopen button in the main window. A host that didn't draw this frame (browser
-  -- mid-close) falls back to main; no host at all (main hidden) = no card.
-  local host_key = "main"
-  if not frozen and cur.window == "browser" then host_key = "browser" end
+  -- A closed tutorial window falls back to its reopen control in Reference View.
+  local host_key = frozen and "main" or cur.window
   local host = hosts[host_key]
   if not (host and host.frame == frame) then host = hosts.main end
   if not (host and host.frame == frame) then return nil end
@@ -294,7 +290,7 @@ function walkthrough.card(ctx, ws)
   -- read from one place (a card measured from different words than it draws is
   -- the flicker again, wearing a different hat).
   local title = cur.title
-  local body = frozen and wt.FROZEN_BODY or cur.body
+  local body = frozen and cur.reopen.body or cur.body
   local note = not frozen and cur.note or nil
   local card_h = measure_card(ctx, title, body, note)
 
@@ -315,7 +311,7 @@ function walkthrough.card(ctx, ws)
     vh = math.max(host.y + host.h, py + ph) - vy
   end
 
-  local r = rects[frozen and "library_button" or cur.id]
+  local r = rects[frozen and cur.reopen.target or cur.id]
   if r and r.frame ~= frame then r = nil end
 
   local browser = hosts.browser
@@ -323,6 +319,14 @@ function walkthrough.card(ctx, ws)
     x1 = browser.x, y1 = browser.y,
     x2 = browser.x + browser.w, y2 = browser.y + browser.h,
   } or nil
+  local settings = hosts.settings
+  local settings_rect = settings and settings.frame == frame and {
+    x1 = settings.x, y1 = settings.y,
+    x2 = settings.x + settings.w, y2 = settings.y + settings.h,
+  } or nil
+  local obstacles = {}
+  if library_rect then obstacles[#obstacles + 1] = library_rect end
+  if settings_rect then obstacles[#obstacles + 1] = settings_rect end
   local x, y
   if r then
     -- Beside its target — inside the host if it fits there, otherwise anywhere
@@ -335,10 +339,12 @@ function walkthrough.card(ctx, ws)
     -- Avoiding only the highlighted list lets the Library cover the card.
     if host_key == "browser" and library_rect then
       ring = library_rect
+    elseif host_key == "settings" and settings_rect then
+      ring = settings_rect
     end
     x, y = placement.place(ring, cw, card_h,
       { host, { x = vx, y = vy, w = vw, h = vh } },
-      library_rect and { library_rect } or {}, M.WALK_RING_PAD * 2, margin)
+      obstacles, M.WALK_RING_PAD * 2, margin)
     if not x then
       -- Nowhere clears it (a tiny screen): below the target, on screen. Overlap
       -- is unavoidable here, and a reachable card beats a hidden one.
@@ -354,13 +360,14 @@ function walkthrough.card(ctx, ws)
   end
 
   card_position = placement.stabilize(card_position, ws.pos, x, y, cw, card_h,
-    { x = vx, y = vy, w = vw, h = vh }, library_rect and { library_rect } or {}, margin,
+    { x = vx, y = vy, w = vw, h = vh }, obstacles, margin,
     { id = host_key, x = host.x, y = host.y })
   x, y = card_position.x, card_position.y
 
   -- On a screen too small to avoid overlap, keep the tutorial controls reachable.
   -- Only raise the card in that fallback, so normal Library input retains focus.
-  if library_rect and placement.overlaps(x, y, cw, card_h, library_rect)
+  if ((library_rect and placement.overlaps(x, y, cw, card_h, library_rect))
+      or (settings_rect and placement.overlaps(x, y, cw, card_h, settings_rect)))
       and reaper.ImGui_SetNextWindowFocus then
     reaper.ImGui_SetNextWindowFocus(ctx)
   end
@@ -419,20 +426,18 @@ function walkthrough.card(ctx, ws)
 
   reaper.ImGui_Dummy(ctx, 0, 2)
 
-  -- Footer: Back on the left, then Skip and one button hugging the right edge.
+  -- Footer: Back on the left and the main action at the right edge.
   -- Back remains in place on stop 1 but disables there, so moving between stops
   -- changes state without changing geometry.
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local x0 = reaper.ImGui_GetCursorPosX(ctx)
   local frame_h = reaper.ImGui_GetFrameHeight(ctx)
+  local button_w = M.WALK_BUTTON_W
 
-  -- A closed Library offers Open; otherwise the button advances the tour.
+  -- Reopening a closed tutorial window keeps the current lesson.
   local btn_label, act
-  if frozen then btn_label, act = wt.FROZEN_BUTTON, wt.FROZEN_ACT
+  if frozen then btn_label, act = cur.reopen.button, cur.reopen.act
   else btn_label, act = cur.button, cur.act end
-
-  local skip_label = "Skip"
-  local skip_w = select(1, reaper.ImGui_CalcTextSize(ctx, skip_label))
 
   do
     if text_button(ctx, "Back", frame_h, ws.pos <= 1) then
@@ -440,15 +445,19 @@ function walkthrough.card(ctx, ws)
     end
   end
 
-  -- Skip sits just left of the button; both hug the card's right edge.
-  local skip_x = x0 + avail - M.POPUP_BTN_W - M.ITEM_SPACING_X * 2 - skip_w
-  reaper.ImGui_SameLine(ctx, skip_x)
-  if text_button(ctx, skip_label, frame_h) then
-    action = { type = "walkthrough", ev = "skip" }
+  -- Done already finishes the final card, so only earlier cards need Skip.
+  if ws.pos < #wt.STOPS then
+    local skip_label = "Skip"
+    local skip_w = select(1, reaper.ImGui_CalcTextSize(ctx, skip_label))
+    local skip_x = x0 + avail - button_w - M.ITEM_SPACING_X * 2 - skip_w
+    reaper.ImGui_SameLine(ctx, skip_x)
+    if text_button(ctx, skip_label, frame_h) then
+      action = { type = "walkthrough", ev = "skip" }
+    end
   end
 
-  reaper.ImGui_SameLine(ctx, x0 + avail - M.POPUP_BTN_W)
-  if reaper.ImGui_Button(ctx, btn_label, M.POPUP_BTN_W) then
+  reaper.ImGui_SameLine(ctx, x0 + avail - button_w)
+  if reaper.ImGui_Button(ctx, btn_label, button_w) then
     -- Reopening the Library keeps the current step; Next advances it.
     action = act and { type = act } or { type = "walkthrough", ev = "next" }
   end

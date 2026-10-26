@@ -76,8 +76,9 @@ local function axis_label(ctx,dl,edge,y,value,side,size,colour,tick_colour)
   column=math.max(width,column)
   local x=side=='right' and tip+theme.metrics.RULER_LABEL_GAP
     or tip-theme.metrics.RULER_LABEL_GAP-column
-  -- A shared sign column keeps single- and double-digit negative labels aligned.
-  if not label:match('^−') and not label:match('^%+') then
+  if side=='right' then x=x+column-width end
+  -- Left-hand scales keep a shared sign column; right-hand scales align the final digit.
+  if side=='left' and not label:match('^−') and not label:match('^%+') then
     x=x+R.ImGui_CalcTextSize(ctx,'−')
   end
   R.ImGui_DrawList_AddText(dl,x,y-height/2,colour or T.TEXT_TERTIARY,label)
@@ -152,6 +153,10 @@ end
 -- Backgrounds, bars and grids reserve the same gutter for the current axis side.
 function drawing.meter_bounds(r,side)
   local s=theme.scale
+  if r.compact then
+    return r.x+(side=='left' and 32 or 0)*s,
+      r.x+r.w-(side=='right' and style.history_right or 0)*s
+  end
   return r.x+(side=='left' and 32 or 8)*s,
     r.x+r.w-(side=='right' and style.history_right or 8)*s
 end

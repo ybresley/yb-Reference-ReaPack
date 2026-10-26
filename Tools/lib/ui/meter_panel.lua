@@ -1,60 +1,131 @@
 -- The panel draws session state and returns intent; the adapter owns all audio.
 local theme=require('ui.theme')
 local tips=require('ui.tips')
+local widgets=require('ui.widgets')
+local readings=require('core.meter_readings')
 local layout=require('core.meter_layout')
-local warnings=require('core.meter_warnings')
 local status_text=require('core.meter_status')
 local bars=require('ui.meter_bars')
 local history=require('ui.meter_history')
 local controls=require('ui.meter_controls')
 local drawing=require('ui.meter_drawing')
 local style=require('ui.meter_style')
+local numeric=require('ui.meter_numeric')
 local swaps=require('ui.divider_swaps')
 local panel={}
 local T,R,M=theme.tokens,reaper,theme.metrics
 
-local READING_KEYS={'m','s','tp','crest'}
-local READING_LABELS={m='M Max',s='S Max',tp='TP Max',crest='Crest Factor'}
-local READING_UNITS={m='LUFS',s='LUFS',tp='dBTP',crest='dB'}
+local READING_KEYS={'crest','rms','target'}
+local READING_LABELS={crest='Crest Factor',rms='RMS',target='Target Diff'}
+local READING_UNITS={crest='dB',rms='dBFS',target='LU'}
+local READING_TIPS={
+  crest='Sample peak above average RMS since reset.',
+  rms='Stereo average level over 400 ms.',
+}
+local MEASUREMENTS={{'I','Integrated'},{'M','Momentary'},{'S','Short-Term'}}
 local GROUP_NAMES={loudness='Loudness',lr='L/R',readings='Readings',history='History'}
 local PASSIVE={}
 
-local function readings_column(ctx,dl,r,model,embedded)
-  if not model.prefs.extra_readings then return end
-  local keys=READING_KEYS
+local function reading_metrics(ctx)
+  local s=theme.scale
+  local function height(size,sample)
+    if not ctx then return size*s end
+    local pushed=theme.push_release_font(ctx,size*s)
+    local _,h=R.ImGui_CalcTextSize(ctx,sample)
+    if pushed then R.ImGui_PopFont(ctx) end
+    return h
+  end
+  local label=height(style.readings_label_size,'Crest Factor')
+  local value=height(style.readings_value_size,'−88.8')
+  local unit=height(style.readings_unit_size,'dBFS')
+  return {label=label,value=value,unit=unit,
+    block=label+style.readings_label_gap*s+math.max(value,unit),
+    gap=style.readings_row_gap*s}
+end
+
+local function readings_geometry(ctx,r,embedded)
   local s,pad=theme.scale,M.WINDOW_PAD
   local available=r.h-(r.footer_height or M.RULER_H)
   local top=r.y+style.plot_top*s
-  local row,height
+  local metrics=reading_metrics(ctx)
+  local needed=#READING_KEYS*metrics.block+(#READING_KEYS-1)*metrics.gap
+  local height
   if embedded then
-    row=(drawing.meter_bottom(r)-top)/#keys
+    local span=drawing.meter_bottom(r)-top
+    if span<needed then return end
+    top=top+(span-needed)/2
     height=available
   else
-    row=math.min(M.METER_READINGS_ROW_H,(available-style.plot_top*s-pad*2)/#keys)
-    height=style.plot_top*s+pad*2+row*#keys
+    height=style.plot_top*s+pad*2+needed
+    if height>available then return end
     top=top+pad
-    drawing.surface(dl,{x=r.x,y=r.y,w=r.w,h=height})
+  end
+  return {top=top,height=height,row=metrics.block+metrics.gap,metrics=metrics}
+end
+
+local function readings_column(ctx,dl,r,model,placement,embedded,presentation)
+  local keys=READING_KEYS
+  local s=theme.scale
+  local metrics=placement.metrics
+  if not embedded then
+    drawing.surface(dl,{x=r.x,y=r.y,w=r.w,h=placement.height})
   end
   local centre=r.x+(r.w-20*s)/2
   local values=model.values or {}
-  R.ImGui_DrawList_PushClipRect(dl,r.x,r.y,r.x+r.w,r.y+height,true)
+  local measurement=model.prefs.target_difference_measurement or 'Integrated'
+  local selected=1
+  for index,choice in ipairs(MEASUREMENTS) do
+    if choice[2]==measurement then selected=index; break end
+  end
+  local old_x,old_y=R.ImGui_GetCursorScreenPos(ctx)
+  local action
+  R.ImGui_DrawList_PushClipRect(dl,r.x,r.y,r.x+r.w,r.y+placement.height,true)
   for i,key in ipairs(keys) do
-    -- Raise the text block slightly: visible glyphs sit below its nominal centre.
-    local y=top+(i-.5)*row-20*s
-    local value=key=='crest'
-      and drawing.number(values.crest)
-      or drawing.number(model[key..'_max'])
-    local colour=key=='tp' and warnings.active(model.warnings,'tp') and T.DANGER_RED or T.ACCENT
+    local y=placement.top+(i-1)*placement.row
+    local raw
+    if key=='crest' then raw=values.crest
+    elseif key=='rms' then raw=readings.rms(values)
+    else raw=readings.target_difference(model) end
+    local value=drawing.number(raw)
+    if key=='target' and raw and raw>=.05 then value='+'..value end
+    local colour=T.ACCENT
     if value=='—' then colour=T.TEXT_TERTIARY end
-    local font=theme.push_release_font(ctx,20*s)
-    local body=value:gsub('^−','')
+    local font=theme.push_release_font(ctx,style.readings_value_size*s)
+    local body=value:gsub('^−',''):gsub('^%+','')
     local body_width=R.ImGui_CalcTextSize(ctx,body)
     if font then R.ImGui_PopFont(ctx) end
-    drawing.text(ctx,dl,centre,y,READING_LABELS[key],T.TEXT_SECONDARY,11*s,'center',r.w-pad*2)
-    drawing.text(ctx,dl,centre,y+14*s,value,colour,20*s,'number')
-    drawing.text(ctx,dl,centre+body_width/2+5*s,y+18*s,READING_UNITS[key],T.TEXT_TERTIARY,12*s)
+    local label=READING_LABELS[key]
+    local label_width=r.w-20*s
+    if key=='target' then
+      local suffix=' ('..MEASUREMENTS[selected][1]..')'
+      local label_font=theme.push_release_font(ctx,style.readings_label_size*s)
+      -- Keep the selected measurement visible even in a manually narrowed column.
+      label=widgets.ellipsize(ctx,label,math.max(0,label_width-R.ImGui_CalcTextSize(ctx,suffix)))..suffix
+      if label_font then R.ImGui_PopFont(ctx) end
+    end
+    if key=='target' and not presentation then
+      R.ImGui_SetCursorScreenPos(ctx,centre-label_width/2,y)
+      local next_measurement=MEASUREMENTS[selected%#MEASUREMENTS+1][2]
+      if widgets.text_button(ctx,'##target_difference',label,label_width,metrics.label,style.readings_label_size*s,
+          'Click to switch to '..next_measurement..'.') then
+        action={type='meter_set_preference',key='target_difference_measurement',value=next_measurement}
+      end
+    else
+      drawing.text(ctx,dl,centre,y,label,T.TEXT_SECONDARY,style.readings_label_size*s,'center',label_width)
+    end
+    local value_y=y+metrics.label+style.readings_label_gap*s
+    drawing.text(ctx,dl,centre,value_y,value,colour,style.readings_value_size*s,'number')
+    drawing.text(ctx,dl,centre+body_width/2+5*s,value_y+(metrics.value-metrics.unit)/2,
+      READING_UNITS[key],T.TEXT_TERTIARY,style.readings_unit_size*s)
+    if not presentation then
+      local tip=READING_TIPS[key] or measurement..' above (+) or below (−) target.'
+      tips.show(ctx,R.ImGui_IsMouseHoveringRect(ctx,r.x,y,r.x+r.w,y+metrics.block),
+        tip,'meter_reading_'..key)
+    end
   end
   R.ImGui_DrawList_PopClipRect(dl)
+  R.ImGui_SetCursorScreenPos(ctx,old_x,old_y)
+  return action
 end
 
 local function set_footer_height(geometry,footer_height)
@@ -73,17 +144,47 @@ local function minimum_height(footer_height)
   return 88*theme.scale
 end
 
-function panel.measure(width,height,opts,top_row_height,splits,footer_height)
+function panel.measure(width,height,opts,top_row_height,splits,footer_height,ctx)
   local count=#READING_KEYS
-  local geometry=layout.calculate(width,height,{scale=theme.scale,
+  local metrics=reading_metrics(ctx)
+  local reading_min=style.plot_top+style.caption_height
+    +(count*metrics.block+(count-1)*metrics.gap)/theme.scale
+  local options={scale=theme.scale,
     show_meters=opts.show_meters,show_loudness=opts.show_loudness,
     show_lr=opts.show_lr,show_history=opts.show_history,
     history_position=opts.history_position,
     show_readings=opts.extra_readings==true,
     readings_width=M.METER_READINGS_W/theme.scale,
-    readings_min_height=(M.METER_READINGS_MIN_ROW_H*count
-      +M.WINDOW_PAD*2+M.RULER_H)/theme.scale+style.plot_top,
-    top_row_height=top_row_height,splits=splits})
+    readings_min_height=reading_min+(footer_height or M.RULER_H)/theme.scale,
+    top_row_height=top_row_height,splits=splits}
+  local geometry=layout.calculate(width,height,options)
+  local loudness_enabled,lr_enabled=geometry.loudness~=nil,geometry.lr~=nil
+  local meters=loudness_enabled or lr_enabled
+  local both=loudness_enabled and lr_enabled
+  local normal_width=both and 312 or (loudness_enabled and 210 or 130)
+  local first=geometry.loudness or geometry.lr
+  if first and geometry.history and (width<normal_width*theme.scale
+      or first.h<style.compact_history_height*theme.scale) then
+    options.show_history=false
+    geometry=layout.calculate(width,height,options)
+    geometry.history_hidden=opts.show_history~=false
+  end
+  local minimum=not meters and 160 or both and style.compact_min_width
+    or loudness_enabled and style.compact_loudness_width or style.compact_lr_width
+  if width<minimum*theme.scale or height<style.compact_min_height*theme.scale then
+    return {numeric=true,w=width,h=height,seams={},footer_height=footer_height,
+      history_hidden=opts.show_history~=false,readings_hidden=opts.extra_readings==true}
+  end
+  if meters and width<normal_width*theme.scale then
+    options.compact_meters=true
+    geometry=layout.calculate(width,height,options)
+    geometry.history_hidden=opts.show_history~=false or nil
+    geometry.readout_size=(width>=300*theme.scale and 18
+      or width>=280*theme.scale and 16 or 14)*theme.scale
+    for _,key in ipairs({'loudness','lr'}) do
+      if geometry[key] then geometry[key].compact=true end
+    end
+  end
   local loudness,lr=geometry.loudness,geometry.lr
   local reversed=loudness and lr and lr.x<loudness.x
     and math.min(lr.y+lr.h,loudness.y+loudness.h)>math.max(lr.y,loudness.y)
@@ -97,6 +198,7 @@ end
 
 -- Match the first grey meter surface, including whichever group was swapped left.
 function panel.surface_left_inset(geometry,width,height,prefs)
+  if geometry.numeric then return 0 end
   if width and height and prefs then
     local visible=prefs.show_meters~=false
     local minimum=not visible and 160
@@ -186,12 +288,26 @@ end
 
 function panel.paint(ctx,model,geometry,x,y,presentation)
   local dl=R.ImGui_GetWindowDrawList(ctx)
-  local readout_size=bars.readout_size(model.prefs)
+  if geometry.numeric then
+    local footer=geometry.footer_height or theme.metrics.RULER_H
+    return numeric.draw(ctx,dl,{x=x,y=y,w=geometry.w,
+      h=math.max(0,geometry.h-footer),
+      corner_size=footer==0 and R.ImGui_GetFrameHeight(ctx)+4*theme.scale or 0,
+      surface_painted=geometry.surface_painted},model,presentation)
+  end
+  local readout_size=geometry.readout_size or bars.readout_size(model.prefs)
   local function translated(r)
     return r and {x=x+r.x,y=y+r.y,w=r.w,h=r.h,controls=r.controls,
-      plot_left=r.plot_left,axis_side=r.axis_side,footer_height=r.footer_height}
+      plot_left=r.plot_left,axis_side=r.axis_side,footer_height=r.footer_height,
+      compact=r.compact,surface_painted=geometry.surface_painted}
   end
   local first=translated(geometry.loudness or geometry.lr)
+  local readings_frame=geometry.readings and translated(geometry.readings)
+  local readings_placement
+  if readings_frame and model.prefs.extra_readings then
+    readings_placement=readings_geometry(ctx,readings_frame,first~=nil)
+  end
+  if not readings_placement then readings_frame=nil end
   local rightmost
   for _,key in ipairs({'loudness','lr','readings'}) do
     local r=geometry[key]
@@ -204,6 +320,7 @@ function panel.paint(ctx,model,geometry,x,y,presentation)
   local backgrounds={}
   for _,key in ipairs({'loudness','lr','readings'}) do
     local r=translated(geometry[key])
+    if key=='readings' and not readings_frame then r=nil end
     if r and (key~='readings' or first) and r.h>=minimum_height(r.footer_height) then
       local left,right
       if key=='readings' then left,right=r.x+8*theme.scale,r.x+r.w
@@ -222,12 +339,20 @@ function panel.paint(ctx,model,geometry,x,y,presentation)
       shared.w=r.x+r.w-shared.x
       shared.panel_right=r.panel_right
     else
-      if shared then drawing.surface(dl,shared) end
+      if shared and not geometry.surface_painted then drawing.surface(dl,shared) end
       shared=r
     end
   end
-  if shared then drawing.surface(dl,shared) end
+  if shared and not geometry.surface_painted then drawing.surface(dl,shared) end
   local action
+  if geometry.surface_painted then
+    for _,seam in ipairs(geometry.seams or {}) do
+      if seam.axis=='y' or seam.key=='history_x' then
+        local footer=seam.axis=='y' and (geometry.footer_height or theme.metrics.RULER_H) or 0
+        drawing.rect(dl,x+seam.x,y+seam.y-footer,seam.w,seam.h+footer,T.BG_WINDOW)
+      end
+    end
+  end
   for _,key in ipairs({'loudness','lr','history'}) do
     local r=translated(geometry[key])
     if r and r.w>0 and r.h>0 then
@@ -244,7 +369,9 @@ function panel.paint(ctx,model,geometry,x,y,presentation)
       R.ImGui_DrawList_PopClipRect(dl)
     end
   end
-  if geometry.readings then readings_column(ctx,dl,translated(geometry.readings),model,first~=nil) end
+  if readings_frame then
+    action=readings_column(ctx,dl,readings_frame,model,readings_placement,first~=nil,presentation) or action
+  end
   return action
 end
 
@@ -256,28 +383,46 @@ function panel.draw(ctx,state,res,x,y,width,height,geometry,footer_height)
   local effective_footer=footer_height or geometry and geometry.footer_height
   local ruler=effective_footer or theme.metrics.RULER_H
   local old_x,old_y=R.ImGui_GetCursorScreenPos(ctx)
-  local meter_visible=model.prefs.show_meters~=false
-  local minimum_width=not meter_visible and 160
-    or model.prefs.show_loudness and model.prefs.show_lr and 312 or 260
-  if width<minimum_width*s or height<minimum_height(effective_footer) then
-    drawing.surface(dl,{x=x,y=y,w=width,h=math.max(0,height-ruler)})
-    drawing.text(ctx,R.ImGui_GetWindowDrawList(ctx),x+4*s,y+4*s,'Enlarge the view to see the meters.',T.TEXT_TERTIARY,11*s,nil,math.max(0,width-8*s))
-    return
-  end
   R.ImGui_PushID(ctx,'output_meter')
   local opts=model.prefs
-  geometry=set_footer_height(geometry or panel.measure(width,height,opts,nil,split_state(state)),footer_height)
+  geometry=set_footer_height(geometry or panel.measure(width,height,opts,nil,split_state(state),footer_height,ctx),footer_height)
   -- Only the top-right group shares its heading with the permanent menu button.
   for _,key in ipairs({'loudness','lr','history'}) do
     local r=geometry[key]
     if r and r.y==0 and r.x+r.w>=width-1 then r.controls=true end
   end
-  local reconnect=model.error or not model.attached
+  local initializing=model.error=='initializing'
+  local reconnect=not initializing and (model.error or not model.attached)
   local error=model.preference_error or (model.error and status_text.error(model.error))
     or (not model.attached and 'Meter unavailable')
-  local error_top=error and y+math.max(24*s,(height-62*s)/2)
+  if error and (width<120*s or height<62*s) then
+    if not geometry.surface_painted then
+      drawing.surface(dl,{x=x,y=y,w=width,h=math.max(0,height-ruler)})
+    end
+    drawing.text(ctx,dl,x+4*s,y+4*s,error,initializing and T.TEXT_SECONDARY or T.DANGER_RED,
+      11*s,nil,math.max(0,width-8*s))
+    tips.show(ctx,R.ImGui_IsMouseHoveringRect(ctx,x,y,x+width,y+height),error,'meter_error')
+    if width>=32*s and height>=25*s then
+      controls.draw(ctx,model,x+8*s,y+2*s,width-8*s,res,geometry.history_hidden,
+        {x=x,y=y,w=width,h=height},geometry.readings_hidden)
+    end
+    R.ImGui_PopID(ctx)
+    R.ImGui_SetCursorScreenPos(ctx,old_x,old_y)
+    return nil,x,y,x+width,y+height-ruler
+  end
+  local error_top,error_height,error_text_height
+  if error then
+    local font=theme.push_release_font(ctx,11*s)
+    local _,text_height=R.ImGui_CalcTextSize(ctx,error,nil,nil,false,width-32*s)
+    if font then R.ImGui_PopFont(ctx) end
+    -- Grow upward from the existing action row so Reconnect stays under the pointer.
+    local bottom=y+math.min(height-2*s,math.max(86*s,(height+62*s)/2))
+    error_height=math.min(math.max(62*s,text_height+46*s),bottom-y-2*s)
+    error_top=bottom-error_height
+    error_text_height=math.max(1,error_height-46*s)
+  end
   local error_hover=error and R.ImGui_IsMouseHoveringRect(ctx,
-    x+8*s,error_top,x+width-8*s,error_top+62*s)
+    x+8*s,error_top,x+width-8*s,error_top+error_height)
   local variant=state.layout_prototype and state.layout_prototype.active or 'default'
   local panels={}
   for _,key in ipairs({'loudness','lr','readings','history'}) do
@@ -299,7 +444,8 @@ function panel.draw(ctx,state,res,x,y,width,height,geometry,footer_height)
     R.ImGui_PushStyleVar(ctx,R.ImGui_StyleVar_DisabledAlpha(),1)
     R.ImGui_BeginDisabled(ctx)
   end
-  local action=panel.paint(ctx,model,geometry,x,y,(error or split_blocked) and PASSIVE or nil)
+  local passive=(error or split_blocked) and PASSIVE or nil
+  local action=panel.paint(ctx,model,geometry,x,y,passive)
   if split_blocked then
     R.ImGui_EndDisabled(ctx)
     R.ImGui_PopStyleVar(ctx)
@@ -310,18 +456,31 @@ function panel.draw(ctx,state,res,x,y,width,height,geometry,footer_height)
   local history_corner=geometry.history and geometry.history.y==0
     and geometry.history.x+geometry.history.w>=width-1
   local menu_inset=history_corner and (style.history_right+4)*s or 0
-  local menu_action=controls.draw(ctx,model,x+8*s,y+2*s,width-16*s-menu_inset,res,
+  -- A shared ruler is unused by numeric tiles and keeps the hover control clear
+  -- of their first row. Without a ruler, use the outer corner rather than a strip.
+  local menu_y=geometry.numeric and ruler>0 and y+height-ruler or y+2*s
+  local menu_padding=geometry.numeric and 8*s or 16*s
+  local menu_action=controls.draw(ctx,model,x+8*s,menu_y,width-menu_padding-menu_inset,res,
     geometry.history_hidden,{x=x,y=y,w=width,h=height},geometry.readings_hidden)
   action=menu_action or action
   swaps.paint(ctx,swap_input)
   if error then
     -- A fault stays visible without reserving a status row or moving the plots.
     local top=error_top
-    drawing.rect(dl,x+8*s,top,width-16*s,62*s,T.BG_POPUP,4*s)
-    drawing.text(ctx,dl,x+16*s,top+8*s,error,T.DANGER_RED,11*s,nil,width-32*s)
-    tips.show(ctx,R.ImGui_IsMouseHoveringRect(ctx,x+8*s,top,x+width-8*s,top+62*s),error,'meter_error')
+    drawing.rect(dl,x+8*s,top,width-16*s,error_height,T.BG_POPUP,4*s)
+    R.ImGui_SetCursorScreenPos(ctx,x+16*s,top+8*s)
+    local font=theme.push_release_font(ctx,11*s)
+    -- The complete recovery message wraps, and can scroll when the view is short.
+    if R.ImGui_BeginChild(ctx,'meter_error_message',width-32*s,error_text_height) then
+      R.ImGui_PushTextWrapPos(ctx,0)
+      R.ImGui_TextColored(ctx,initializing and T.TEXT_SECONDARY or T.DANGER_RED,error)
+      R.ImGui_PopTextWrapPos(ctx)
+      R.ImGui_EndChild(ctx)
+    end
+    if font then R.ImGui_PopFont(ctx) end
+    tips.show(ctx,error_hover,error,'meter_error')
     if reconnect then
-      R.ImGui_SetCursorScreenPos(ctx,x+width-100*s,top+32*s)
+      R.ImGui_SetCursorScreenPos(ctx,x+width-100*s,top+error_height-30*s)
       if R.ImGui_Button(ctx,'Reconnect',84*s,22*s) then action={type='meter_reconnect'} end
     end
   end

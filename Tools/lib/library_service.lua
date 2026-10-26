@@ -211,8 +211,8 @@ function service.delete_sound(state, id)
   -- loss the taken-name set exists to prevent — so refuse before touching anything.
   if reaper_api.path_exists(note_path) or reaper_api.path_exists(audio_dest) then
     return false, string.format(
-      "\"%s\" couldn't be deleted because the trash folder already contains a file that Windows " ..
-      "treats as the same name (%s). Rename the sound's file and try again. Nothing was changed.",
+      "\"%s\" couldn't be deleted because the trash folder already contains a file " ..
+      "with the same name (%s). Rename the sound's file and try again. Nothing was changed.",
       record.name, trashed_name)
   end
 

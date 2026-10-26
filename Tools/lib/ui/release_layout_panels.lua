@@ -103,7 +103,7 @@ function panels.paint(ctx,res,value,model,x,y,w,h,elapsed)
   for _,pane in ipairs(geometry.panels) do
     if pane.id=='loudness' then
       local measured=meter_panel.measure(pane.w,pane.h,value.meter.model.prefs,
-        nil,nil,frames[pane.id].footer_height)
+        nil,nil,frames[pane.id].footer_height,ctx)
       meter_inset=meter_panel.surface_left_inset(measured,pane.w,pane.h,value.meter.model.prefs)
     end
   end

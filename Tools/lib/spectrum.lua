@@ -82,7 +82,7 @@ end
 -- Called by preview.lua after an old preview has been released but before the
 -- replacement routes start. That gives the helper the correct capture epoch for
 -- very short sounds without attributing a departing source to its successor.
-function spectrum.prepare_preview(state, slot, sound_id)
+function spectrum.prepare_preview(state, slot, sound_id, resuming)
   local model = state.spectrum
   local now = reaper.time_precise()
   local project = reaper.EnumProjects(-1)
@@ -93,10 +93,12 @@ function spectrum.prepare_preview(state, slot, sound_id)
   local source = 'preview:' .. tostring(slot) .. ':' .. tostring(sound_id)
   model.context_base, model.context_source = base, source
   local source_key = base .. ':' .. source
-  if model.draining and model.source_key == source_key then
+  if resuming and model.draining and model.source_key == source_key then
     core.cancel_stop(model, now)
   end
-  core.set_context(model, source_key, true, now)
+  -- Play starts a new measurement even for the same sound; Resume keeps it.
+  core.set_context(model, source_key, true, now, not resuming)
+  model.drain_deadline = nil
   if not helper.configure_spectrum(helper_options(state, model)) then
     model.status = 'invalid'
     return false
@@ -144,14 +146,18 @@ function spectrum.tick(state)
   if state.stereo then
     local stereo_context = {source_key = source, playing = playing, epoch = model.epoch,
       session = helper.session(), now = now}
-    -- Process immediately: the adapter reuses its staging arrays. A bounded
-    -- drain catches up after ordinary UI jitter without monopolising a frame.
-    for packet = 1, 3 do
+    -- Process immediately: the adapter reuses its staging arrays. Older
+    -- captures need more catch-up work, but each UI tick has a fixed limit.
+    for packet = 1, 8 do
       local stereo_frame, stereo_status = helper.read_stereo(now)
       stereo_context.status = stereo_status
       stereo_core.update(state.stereo, stereo_frame, stereo_context)
       if not stereo_frame then break end
-      stereo_backlog = packet == 3
+      stereo_backlog = not stereo_frame.final
+      local age = math.max(0, now - (stereo_frame.at or now))
+      if (packet >= 3 and age <= 0.35) or (packet >= 5 and age <= 1) then
+        break
+      end
     end
   end
   local drain_failed = status == 'unavailable' or status == 'stale' or status == 'invalid'

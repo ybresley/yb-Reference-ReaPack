@@ -164,12 +164,13 @@ end
 
 -- A loop is still the same source in a playing state. The caller must not
 -- manufacture stop events for timeline position wrapping back to the start.
-function spectrum.set_context(state, source_key, playing, now)
+-- Explicit Play uses restart to discard both traces even for the same source.
+function spectrum.set_context(state, source_key, playing, now, restart)
   playing = playing == true
   local changed = state.context_ready and source_key ~= state.source_key
   local stopped = state.context_ready and state.playing and not playing
   local resumed = state.context_ready and not state.playing and playing
-  if changed then
+  if changed or restart then
     state.draining = false
     state.stop = nil
     fresh_window(state, true)

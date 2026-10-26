@@ -100,7 +100,7 @@ end
 
 -- Passive entry point for the combined Reference View example.
 function meter.paint(ctx, demo, x, y, width, height, presentation, footer_height)
-  local geometry = meter_panel.measure(width, height, demo.model.prefs, nil, nil, footer_height)
+  local geometry = meter_panel.measure(width, height, demo.model.prefs, nil, nil, footer_height, ctx)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_DisabledAlpha(), 1)
   reaper.ImGui_BeginDisabled(ctx)
   meter_panel.paint(ctx, demo.model, geometry, x, y, presentation or {})

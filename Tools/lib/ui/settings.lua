@@ -30,6 +30,7 @@ local whatsnew = require("ui.whatsnew")
 local hotkeys = require("ui.hotkeys")
 local reference_settings = require("ui.reference_settings")
 local fb_core = require("core.feedback") -- message cap for the Help composer
+local walkthrough_ui = require("ui.walkthrough")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -454,7 +455,7 @@ local NOTE_FOLDER = "Switching libraries never moves or copies sounds."
 -- rebuilt in the frame loop.
 local ICON_REVEAL_LIB = {
   id = "set_libfolder", name = "folder", fallback = icons.draw_folder,
-  tip = "Open this folder and its trash in File Explorer.",
+  tip = "Show the library folder and its trash on your computer.",
 }
 
 local function setting_label(ctx, text)
@@ -1521,6 +1522,13 @@ function settings.draw(ctx, state, res)
   local panes_h = select(2, reaper.ImGui_GetContentRegionAvail(ctx))
 
   action = draw_panes(ctx, state, ui, panes_h, "")
+
+  if settings.feedback_visible() then
+    local x, y = reaper.ImGui_GetWindowPos(ctx)
+    local w, h = reaper.ImGui_GetWindowSize(ctx)
+    walkthrough_ui.note_rect(ctx, state.walkthrough, "feedback", x, y, x + w, y + h)
+  end
+  walkthrough_ui.wash(ctx, state.walkthrough, "settings")
 
   -- Esc puts the window away while it has focus — the one popup habit kept now
   -- that outside clicks deliberately don't close it (the Loudness panel's rule).

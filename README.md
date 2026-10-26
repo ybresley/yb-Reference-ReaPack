@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- **Windows**
+- **Windows or macOS**
 
 - **Reaper v7.xx ideally, otherwise 6.44+**
 
@@ -42,7 +42,7 @@ Restart REAPER after installing or updating an extension.
 
 ## Beta Limitations
 
-- **Windows only.** macOS and Linux are not supported
+- **Linux is not supported.**
 
 ## Send Feedback!
 

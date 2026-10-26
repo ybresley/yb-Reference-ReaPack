@@ -117,6 +117,8 @@ local function fwd_mod(name, sws)
   end
 end
 do
+  -- ReaImGui's Mac behaviour reports Command as Ctrl and Control as Super.
+  -- SWS uses the same convention, so no platform-specific swap belongs here.
   fwd_mod("Ctrl", 4)
   fwd_mod("Shift", 8)
   fwd_mod("Alt", 16)

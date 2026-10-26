@@ -1,7 +1,7 @@
 -- Meter controls share the filter's named memory because ReaScript has only one
--- current attachment. This region starts after the Stereo packet buffer.
+-- current attachment. Its control and history regions are below Stereo packets.
 local control = {}
-local NAME, BASE, PROTOCOL = 'yb_reference_monitor_filter_v1', 140000, 1
+local NAME, BASE, PROTOCOL = 'yb_reference_monitor_filter_v1', 140000, 2
 local LEASE_SECONDS, COUNTER_LIMIT = 2, 1000000000
 local SLOT = { protocol=0, active=1, session=2, heartbeat=3, token=4,
   revision=5, capture_mode=6, reset_request=7, reset_policy=8,

@@ -7,7 +7,6 @@ local monitor_filter = {}
 local R = reaper
 local MONITOR_FX = 0x1000000
 local FX_QUERY = "JS: yb-Reference Monitoring Filter"
-local FX_ORIGINAL_NAME = "yb-Reference Monitoring Filter"
 local FX_NAMES = {
   ["JS: yb-Reference Monitoring Filter"] = true,
   ["yb-Reference Monitoring Filter"] = true,
@@ -39,7 +38,7 @@ local CONTROL = {
   revision = 9,
   response_sequence = 10,
 }
-local PROTOCOL = 11
+local PROTOCOL = 13
 local SPECTRUM = {
   fft_size = 16, smoothing = 17, epoch = 18, capture_state = 19, revision = 20,
   average_seconds = 21, history_epoch = 23,
@@ -54,7 +53,7 @@ local SPECTRUM_MAGIC = 260826.1
 local SPECTRUM_TIMEOUT = 1.0
 local STEREO = {
   active = 1093, final_serial = 1094, latest = 1095, clip_total = 1096,
-  base = 3200, stride = 16400, queue = 8,
+  base = 200000, stride = 16400, queue = 64,
   sequence = 0, epoch = 1, session = 2, count = 3, revision = 4,
   final = 5, end_sample = 6, at = 7, packet_clip_total = 8,
   clip_before = 9, prior_clip_left = 10, prior_clip_right = 11,
@@ -168,7 +167,7 @@ end
 local function exact_matches(snap)
   local matches = {}
   for _, entry in ipairs(snap.entries) do
-    if entry.original_name == FX_ORIGINAL_NAME or FX_NAMES[entry.name] then
+    if FX_NAMES[entry.original_name] or FX_NAMES[entry.name] then
       matches[#matches + 1] = entry
     end
   end
@@ -215,6 +214,7 @@ end
 
 local function set_phase(phase, message)
   S.phase, S.message = phase, message
+  S.response_failed = false
   if phase ~= "ready" then
     if S.control_ready then
       R.gmem_write(CONTROL.active, 0)
@@ -280,7 +280,7 @@ local function compatible(master, entry)
   return math.abs((tonumber(value) or 0) - PROTOCOL) < 0.001
 end
 
-local function refresh_owned_helper(allow_incompatible)
+local function refresh_owned_helper(allow_incompatible, automatic)
   local snap = snapshot()
   if not snap or not S.bound_guid or S.bound_guid ~= S.stored_guid then
     return false, false
@@ -293,10 +293,27 @@ local function refresh_owned_helper(allow_incompatible)
     return false, false
   end
 
-  -- Restore is the user's explicit repair action. Only the exact compatible
-  -- instance we already own may be replaced; every other Monitor FX is left alone.
+  if automatic then
+    local protocol = R.TrackFX_GetParam(snap.master, entry.fx, PARAM.protocol)
+    -- Only update an older transaction-aware helper whose saved identity was
+    -- present at launch. A newly discovered, disabled or newer copy stays manual.
+    if S.auto_update_attempted or entry.guid ~= S.startup_guid
+        or not FX_NAMES[entry.name] or not FX_NAMES[entry.original_name]
+        or not entry.enabled or entry.offline or not finite(protocol)
+        or protocol % 1 ~= 0 or protocol < 6 or protocol >= PROTOCOL then
+      return false, false
+    end
+    S.auto_update_attempted = true
+  end
+
+  -- Recheck exact ownership in this fresh snapshot before replacing anything.
   if not R.TrackFX_Delete then return true, false end
   dry_entry(snap, entry)
+  if automatic and (not FX_NAMES[fx_name(snap.master, entry.fx)]
+      or not FX_NAMES[original_fx_name(snap.master, entry.fx)]
+      or not R.TrackFX_GetEnabled(snap.master, entry.fx)
+      or R.TrackFX_GetOffline(snap.master, entry.fx)) then return true, false end
+  if R.TrackFX_GetFXGUID(snap.master, entry.fx) ~= entry.guid then return true, false end
   if R.TrackFX_Delete(snap.master, entry.fx) ~= true then return true, false end
 
   -- Replacing the filter must keep the analysis meter at the front of the chain.
@@ -311,7 +328,7 @@ local function bind(snap, entry)
   if not compatible(snap.master, entry) then
     dry_entry(snap, entry)
     S.bound_guid, S.slot = entry.guid, entry.slot
-    if entry.original_name == FX_ORIGINAL_NAME or FX_NAMES[entry.name] then
+    if FX_NAMES[entry.original_name] or FX_NAMES[entry.name] then
       store_guid(entry.guid)
     end
     set_phase("incompatible",
@@ -359,7 +376,7 @@ local function resolve(snap, allow_insert, missing_message)
   local matches = exact_matches(snap)
   local owned = find_guid(snap, S.stored_guid)
   local helper_count = #matches
-  local owned_has_exact_name = owned and (owned.original_name == FX_ORIGINAL_NAME
+  local owned_has_exact_name = owned and (FX_NAMES[owned.original_name]
     or FX_NAMES[owned.name])
   if owned and not owned_has_exact_name then helper_count = helper_count + 1 end
   if helper_count > 1 then
@@ -488,6 +505,7 @@ local function response_tick(settings)
     control_write(CONTROL.active, 0)
     set_phase("error",
       "The helper stopped responding. Choose Restore Helper to reconnect it.")
+    S.response_failed = true
   end
 end
 
@@ -511,9 +529,18 @@ local function health_tick(settings, force_write)
     return
   end
 
-  -- A matching installed effect is not evidence of recovery from a response
-  -- failure. Keep Restore available until its explicit repair path runs.
-  if S.phase == "error" then return end
+  if S.phase == "error" then
+    -- Resume only after a new complete audio reply. Shared memory left behind
+    -- by a suspended device cannot acknowledge its own recovery.
+    local sequence = R.gmem_read(CONTROL.response_sequence)
+    local ack = R.gmem_read(CONTROL.ack)
+    local engaged = R.gmem_read(CONTROL.engaged)
+    if not S.response_failed or not finite(sequence) or sequence <= 0
+        or sequence % 2 ~= 0 or sequence == S.response_sequence
+        or sequence ~= R.gmem_read(CONTROL.response_sequence)
+        or not finite(ack) or ack < 0 or (engaged ~= 0 and engaged ~= 1)
+        or (ack ~= S.heartbeat and ack == S.response_ack) then return end
+  end
   if S.phase ~= "ready" then bind(snap, entry) end
   local low, high = tonumber(settings.low_hz), tonumber(settings.high_hz)
   local limit = max_filter_hz()
@@ -611,6 +638,7 @@ function monitor_filter.init(opts)
   S.last_signature = nil
   S.stored_guid = R.GetExtState(EXT_SECTION, EXT_GUID)
   if S.stored_guid == "" then S.stored_guid = nil end
+  S.startup_guid, S.auto_update_attempted = S.stored_guid, false
   S.bound_guid, S.slot = nil, nil
   S.replacement_slot = nil
   S.next_lease, S.next_health = 0, 0
@@ -618,6 +646,7 @@ function monitor_filter.init(opts)
   S.activation_started = nil
   S.range_error = nil
   S.response_sequence, S.response_ack, S.response_at = nil, nil, nil
+  S.response_failed = false
   S.response_needed = false
   S.spectrum = { fft_size = 4096, smoothing_octaves = 1 / 12, epoch = 0,
     capture_state = 0, average_seconds = 0,
@@ -683,6 +712,7 @@ function monitor_filter.tick(settings)
         or nil
       local resolved = resolve(snap, S.auto_insert, missing_message)
       if resolved and S.phase == "ready" then health_tick(settings, true) end
+      if S.phase == "incompatible" then monitor_filter.restore(true) end
     end
     return view()
   end
@@ -698,15 +728,18 @@ function monitor_filter.tick(settings)
     -- A manual enable/online change or removal of an extra copy repairs itself.
     -- A truly missing helper is only inserted by restore(), never by this scan.
     health_tick(settings, false)
+    if S.phase == "incompatible" then monitor_filter.restore(true) end
   end
   return view()
 end
 
-function monitor_filter.restore()
+function monitor_filter.restore(automatic)
+  if automatic and (S.phase ~= "incompatible" or S.auto_update_attempted) then return false end
   if S.phase ~= "missing" and S.phase ~= "error"
       and S.phase ~= "incompatible" then return false end
   if S.phase == "incompatible" then
-    local attempted, refreshed = refresh_owned_helper(true)
+    local attempted, refreshed = refresh_owned_helper(true, automatic)
+    if automatic and not attempted then return false end
     if not attempted or not refreshed then
       set_phase("error",
         "The helper couldn't be reloaded. Remove yb-Reference Monitoring Filter from Monitor FX, then choose Add Helper.")

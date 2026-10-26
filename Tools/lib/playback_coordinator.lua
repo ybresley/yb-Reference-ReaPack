@@ -18,7 +18,7 @@ function coordinator.new(state, callbacks, startup_alert)
   local reference_alerted = startup_alert
   local recovery, urgent
 
-  function playback.play(s, position, slot, loop)
+  function playback.play(s, position, slot, loop, resuming)
     if loop == nil then loop = state.loop end
     -- Exact positions belong to the user's seek or pause. Only an ordinary
     -- Reference View/picker start follows the sound's saved start point.
@@ -31,7 +31,7 @@ function coordinator.new(state, callbacks, startup_alert)
       db = trim_db + state.master_db, loop = loop, position = position,
       pitch = state.pitch[slot] or 0, channels = s.channels,
       before_start = callbacks.before_start and function()
-        return callbacks.before_start(slot, s.id)
+        return callbacks.before_start(slot, s.id, resuming == true)
       end or nil,
     })
     -- Multichannel playback can disable Mono. Length comes from the actual
@@ -85,7 +85,7 @@ function coordinator.new(state, callbacks, startup_alert)
       local parked = holders.pause_of(state, slot)
       local s = parked and callbacks.find(parked.sound_id) or nil
       local loop = slot == "main" and state.reference.active and true or nil
-      if s and playback.play(s, parked.at or 0, slot, loop) then
+      if s and playback.play(s, parked.at or 0, slot, loop, true) then
         holders.clear_pause(state, slot)
       end
     end

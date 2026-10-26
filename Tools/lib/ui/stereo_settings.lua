@@ -113,7 +113,8 @@ local function draw_content(ctx, state)
   local action
   local failed = state.stereo_preferences_error ~= nil
   local function accept(result) action = result or action end
-  local opened, child = widgets.begin_settings_group(ctx, 'stereo_display', 'Display', true, nil, groups.display)
+  local opened, child, closed = widgets.begin_settings_group(ctx, 'stereo_display', 'Display',
+    true, nil, groups.display, 'stereo_settings_close')
   if opened then
     row_label(ctx, 'View', 'view', M.SPECTRUM_OPTION_W)
     local selected = widgets.two_way_switch(ctx, 'stereo_view_switch', view, VIEWS,
@@ -163,7 +164,7 @@ local function draw_content(ctx, state)
       action = {type='stereo_reset_all_settings'}
     end
   end
-  return action
+  return action, closed
 end
 
 local function panel_height(ctx, state)
@@ -175,6 +176,8 @@ local function panel_height(ctx, state)
   -- These groups contain fixed-height rows. Give them their final height on
   -- the opening frame so child auto-sizing cannot shrink and regrow the panel.
   local height = 2 * M.WINDOW_PAD + frame + 6 * M.ITEM_SPACING_Y
+  -- The first heading shares a full control row with the close button.
+  height = height + frame - heading
   for _, group in pairs(groups) do
     group.height = group.rows * frame + (group.rows - 1) * M.ITEM_SPACING_Y + 2 * M.WINDOW_PAD
     height = height + heading + M.ITEM_SPACING_Y + group.height
@@ -213,10 +216,10 @@ function settings.draw_panel(ctx, state, res)
   reaper.ImGui_PopStyleColor(ctx)
   if not visible then return end
   local dismiss = anchored_panel.dismissed(ctx, ui)
-  local action = draw_content(ctx, state)
+  local action, closed = draw_content(ctx, state)
   if ui.closing or dismiss then ui.open, ui.closing = false, nil end
-  if reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_RootAndChildWindows())
-      and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then
+  if closed or (reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_RootAndChildWindows())
+      and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape())) then
     ui.open = false
     focus.request()
   end
@@ -264,19 +267,14 @@ function settings.draw(ctx, state, res, x, y, width, height, exclusion, presenta
   if not presentation and ui.open then update_anchor(x, y, width, height) end
   local size = reaper.ImGui_GetFrameHeight(ctx)
   if width < size + 2 * M.WINDOW_PAD or height < size + 2 * M.WINDOW_PAD then return end
-  local bx, by = x + M.WINDOW_PAD, y + M.WINDOW_PAD
-  if exclusion and bx < exclusion.x1 and bx + size > exclusion.x0
+  local bx, by = x + width - M.WINDOW_PAD - size, y + M.WINDOW_PAD
+  local fx = bx - size - M.ITEM_SPACING_X
+  -- Reserve Resume's place too so freezing never moves the settings button.
+  local controls_left = math.max(x + M.WINDOW_PAD, fx)
+  if exclusion and controls_left < exclusion.x1 and bx + size > exclusion.x0
       and by < exclusion.y1 and by + size > exclusion.y0 then
-    -- Compact layouts reserve this corner for the panel picker. Keep settings
-    -- and Resume reachable beside it, or below it when the row is too narrow.
-    local right = exclusion.x1 + M.ITEM_SPACING_X
-    local controls_width = 2 * size + M.ITEM_SPACING_X
-    if right + controls_width <= x + width - M.WINDOW_PAD then
-      bx = right
-    else
-      by = exclusion.y1 + M.ITEM_SPACING_Y
-      if by + size > y + height - M.WINDOW_PAD then return end
-    end
+    by = exclusion.y1 + M.ITEM_SPACING_Y
+    if by + size > y + height - M.WINDOW_PAD then return end
   end
   local open = not presentation and ui.open
   local hovered
@@ -304,10 +302,7 @@ function settings.draw(ctx, state, res, x, y, width, height, exclusion, presenta
     tips.show(ctx, button_hovered and not open, 'Stereo Settings', 'stereo_view')
   end
   local action
-  local fx = bx + size + M.ITEM_SPACING_X
-  local freeze_blocked = exclusion and fx < exclusion.x1 and fx + size > exclusion.x0
-    and by < exclusion.y1 and by + size > exclusion.y0
-  if frozen and fx + size <= x + width - M.WINDOW_PAD and not freeze_blocked then
+  if frozen and fx >= x + M.WINDOW_PAD then
     reaper.ImGui_SetCursorScreenPos(ctx, fx, by)
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0)
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), 0)

@@ -3,7 +3,7 @@ local preferences = {}
 local json = require('vendor.json')
 local targets = require('core.meter_targets')
 
-preferences.VERSION = 5
+preferences.VERSION = 6
 preferences.OPTIONS = {
   view = { 'all', 'pictures', 'meters' },
   mode = { 'LUFS', 'K-20', 'K-14', 'K-12' },
@@ -17,6 +17,7 @@ preferences.OPTIONS = {
   ms_hold = { -1, 0, .5, 1.5, 3 },
   lr_contents = { 'RMS + Peak', 'Peak Only', 'RMS Only' },
   peak_measurement = { 'Sample Peak', 'True Peak' },
+  target_difference_measurement = { 'Integrated', 'Momentary', 'Short-Term' },
   lr_floor = { -48, -60, -90 },
   lr_hold = { 0, .5, 1.5, 3 },
   peak_fall = { 'Fast', 'Normal', 'Slow' },
@@ -48,7 +49,7 @@ function preferences.defaults()
     ceiling=-1, range=-48, seconds=10, preset='',
     loudness_scale='Expanded', readings='Absolute',
     show_m=true, show_s=true, show_i=true, show_lra=true,
-    history_position='Automatic', extra_readings=false,
+    history_position='Automatic', extra_readings=true,
     meter_widths='Integrated Wider', tolerance=0, show_target=false,
     ms_hold=1.5, lr_contents='RMS + Peak', peak_measurement='True Peak', lr_floor=-48,
     lr_hold=1.5, peak_fall='Normal', show_clipping=true, clip_hold=0,
@@ -58,6 +59,7 @@ function preferences.defaults()
     history_line_width=2, grid_brightness=1, lra_brightness=1,
     yellow_lead=5, red_span=3, lr_shading=true,
     auto_reset='On Play', keep_integrated=true,
+    target_difference_measurement='Integrated',
     seek_reset='Keep Measuring', loop_reset='Accumulate' }
 end
 
@@ -152,6 +154,7 @@ local function migrate(prefs,version)
     result.extra_readings=enabled
   end
   if version<5 then result.peak_measurement='True Peak' end
+  if version<6 then result.target_difference_measurement='Integrated' end
   for key,value in pairs(FIXED) do result[key]=value end
   return result
 end
@@ -162,7 +165,7 @@ function preferences.decode(text)
   local ok,data=pcall(json.decode,text)
   if not ok or type(data)~='table' then return nil,'Saved meter settings are invalid.' end
   if data.version~=1 and data.version~=2 and data.version~=3
-      and data.version~=4 and data.version~=preferences.VERSION then
+      and data.version~=4 and data.version~=5 and data.version~=preferences.VERSION then
     return nil,'Saved meter settings use an unsupported version.'
   end
   if type(data.preferences)~='table' then return nil,'Saved meter settings are invalid.' end
@@ -224,7 +227,7 @@ end
 
 local PAGE_FIELDS = {
   Display={'show_meters','show_loudness','show_lr','show_history',
-    'history_position','extra_readings'},
+    'history_position','extra_readings','target_difference_measurement'},
   Loudness={'show_m','show_s','show_i','show_lra','show_target',
     'loudness_scale','range','readings','ms_hold','target','ceiling',
     'preset','tolerance'},

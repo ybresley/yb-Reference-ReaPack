@@ -218,7 +218,8 @@ end
 
 local function draw_panel_shell(ctx, width, height, tab)
   local content_w = reaper.ImGui_GetContentRegionAvail(ctx)
-  local tab_w = (content_w - M.SPECTRUM_BAND_GAP) / 2
+  local close_size = reaper.ImGui_GetFrameHeight(ctx)
+  local tab_w = (content_w - M.SPECTRUM_BAND_GAP - close_size - M.ITEM_SPACING_X) / 2
   local tab_h = reaper.ImGui_GetFrameHeight(ctx) + M.WINDOW_PAD
   local tab_x, tab_y = reaper.ImGui_GetCursorPos(ctx)
   local wx, wy = reaper.ImGui_GetWindowPos(ctx)
@@ -243,7 +244,9 @@ local function draw_panel_shell(ctx, width, height, tab)
   reaper.ImGui_SameLine(ctx, 0, M.SPECTRUM_BAND_GAP)
   local filter_clicked = widgets.attached_tab(ctx, "Filter", "##spectrum_filter_filter",
     tab == "filter", tab_w, tab_h)
-  return spectrum_clicked, filter_clicked, body_y
+  reaper.ImGui_SameLine(ctx, 0, M.ITEM_SPACING_X)
+  local closed = widgets.close_button(ctx, 'spectrum_filter_settings_close')
+  return spectrum_clicked, filter_clicked, body_y, closed
 end
 
 -- Release demonstrations share the production content in a scaled window inside
@@ -417,7 +420,7 @@ function filterwin.draw(ctx, state, res)
   reaper.ImGui_PopStyleColor(ctx)
   if visible then
     local dismiss = anchored_panel.dismissed(ctx, ui)
-    local spectrum_clicked, filter_clicked, body_y =
+    local spectrum_clicked, filter_clicked, body_y, closed =
       draw_panel_shell(ctx, width, height, ui.tab)
     if spectrum_clicked and ui.tab ~= "spectrum" then
       action = actions.combine(action, finish_preset_focus(state.monitor_filter))
@@ -458,11 +461,12 @@ function filterwin.draw(ctx, state, res)
         action = actions.combine(action, { type = recovery.action })
       end
     end
-    if ui.closing or dismiss then
+    if ui.closing or dismiss or closed then
       action = actions.combine(action, finish_preset_focus(state.monitor_filter))
       ui.open, ui.closing = false, nil
     end
-    if reaper.ImGui_IsWindowFocused(ctx) and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then
+    if closed or (reaper.ImGui_IsWindowFocused(ctx)
+        and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape())) then
       filterwin.close(); focus.request()
     end
     reaper.ImGui_End(ctx)

@@ -401,6 +401,9 @@ local HAS_CFG = reaper.SNM_GetIntConfigVar ~= nil
 -- rectangle. The cost is a handful of calls ONCE per drag (see `probe` below),
 -- not per frame.
 local HAS_HITTEST = reaper.GetTrackFromPoint ~= nil and reaper.GetThingFromPoint ~= nil
+local os_name = reaper.GetOS and reaper.GetOS() or ""
+-- Track offsets run downward, but native macOS screen Y runs upward.
+local NATIVE_Y_DIRECTION = (os_name:match("^OSX") or os_name:match("^macOS")) and -1 or 1
 
 -- One fixed screen-pixel height for both the painted strip and its hit area.
 -- Keeping those two the same means the picture never advertises a different
@@ -421,13 +424,18 @@ end
 -- that still hit-tests to this track. Bounded by the track's own height, so it
 -- settles in about eight steps whatever the zoom.
 local function probe_track_top(mx, my, track, height)
-  local lo, hi = my - math.ceil(height) - 1, my
+  local screen_y = my * NATIVE_Y_DIRECTION
+  local lo, hi = screen_y - math.ceil(height) - 1, screen_y
   for _ = 1, 12 do
     if hi - lo <= 1 then break end
     local mid = (lo + hi) // 2
-    if reaper.GetTrackFromPoint(mx, mid) == track then hi = mid else lo = mid end
+    if reaper.GetTrackFromPoint(mx, mid * NATIVE_Y_DIRECTION) == track then
+      hi = mid
+    else
+      lo = mid
+    end
   end
-  return hi
+  return hi * NATIVE_Y_DIRECTION
 end
 
 -- One edge of the arrange, found the same way against GetThingFromPoint's
@@ -460,7 +468,7 @@ local function probe_arrange(mx, my, track, height)
   local top = probe_track_top(mx, my, track, height)
   local tcpy = reaper.GetMediaTrackInfo_Value(track, "I_TCPY")
   return {
-    origin_y = top - tcpy,               -- screen Y of the arrange's own top
+    origin_y = top - tcpy * NATIVE_Y_DIRECTION,
     left  = probe_edge(my, -20000, mx),  -- close in from off the left of the desktop
     right = probe_edge(my,  20000, mx),  -- ...and from off the right
   }
@@ -490,12 +498,12 @@ function dragout.newtrack_zone(target)
   if probe.right - probe.left < 1 then return nil end -- the probe found nothing usable
 
   local ty = reaper.GetMediaTrackInfo_Value(target.track, "I_TCPY")
-  local top = probe.origin_y + ty
-  local into = my - top
+  local top = probe.origin_y + ty * NATIVE_Y_DIRECTION
+  local into = (my - top) * NATIVE_Y_DIRECTION
   local slice = dragout.NEW_TRACK_HEIGHT
   if into < 0 or into >= slice then return nil end
   return { track = target.track, x = probe.left, y = top,
-           w = probe.right - probe.left, h = slice }
+           w = probe.right - probe.left, h = slice, y_direction = NATIVE_Y_DIRECTION }
 end
 
 ---------------------------------------------------------------- the real drop

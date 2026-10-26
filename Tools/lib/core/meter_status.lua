@@ -1,6 +1,8 @@
 -- Translate adapter states without exposing internal identifiers in the panel.
 local status={}
 local errors={
+  initializing='Starting meter…',
+  startup_failed='The meter did not start. Check that Monitor FX and Reaper’s audio device are running, then choose Reconnect.',
   insert_failed='Reaper could not load its stock Loudness Meter. Check that it is installed, then reconnect.',
   crest_insert_failed='Reaper could not load the yb-Reference meter. Close and reopen yb-Reference, then reconnect. If this continues, check yb-Reference_Meter.jsfx in Reaper’s Effects/yb-Reference folder.',
   parameters_missing='The installed meter has different controls. Update Reaper, then reconnect.',

@@ -73,27 +73,32 @@ function window.draw(ctx, state, res)
   state.reference_panel_mode = geometry.intended
   local display_frames, prototype_meter_geometry
   if prototype then
+    local ruler_users={waveform=true,spectrum=true,loudness=true}
     display_frames = surface_layout.measure(geometry.panels, 0,
-      M.RULER_H, M.WAVE_MIN_H)
-    local inset = 0
+      M.RULER_H, M.WAVE_MIN_H,ruler_users)
+    local meter_frame, meter_splits
     if state.metering then
       for _, pane in ipairs(geometry.panels) do
         if pane.id == 'loudness' then
           local variant = state.layout_prototype.active
-          local splits = state.layout_meter_splits and state.layout_meter_splits[variant]
+          meter_splits = state.layout_meter_splits and state.layout_meter_splits[variant]
+          meter_frame=pane
           prototype_meter_geometry = meter_panel.measure(pane.w, pane.h,
-            state.metering.prefs, nil, splits, display_frames[pane.id].footer_height)
-          inset = meter_panel.surface_left_inset(prototype_meter_geometry,
-            pane.w, pane.h, state.metering.prefs)
+            state.metering.prefs, nil, meter_splits, display_frames[pane.id].footer_height,ctx)
+          ruler_users.loudness=not prototype_meter_geometry.numeric
           break
         end
       end
     end
-    display_frames = surface_layout.measure(geometry.panels, inset,
-      M.RULER_H, M.WAVE_MIN_H)
+    display_frames = surface_layout.measure(geometry.panels, 0,
+      M.RULER_H, M.WAVE_MIN_H,ruler_users)
+    if meter_frame then
+      prototype_meter_geometry=meter_panel.measure(meter_frame.w,meter_frame.h,
+        state.metering.prefs,nil,meter_splits,display_frames.loudness.footer_height,ctx)
+      prototype_meter_geometry.surface_painted=true
+    end
   end
   local stop = walkthrough.current(state.walkthrough)
-  walkthrough_ui.note_rect(ctx, state.walkthrough, 'layout', x, y, x+width, y+geometry.visual_h)
   local panel_action, input = (prototype or panels).input(ctx, state, geometry, x, y, width)
   action = action or panel_action
   if input.blocked then
@@ -114,6 +119,12 @@ function window.draw(ctx, state, res)
       reaper.ImGui_PushClipRect(ctx, x+pane.x, y+pane.y,
         x+pane.x+pane.w, y+pane.y+pane.h, true)
     end
+    if prototype then
+      -- All four surfaces use their complete frame; scales stay inside that edge.
+      reaper.ImGui_DrawList_AddRectFilled(reaper.ImGui_GetWindowDrawList(ctx),
+        px,py,px+display.w,py+display.h-(display.footer_height or 0),
+        theme.tokens.STEREO_BG,3*theme.scale)
+    end
     if pane.id == 'waveform' then
       local ruler = display.h-M.RULER_H >= M.WAVE_MIN_H
       if display.footer_height ~= nil then ruler = display.footer_height > 0 end
@@ -124,7 +135,8 @@ function window.draw(ctx, state, res)
           view=state.wave_view, detail=state.wave_detail, navigation=true,
           modifiers=state.mouse_modifiers,
           trim_db=state.selected and state.selected.trim_db or 0,
-          ruler=ruler, duration=state.selected and state.selected.duration or nil,
+          ruler=ruler, background_painted=prototype~=nil,
+          duration=state.selected and state.selected.duration or nil,
           span_edit=true, input_exclusion=exclusion,
           span_start=state.selected and state.selected.span_start or nil,
           span_end=state.selected and state.selected.span_end or nil})
@@ -134,7 +146,7 @@ function window.draw(ctx, state, res)
     elseif pane.id == 'spectrum' then
       spectrum_visible = true
       local spectrum_action = spectrum.draw(ctx, state, display.w, display.h, res, exclusion,
-        display.footer_height)
+        display.footer_height,prototype~=nil)
       action = action or spectrum_action
       walkthrough_ui.note_rect(ctx, state.walkthrough, 'spectrum', px, py,
         px+display.w, py+display.h)
@@ -170,7 +182,7 @@ function window.draw(ctx, state, res)
     reaper.ImGui_PopStyleVar(ctx)
   end
   (prototype or panels).paint(ctx, geometry, input, x, y, res,
-    type(stop)=='table' and stop.id=='layout')
+    type(stop)=='table' and stop.id=='pin')
   if regions and regions.meters then
     local r=regions.meters
     local meter_geometry
@@ -178,7 +190,7 @@ function window.draw(ctx, state, res)
     if regions.mode=='horizontal' and geometry.mode=='vertical' and first and first.id=='waveform' then
       local variant=state.layout_prototype and state.layout_prototype.active or 'default'
       local splits=state.layout_meter_splits and state.layout_meter_splits[variant]
-      meter_geometry=meter_panel.measure(r.w,r.h,state.metering.prefs,first.h,splits)
+      meter_geometry=meter_panel.measure(r.w,r.h,state.metering.prefs,first.h,splits,nil,ctx)
     end
     local meter_action,mx0,my0,mx1,my1=meter_panel.draw(ctx,state,res,
       outer_x+r.x,outer_y+r.y,r.w,r.h,meter_geometry)

@@ -134,17 +134,17 @@ local function update_loudness_peak(state, key, value, dt, fresh)
   if remaining <= 1e-9 then state.loudness_peak[key] = nil end
 end
 
-local function append_history(state, m, s, i)
+local function append_history(state, t, m, s, i)
   local index = (state.history_head + state.history_count - 1) % HISTORY_LIMIT + 1
   local point = state.history[index] or {}
-  point.t, point.m, point.s, point.i = state.elapsed, m, s, i
+  point.t, point.m, point.s, point.i = t, m, s, i
   state.history[index] = point
   if state.history_count < HISTORY_LIMIT then
     state.history_count = state.history_count + 1
   else
     state.history_head = state.history_head % HISTORY_LIMIT + 1
   end
-  state.last_history_t = state.elapsed
+  state.last_history_t = t
 end
 
 function session.history_at(state, index)
@@ -266,7 +266,9 @@ function session.update(state, snapshot, dt)
   }
   state.values = values
   state.valid = true
+  state.m_max = higher(state.m_max, reading(snapshot.m_max))
   state.m_max = higher(state.m_max, values.m)
+  state.s_max = higher(state.s_max, reading(snapshot.s_max))
   state.s_max = higher(state.s_max, values.s)
   state.tp_max = higher(state.tp_max, values.tp_max)
   local publication = snapshot.lra_seconds or snapshot.sequence
@@ -277,11 +279,19 @@ function session.update(state, snapshot, dt)
   update_peak_hold(state, 'l', reading(snapshot[peak_fields.peak..'l']), peak_dt, fresh_publication, snapshot[peak_fields.age..'l'])
   update_peak_hold(state, 'r', reading(snapshot[peak_fields.peak..'r']), peak_dt, fresh_publication, snapshot[peak_fields.age..'r'])
 
-  -- Keep every observed audio timestamp. A transient drawn only as a live tip
-  -- disappears on the next frame if it falls between archived samples.
-  local history_step = audio_seconds and 0.01 or HISTORY_STEP
-  if state.elapsed - state.last_history_t + 1e-9 >= history_step then
-    append_history(state, values.m, values.s, values.i)
+  if type(snapshot.history) == 'table' then
+    -- The helper records each measured window. Missing windows remain a gap.
+    for _, point in ipairs(snapshot.history) do
+      if type(point.t) == 'number' and point.t > state.last_history_t + 1e-9 then
+        append_history(state, point.t, reading(point.m), reading(point.s), reading(point.i))
+      end
+    end
+  else
+    -- Older standalone session callers only provide a current reading.
+    local history_step = audio_seconds and 0.01 or HISTORY_STEP
+    if state.elapsed - state.last_history_t + 1e-9 >= history_step then
+      append_history(state, state.elapsed, values.m, values.s, values.i)
+    end
   end
   return state
 end

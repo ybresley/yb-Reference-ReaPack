@@ -28,6 +28,7 @@
 local update_check = require("core.update_check")
 
 local changelog = {}
+local REAPACK_DIVIDER = string.rep("-", 48)
 
 -- The separators an entry's area word can be followed by, longest first. Written
 -- as byte strings rather than pasted characters so it is obvious each is ONE
@@ -245,6 +246,14 @@ function changelog.reapack_lines(release, width)
     end
   end
 
+  -- ReaPack writes the next version heading immediately after these notes.
+  -- Non-breaking spaces keep both blank rows through its whitespace trimming.
+  if #out > 0 then
+    out[#out + 1] = spacer
+    out[#out + 1] = REAPACK_DIVIDER
+    out[#out + 1] = spacer
+  end
+
   return out
 end
 
@@ -256,7 +265,8 @@ function changelog.from_catalog(record)
   for line in ((record.text or "") .. "\n"):gmatch("(.-)\r?\n") do
     local normalized = line:gsub("\u{00A0}", " ")
     local leading, clean = normalized:match("^(%s*)(.-)%s*$")
-    if clean ~= "" then
+    -- The native report's divider is presentation, not release-note content.
+    if clean ~= "" and clean ~= REAPACK_DIVIDER then
       local heading
       for _, name in ipairs(changelog.GROUP_ORDER) do
         if #leading == 0 and clean:lower() == name:lower() then heading = name; break end

@@ -39,11 +39,15 @@ function anchored_panel.work_area(ctx, res, anchor)
   local cy = (anchor.top + anchor.bottom) * 0.5
   local nx, ny = reaper.ImGui_PointConvertNative(ctx, cx, cy, true)
   local left, top, right, bottom = res.monitor_work_area(nx, ny)
+  left, right = math.min(left, right), math.max(left, right)
+  top, bottom = math.min(top, bottom), math.max(top, bottom)
   -- Use points just inside the monitor. An exact shared edge can select the
   -- neighbouring monitor's DPI during conversion.
   left, top = reaper.ImGui_PointConvertNative(ctx, left + 1, top + 1)
   right, bottom = reaper.ImGui_PointConvertNative(ctx, right - 1, bottom - 1)
-  return { left = left, top = top, right = right, bottom = bottom }
+  -- macOS native Y runs upward; converted corners can exchange top and bottom.
+  return { left = math.min(left, right), top = math.min(top, bottom),
+    right = math.max(left, right), bottom = math.max(top, bottom) }
 end
 
 function anchored_panel.place(ctx, res, anchor, spec)

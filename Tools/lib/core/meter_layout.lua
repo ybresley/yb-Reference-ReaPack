@@ -137,6 +137,13 @@ function layout.calculate(width,height,options)
   local result={}
   local readings_w=(options.readings_width or 0)*s
   local minimum=(loudness and lr) and 312 or (loudness and 210 or (lr and 130 or 160))
+  local compact=options.compact_meters==true and (loudness or lr)
+  if compact then
+    show_history=false
+    readings_w=0
+    if options.show_history~=false then result.history_hidden=true end
+    if options.show_readings~=false then result.readings_hidden=true end
+  end
   local position=options.history_position or 'Automatic'
   local history_min=height<230*s and 170 or 220
   if position=='Beside Meters' then
@@ -208,13 +215,21 @@ function layout.calculate(width,height,options)
   end
 
   if loudness and lr then
-    local loudness_w=math.min(math.floor((meter_w-gap)*.68),math.max(0,meter_w-gap-132*s))
+    local loudness_w
+    if compact then
+      -- Compact groups share five equal lanes and keep scales at the outside edges.
+      local lane=math.max(0,(meter_w-gap-67*s)/5)
+      loudness_w=math.min(math.max(0,meter_w-gap),32*s+lane*3)
+    else
+      loudness_w=math.min(math.floor((meter_w-gap)*.68),math.max(0,meter_w-gap-132*s))
+    end
     result.loudness=rect(0,0,loudness_w,meter_h)
     result.lr=rect(loudness_w+gap,0,meter_w-loudness_w-gap,meter_h)
   elseif loudness then result.loudness=rect(0,0,meter_w,meter_h)
   elseif lr then result.lr=rect(0,0,meter_w,meter_h) end
 
-  local splits=options.splits
+  -- The saved arrangement returns when space permits; compression never rewrites it.
+  local splits=not compact and options.splits or nil
   local content_history_min=result.history and result.history.y>0 and 160 or history_min
   local slot_content
   if splits and splits.order then
