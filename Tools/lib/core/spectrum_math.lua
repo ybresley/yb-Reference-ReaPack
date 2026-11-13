@@ -1,14 +1,14 @@
 -- Pure display maths for the spectrum analyser.
 --
--- The audio-side helper publishes decibel values. This module owns the display
--- response, power average, peak hold and graph mapping so the JSFX stays small
--- and predictable. It has no REAPER dependency and is covered by focused specs.
+-- The audio-side helper publishes decibel values and owns the Average history.
+-- This module owns the Live display response and graph mapping so the JSFX
+-- stays small and predictable. It has no REAPER dependency and is covered by
+-- focused specs.
 
 local spectrum_math = {}
 
 local LN10 = math.log(10)
 local LN2 = math.log(2)
-local FINITE_AVERAGE_FALLOFF_RATE = math.log(100)
 
 local function clamp(value, low, high)
   if value < low then return low end
@@ -44,48 +44,16 @@ function spectrum_math.new(bin_count, floor_db)
     live = {},
     live_power = {},
     live_motion_mode = nil,
-    average_power = {},
-    peak = {},
-    peak_display = {},
-    peak_scratch = {},
-    peak_age = {},
     ready = false,
+    -- Set by the Spectrum model when the helper's Average history is usable.
     average_ready = false,
-    average_elapsed = 0,
-    peak_ready = false,
   }
   local floor_power = spectrum_math.db_to_power(floor_db)
   for i = 1, bin_count do
     state.live[i] = floor_db
     state.live_power[i] = floor_power
-    state.average_power[i] = floor_power
-    state.peak[i] = floor_db
-    state.peak_display[i] = floor_db
-    state.peak_scratch[i] = floor_db
-    state.peak_age[i] = 0
   end
   return state
-end
-
-local function smooth_neighbours(source, destination, count)
-  if count == 1 then
-    destination[1] = source[1]
-    return
-  end
-
-  destination[1] = (source[1] * 3 + source[2]) * 0.25
-  for i = 2, count - 1 do
-    destination[i] = (source[i - 1] + source[i] * 2 + source[i + 1]) * 0.25
-  end
-  destination[count] = (source[count - 1] + source[count] * 3) * 0.25
-end
-
-local function update_peak_display(state)
-  -- Peak timers are independent per frequency. Two bounded neighbour passes
-  -- soften the one-bin steps where adjacent holds expire on different frames,
-  -- without feeding the softened result back into the measured peak history.
-  smooth_neighbours(state.peak, state.peak_scratch, state.bin_count)
-  smooth_neighbours(state.peak_scratch, state.peak_display, state.bin_count)
 end
 
 -- Rebuild a stopped trace from one fixed audio snapshot. Using total elapsed
@@ -104,45 +72,13 @@ function spectrum_math.decay_power_trace(source, destination, count, floor_db,
   end
 end
 
--- Peak Hold keeps a separate age for every frequency. Only the part of the
--- stopped interval beyond that frequency's remaining hold time releases it.
-function spectrum_math.decay_peak_trace(source, ages, raw_destination,
-    display_destination, scratch, count, floor_db, elapsed_seconds,
-    hold_seconds, release_seconds)
-  local elapsed = math.max(0, tonumber(elapsed_seconds) or 0)
-  local hold = math.max(0, tonumber(hold_seconds) or 0)
-  local release = math.max(0.01, tonumber(release_seconds) or 1.2)
-  for i = 1, count do
-    local age = math.max(0, tonumber(ages[i]) or 0)
-    local before = math.max(0, age - hold)
-    local after = math.max(0, age + elapsed - hold)
-    local releasing = after - before
-    local source_db = source[i] or floor_db
-    raw_destination[i] = floor_db
-      + (source_db - floor_db) * math.exp(-releasing / release)
-  end
-  smooth_neighbours(raw_destination, scratch, count)
-  smooth_neighbours(scratch, display_destination, count)
-end
-
--- Update without allocating. Average time and peak hold may be math.huge for an
--- accumulating trace that lasts until the user resets it.
+-- Move the Live trace toward its target without allocating.
 function spectrum_math.update(state, target_db, dt, options)
   options = options or {}
   dt = clamp(tonumber(dt) or 0, 0, 0.5)
   local attack_seconds = math.max(0.001, tonumber(options.attack_seconds) or 0.012)
   local release_seconds = math.max(0.001, tonumber(options.release_seconds) or 0.20)
   local motion_mode = options.motion_mode == "power" and "power" or "db"
-  local average_seconds = options.average_seconds
-  if average_seconds ~= nil and average_seconds ~= math.huge then
-    average_seconds = math.max(0.01, tonumber(average_seconds) or 1)
-  end
-  local peak_hold_seconds = options.peak_hold_seconds
-  if peak_hold_seconds ~= nil and peak_hold_seconds ~= math.huge then
-    peak_hold_seconds = math.max(0, tonumber(peak_hold_seconds) or 1)
-  end
-  local peak_release_seconds = math.max(0.01,
-    tonumber(options.peak_release_seconds) or 1.2)
 
   if not state.ready then
     for i = 1, state.bin_count do
@@ -174,90 +110,14 @@ function spectrum_math.update(state, target_db, dt, options)
     end
   end
   state.live_motion_mode = motion_mode
-
-  if average_seconds ~= nil then
-    if not state.average_ready then
-      for i = 1, state.bin_count do
-        state.average_power[i] = spectrum_math.db_to_power(target_db[i] or state.floor_db)
-      end
-      state.average_ready = true
-      state.average_elapsed = math.max(dt, 1 / 60)
-    elseif average_seconds == math.huge then
-      local elapsed = state.average_elapsed
-      local next_elapsed = elapsed + dt
-      local amount = next_elapsed > 0 and dt / next_elapsed or 0
-      for i = 1, state.bin_count do
-        local target_power = spectrum_math.db_to_power(target_db[i] or state.floor_db)
-        local current = state.average_power[i]
-        state.average_power[i] = current + (target_power - current) * amount
-      end
-      state.average_elapsed = next_elapsed
-    else
-      -- Professional spectrum ballistics commonly define Average time as the
-      -- time required to fall by 20 dB. The same power-domain coefficient makes
-      -- a rising step reach 99% within the selected period.
-      local amount = 1 - math.exp(
-        -dt * FINITE_AVERAGE_FALLOFF_RATE / average_seconds)
-      for i = 1, state.bin_count do
-        local target_power = spectrum_math.db_to_power(target_db[i] or state.floor_db)
-        local current = state.average_power[i]
-        state.average_power[i] = current + (target_power - current) * amount
-      end
-    end
-  end
-
-  if peak_hold_seconds ~= nil then
-    if not state.peak_ready then
-      for i = 1, state.bin_count do
-        state.peak[i] = target_db[i] or state.floor_db
-        state.peak_age[i] = 0
-      end
-      state.peak_ready = true
-    else
-      for i = 1, state.bin_count do
-        local target = target_db[i] or state.floor_db
-        if target >= state.peak[i] then
-          state.peak[i] = target
-          state.peak_age[i] = 0
-        else
-          local age = state.peak_age[i] + dt
-          state.peak_age[i] = age
-          if peak_hold_seconds ~= math.huge and age > peak_hold_seconds then
-            -- A fixed dB-per-second fall makes the captured outline descend as
-            -- one rigid shape. Returning each point toward its current live
-            -- target keeps the hold legible without the mechanical motion.
-            local amount = 1 - math.exp(-dt / peak_release_seconds)
-            local released = state.peak[i] + (target - state.peak[i]) * amount
-            state.peak[i] = math.max(target, released)
-          end
-        end
-      end
-    end
-    update_peak_display(state)
-  end
-end
-
-function spectrum_math.average_db(state, index)
-  return spectrum_math.power_to_db(state.average_power[index], state.floor_db)
 end
 
 function spectrum_math.reset_average(state)
   state.average_ready = false
-  state.average_elapsed = 0
-end
-
-function spectrum_math.reset_peak(state)
-  state.peak_ready = false
 end
 
 function spectrum_math.reset_history(state)
   spectrum_math.reset_average(state)
-  spectrum_math.reset_peak(state)
-end
-
-function spectrum_math.reset_all(state)
-  state.ready = false
-  spectrum_math.reset_history(state)
 end
 
 function spectrum_math.bin_frequency(index, bin_count, low_hz, high_hz)

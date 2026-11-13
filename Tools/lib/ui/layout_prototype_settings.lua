@@ -7,12 +7,11 @@ local T, M = theme.tokens, theme.metrics
 
 local prototype_settings = {}
 local PANELS = {
-  {id='waveform', label='Waveform', icon='audio-waveform'},
   {id='spectrum', label='Spectrum', icon='chart-no-axes-column'},
   {id='stereo', label='Stereo', icon='diamond'},
   {id='loudness', label='Loudness', icon='gauge'},
 }
-local NAMES = {waveform='Waveform', spectrum='Spectrum', stereo='Stereo', loudness='Loudness'}
+local NAMES = {spectrum='Spectrum', stereo='Stereo', loudness='Loudness'}
 local APPROACHES = {
   {id='automatic', label='Automatic'},
   {id='map', label='Layout Map'},
@@ -113,8 +112,9 @@ local function panel_choices(ctx, variant, begin_setting, setting_label, icon_fo
     min_width = math.max(min_width, label_width)
   end
   min_width = min_width + M.FRAME_PAD_X*4
-  local columns = width >= min_width*4+gap*3 and 4
-    or (width >= min_width*2+gap and 2 or 1)
+  -- One row when every choice fits, otherwise one column.
+  local n = #PANELS
+  local columns = width >= min_width*n+gap*(n-1) and n or 1
   local button_width = (width-gap*(columns-1))/columns
   local result
   for i, panel in ipairs(PANELS) do

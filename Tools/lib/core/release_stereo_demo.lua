@@ -3,15 +3,17 @@ local stereo = require('core.stereo')
 
 local demo = {}
 demo.duration = 4
-demo.clear_at = 1.2
 demo.customization_duration = 5.4
 
 local alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 local decode = {}
 for i = 1, #alphabet do decode[alphabet:byte(i)] = i - 1 end
 
-local function ease(value)
+-- With Interface Animations off a demo still plays its steps, but each move
+-- lands at once instead of gliding there.
+local function ease(value, still)
   value = math.max(0, math.min(1, value))
+  if still then return value > 0 and 1 or 0 end
   return value * value * (3 - 2 * value)
 end
 
@@ -48,16 +50,13 @@ end
 
 function demo.new(source)
   return {packets=packets_from_source(source), sample_rate=source.sample_rate,
-    model=stereo.new(), polar_model=stereo.new(), cycle=-1, last_packet=0, cleared=false}
+    model=stereo.new(), polar_model=stereo.new(), cycle=-1, last_packet=0}
 end
 
-function demo.scene(topic, elapsed)
+function demo.scene(topic, elapsed, still)
   local duration = topic == 'stereo_customization' and demo.customization_duration or demo.duration
   local phase = math.max(0, elapsed or 0) % duration
-  local result = {
-    view=topic == 'stereo_polar' and 'polar_sample' or 'lissajous',
-    phase=phase,
-  }
+  local result = {view='lissajous', phase=phase}
   if topic == 'stereo_customization' then
     local from, to, start, travel
     if phase < .8 then from, to, start, travel = 'home', 'show_correlation', 0, .8
@@ -66,7 +65,7 @@ function demo.scene(topic, elapsed)
     elseif phase < 3.9 then from, to, start, travel = 'brightness_100', 'brightness_150', 3, .9
     else from, to = 'brightness_150', 'brightness_150' end
     result.from, result.to = from, to
-    result.progress = from == to and 1 or ease((phase - start) / travel)
+    result.progress = from == to and 1 or ease((phase - start) / travel, still)
     result.show_correlation = phase >= .8
     if phase < 3 then result.brightness = 1
     elseif phase < 3.9 then result.brightness = mix(1, 1.5, result.progress)
@@ -78,33 +77,21 @@ function demo.scene(topic, elapsed)
     end
     return result
   end
-  if topic ~= 'stereo_clear' then return result end
-  local start_x, start_y = .84, .81
-  local target_x, target_y = .57, .55
-  local amount
-  if phase < .7 then amount = ease(phase / .7)
-  elseif phase < 2.6 then amount = 1
-  elseif phase < 3.35 then amount = 1 - ease((phase - 2.6) / .75)
-  else amount = 0 end
-  result.pointer_x = mix(start_x, target_x, amount)
-  result.pointer_y = mix(start_y, target_y, amount)
-  result.click = phase >= demo.clear_at and phase < demo.clear_at + .28
-    and (phase - demo.clear_at) / .28 or nil
   return result
 end
 
-function demo.advance(value, topic, elapsed)
+function demo.advance(value, topic, elapsed, still)
   elapsed = math.max(0, elapsed or 0)
   local cycle = math.floor(elapsed / demo.duration)
-  local scene = demo.scene(topic, elapsed)
+  local scene = demo.scene(topic, elapsed, still)
   if value.last_elapsed and elapsed < value.last_elapsed then
     value.model = stereo.new()
     value.polar_model = stereo.new()
-    value.cycle, value.last_packet, value.cleared = -1, 0, false
+    value.cycle, value.last_packet = -1, 0
   end
   if cycle ~= value.cycle then
     -- Replaying the same source keeps the scope's fading history across loops.
-    value.cycle, value.last_packet, value.cleared = cycle, 0, false
+    value.cycle, value.last_packet = cycle, 0
   end
   value.last_elapsed = elapsed
 
@@ -113,12 +100,6 @@ function demo.advance(value, topic, elapsed)
     local at = packet.at + cycle * demo.duration
     -- Bootstrap the first picture immediately; later captures keep source time.
     if index > 1 and at > elapsed then break end
-    if topic == 'stereo_clear' and not value.cleared
-        and scene.phase >= demo.clear_at and packet.at >= demo.clear_at then
-      stereo.clear_display(value.model)
-      stereo.clear_display(value.polar_model)
-      value.cleared = true
-    end
     local capture = {
       count=packet.count, left=packet.left, right=packet.right,
       sequence=cycle * #value.packets + index, epoch=1, at=at,
@@ -131,12 +112,6 @@ function demo.advance(value, topic, elapsed)
     stereo.update(value.model, capture, source)
     if topic == 'stereo_overview' then stereo.update(value.polar_model, capture, source) end
     value.last_packet = index
-  end
-  if topic == 'stereo_clear' and scene.phase >= demo.clear_at
-      and not value.cleared then
-    stereo.clear_display(value.model)
-    stereo.clear_display(value.polar_model)
-    value.cleared = true
   end
   value.model.now = math.max(elapsed, value.packets[1].at + cycle * demo.duration)
   value.polar_model.now = value.model.now

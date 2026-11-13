@@ -1,11 +1,19 @@
 -- Meter controls share the filter's named memory because ReaScript has only one
 -- current attachment. Its control and history regions are below Stereo packets.
 local control = {}
-local NAME, BASE, PROTOCOL = 'yb_reference_monitor_filter_v1', 140000, 2
+local NAME, BASE, PROTOCOL = 'yb_reference_monitor_filter_v1', 140000, 4
 local LEASE_SECONDS, COUNTER_LIMIT = 2, 1000000000
 local SLOT = { protocol=0, active=1, session=2, heartbeat=3, token=4,
   revision=5, capture_mode=6, reset_request=7, reset_policy=8,
-  loop_start=9, loop_end=10, loop_enabled=11, owner_time=12 }
+  loop_start=9, loop_end=10, loop_enabled=11, owner_time=12,
+  channel_count=14, layout_known=15, layout_revision=16,
+  weight_1=17, weight_2=18, weight_3=19, weight_4=20,
+  weight_5=21, weight_6=22, weight_7=23, weight_8=24,
+  output_1=25, output_2=26, output_3=27, output_4=28,
+  output_5=29, output_6=30, output_7=31, output_8=32,
+  -- Speaker pairs the Surround Field draws. Helpers that predate it ignore it.
+  pair_mask=33 }
+local PAIR_MASK_LIMIT = 2^28
 
 local function finite(value)
   return type(value) == 'number' and value == value and math.abs(value) < math.huge
@@ -64,7 +72,12 @@ function control.new(R)
     local previous = read('session')
     self.session, self.token = previous % (COUNTER_LIMIT - 1) + 1, token
     values = { capture_mode=2, reset_request=0, reset_policy=7,
-      loop_start=0, loop_end=0, loop_enabled=0, active=false }
+      loop_start=0, loop_end=0, loop_enabled=0, active=false,
+      channel_count=2, layout_known=1, layout_revision=0,
+      weight_1=1, weight_2=1, weight_3=0, weight_4=0,
+      weight_5=0, weight_6=0, weight_7=0, weight_8=0,
+      output_1=1, output_2=2, output_3=3, output_4=4,
+      output_5=5, output_6=6, output_7=7, output_8=8, pair_mask=0 }
     -- No audio work begins until capture publishes the initial complete controls.
     if not write('active', 0) or not write('token', token)
       or not write('session', self.session) then return fail() end
@@ -81,13 +94,35 @@ function control.new(R)
       next_values[key] = value
     end
     if type(next_values.active) ~= 'boolean'
-      or not counter(next_values.capture_mode) or next_values.capture_mode > 2
+      or not counter(next_values.capture_mode) or next_values.capture_mode > 3
       or not counter(next_values.reset_request)
       or not counter(next_values.reset_policy) or next_values.reset_policy > 7
       or not finite(next_values.loop_start) or next_values.loop_start < 0 or next_values.loop_start > 1e9
       or not finite(next_values.loop_end) or next_values.loop_end < 0 or next_values.loop_end > 1e9
       or (next_values.loop_enabled ~= 0 and next_values.loop_enabled ~= 1) then
       return false, 'configuration_failed'
+    end
+    if not counter(next_values.channel_count) or next_values.channel_count<1
+      or next_values.channel_count>8 or not counter(next_values.layout_revision)
+      or (next_values.layout_known~=0 and next_values.layout_known~=1) then
+      return false, 'configuration_failed'
+    end
+    if not counter(next_values.pair_mask) or next_values.pair_mask >= PAIR_MASK_LIMIT then
+      return false, 'configuration_failed'
+    end
+    local selected = {}
+    for channel=1,8 do
+      local output=next_values['output_'..channel]
+      if not counter(output) or output<1 or output>128 then return false,'configuration_failed' end
+      if channel<=next_values.channel_count then
+        if selected[output] then return false,'configuration_failed' end
+        selected[output]=true
+      end
+      local weight=next_values['weight_'..channel]
+      if weight~=0 and weight~=1 and weight~=1.41 then return false, 'configuration_failed' end
+      if (channel>next_values.channel_count or next_values.layout_known==0) and weight~=0 then
+        return false, 'configuration_failed'
+      end
     end
     local revision = read('revision')
     if not counter(revision) then return fail() end
@@ -117,7 +152,10 @@ function control.new(R)
     if not connect() then return false, 'configuration_failed' end
     -- A timed-out window may finish after another window has taken ownership.
     if owns() then
-      if not write('active', 0) or not write('owner_time', -1) then return fail() end
+      -- Clear the pair mask too: a build that predates it never writes the slot,
+      -- and would otherwise leave the helper measuring this window's pairs.
+      if not write('active', 0) or not write('owner_time', -1)
+        or not write('pair_mask', 0) then return fail() end
     end
     self.session, self.token, values = nil, nil, nil
     return true

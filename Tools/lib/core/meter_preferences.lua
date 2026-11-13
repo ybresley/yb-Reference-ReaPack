@@ -18,6 +18,11 @@ preferences.OPTIONS = {
   lr_contents = { 'RMS + Peak', 'Peak Only', 'RMS Only' },
   peak_measurement = { 'Sample Peak', 'True Peak' },
   target_difference_measurement = { 'Integrated', 'Momentary', 'Short-Term' },
+  -- The pair the Readings column keeps when it is too short for all three.
+  short_readings = { 'RMS + Target Diff', 'Crest Factor + Target Diff', 'Crest Factor + RMS' },
+  -- The readings a numeric Loudness panel keeps when it is too short for all four.
+  short_first = { 'i', 'tp', 's', 'm' },
+  short_second = { 'tp', 'i', 's', 'm' },
   lr_floor = { -48, -60, -90 },
   lr_hold = { 0, .5, 1.5, 3 },
   peak_fall = { 'Fast', 'Normal', 'Slow' },
@@ -60,6 +65,8 @@ function preferences.defaults()
     yellow_lead=5, red_span=3, lr_shading=true,
     auto_reset='On Play', keep_integrated=true,
     target_difference_measurement='Integrated',
+    short_readings='RMS + Target Diff',
+    short_first='i', short_second='tp',
     seek_reset='Keep Measuring', loop_reset='Accumulate' }
 end
 
@@ -101,14 +108,33 @@ local function fill_enabled(prefs)
     or (prefs.history_fill=='Integrated' and prefs.history_integrated)
 end
 
-local function validate(value)
+local function loudness_flags_off(prefs)
+  return not (prefs.show_m or prefs.show_s or prefs.show_i or prefs.show_lra)
+end
+
+-- `lenient` is for saved text: one value that is no longer allowed (a removed
+-- preset, a shortened option list) falls back to its default instead of
+-- discarding every other setting. Values the app is about to save stay strict.
+-- True when the chosen fill has a visible line to paint under.
+function preferences.fill_active(prefs)
+  return prefs.history_fill~='Off' and fill_enabled(prefs)
+end
+
+local function validate(value,lenient)
   if type(value)~='table' then return nil,'Saved meter settings are invalid.' end
   local result=preferences.defaults()
   for key in pairs(result) do
     if value[key]~=nil then
-      if not valid(key,value[key]) then return nil,'Saved meter settings are invalid.' end
-      result[key]=value[key]
+      if valid(key,value[key]) then
+        result[key]=value[key]
+      elseif not lenient then
+        return nil,'Saved meter settings are invalid.'
+      end
     end
+  end
+  -- A Loudness group with no readout selected would draw as an empty frame.
+  if result.show_loudness and loudness_flags_off(result) then
+    result.show_m,result.show_s,result.show_i,result.show_lra=true,true,true,true
   end
   if not has_content(result) then return nil,'Keep at least one meter display visible.' end
   if not has_trace(result) then return nil,'Keep at least one history line enabled.' end
@@ -169,7 +195,7 @@ function preferences.decode(text)
     return nil,'Saved meter settings use an unsupported version.'
   end
   if type(data.preferences)~='table' then return nil,'Saved meter settings are invalid.' end
-  return validate(migrate(data.preferences,data.version))
+  return validate(migrate(data.preferences,data.version),true)
 end
 
 function preferences.set(prefs,key,value)
@@ -227,7 +253,8 @@ end
 
 local PAGE_FIELDS = {
   Display={'show_meters','show_loudness','show_lr','show_history',
-    'history_position','extra_readings','target_difference_measurement'},
+    'history_position','extra_readings','target_difference_measurement','short_readings',
+    'short_first','short_second'},
   Loudness={'show_m','show_s','show_i','show_lra','show_target',
     'loudness_scale','range','readings','ms_hold','target','ceiling',
     'preset','tolerance'},

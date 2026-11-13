@@ -9,6 +9,8 @@ local categories = require("core.categories")
 
 local schema = {}
 
+schema.UNUSABLE_NAME_TEXT = "can't be used on this computer"
+
 -- Bump this whenever the stored shape changes; add a matching migration below.
 schema.VERSION = 5
 
@@ -164,10 +166,12 @@ local function check_records(list, what)
 end
 
 local NUMBER_FIELDS = {
-  -- The measurements (match arithmetic and the loudness sort compare them) and
-  -- the start/end points (playback and the handles do arithmetic on them).
+  -- The measurements (match arithmetic and the loudness sort compare them),
+  -- the start/end points (playback and the handles do arithmetic on them), and
+  -- trim, duration and channels (the column sorts compare them, and comparing a
+  -- number with text stops the script).
   "lufs_i", "lufs_m_max", "lufs_s_max", "true_peak", "peak", "rms",
-  "span_start", "span_end",
+  "span_start", "span_end", "trim_db", "duration", "channels",
 }
 
 local function check_sound_numbers(s)
@@ -175,6 +179,9 @@ local function check_sound_numbers(s)
     if s[field] ~= nil and type(s[field]) ~= "number" then
       error("a sound's " .. field .. " isn't a number (file is corrupt or was hand-edited)")
     end
+  end
+  if s.note ~= nil and type(s.note) ~= "string" then
+    error("a sound's note isn't text (file is corrupt or was hand-edited)")
   end
   -- Same forward-span rule pins.validate enforces: playback runs start -> end,
   -- so a pair that doesn't describe a forward stretch would give it nothing.
@@ -219,18 +226,48 @@ function schema.validate(data)
     if c.parent ~= nil then
       error("a category still has a parent (file is corrupt or was hand-edited)")
     end
+    if type(c.name) ~= "string" then
+      error("a category has no name (file is corrupt or was hand-edited)")
+    end
   end
   for _, s in ipairs(data.sounds) do
     if s.subcategory ~= nil then
       error("a sound still has a sub-category (file is corrupt or was hand-edited)")
     end
-    if not importer.is_safe_filename(s.filename) then
+    if type(s.name) ~= "string" then
+      error("a sound has no name (file is corrupt or was hand-edited)")
+    end
+    if not importer.is_stored_filename(s.filename) then
+      -- A name that stays inside the folder but breaks this system's rules is a
+      -- different problem from a corrupt one, and has a different remedy.
+      local f = s.filename
+      if type(f) == "string" and f ~= "" and f ~= "." and f ~= ".."
+          and not f:find("[\\/]") and not f:find("%c") then
+        error("a sound's stored file name (" .. f .. ") " .. schema.UNUSABLE_NAME_TEXT)
+      end
       error("a sound's stored file name (" .. tostring(s.filename) ..
         ") isn't a plain file name inside the library folder (file is corrupt or was hand-edited)")
     end
     check_sound_numbers(s)
   end
   return data
+end
+
+-- File any sound whose category no longer exists as Uncategorised. Only a hand-
+-- edited or damaged file can hold such a link, and left alone the sound would
+-- vanish from every view except All sounds while the sidebar counted it under
+-- Uncategorised. Returns true when anything changed, so the caller saves the
+-- repair the same way it saves a migration.
+function schema.clear_missing_categories(data)
+  local known, changed = {}, false
+  for _, c in ipairs(data.categories) do known[c.id] = true end
+  for _, s in ipairs(data.sounds) do
+    if s.category ~= nil and not known[s.category] then
+      s.category = nil
+      changed = true
+    end
+  end
+  return changed
 end
 
 -- Bring a loaded library up to the current version, or raise a clear error.

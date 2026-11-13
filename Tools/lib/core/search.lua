@@ -4,6 +4,8 @@
 --
 -- Pure Lua. Filing stores one category id on each sound.
 
+local fold = require("core.text_fold")
+
 local search = {}
 
 -- A view is one of:
@@ -22,31 +24,37 @@ local function in_view(s, view)
   return true -- "all" (or anything unrecognised) shows everything
 end
 
--- Name/note substring match, case-insensitive. Empty query matches everything.
--- Plain find (no pattern magic) so a query like "hit (2)" behaves literally.
-local function in_text(s, query)
-  if query == nil or query == "" then return true end
-  local q = query:lower()
-  return ((s.name or ""):lower():find(q, 1, true) ~= nil)
-    or ((s.note or ""):lower():find(q, 1, true) ~= nil)
+-- Name/note substring match, case-insensitive (accented Latin letters too).
+-- Spaces around the query are ignored, the same as the pin search, and an empty
+-- query matches everything. Plain find (no pattern magic) so a query like
+-- "hit (2)" behaves literally. `q` is already folded.
+local function in_text(s, q)
+  if q == "" then return true end
+  return (fold.lower(tostring(s.name or "")):find(q, 1, true) ~= nil)
+    or (fold.lower(tostring(s.note or "")):find(q, 1, true) ~= nil)
+end
+
+-- Is anything actually being searched for? Spaces alone are not a search.
+function search.active(query)
+  return fold.query(query) ~= ""
 end
 
 -- Public: does this one sound survive the search box? Exported so a caller that
 -- is about to REVEAL a specific sound ("Show in library") can tell whether the
 -- running query would hide it, without re-implementing the match.
 function search.matches(s, query)
-  return in_text(s, query)
+  return in_text(s, fold.query(query))
 end
 
 -- Project search matches filenames and optional labels, without changing pin
 -- order or searching Library-only notes. Empty search can use the live list.
 function search.filter_pins(list, query)
-  local q = (query or ""):match("^%s*(.-)%s*$"):lower()
+  local q = fold.query(query)
   if q == "" then return list end
   local out = {}
   for _, pin in ipairs(list) do
-    if (pin.name or ""):lower():find(q, 1, true)
-      or (pin.label or ""):lower():find(q, 1, true) then
+    if fold.lower(pin.name or ""):find(q, 1, true)
+      or fold.lower(pin.label or ""):find(q, 1, true) then
       out[#out + 1] = pin
     end
   end
@@ -57,9 +65,10 @@ end
 -- order (sort is applied separately so the two concerns stay independent).
 function search.filter(lib, view, query)
   view = view or { scope = "all" }
+  local q = fold.query(query)
   local out = {}
   for _, s in ipairs(lib.sounds) do
-    if in_view(s, view) and in_text(s, query) then out[#out + 1] = s end
+    if in_view(s, view) and in_text(s, q) then out[#out + 1] = s end
   end
   return out
 end
@@ -74,8 +83,9 @@ local function cmp_number(x, y)
 end
 
 local COMPARE = {
-  name = function(a, b)
-    local la, lb = (a.name or ""):lower(), (b.name or ""):lower()
+  -- `keys` holds each sound's folded name, built once per sort.
+  name = function(a, b, keys)
+    local la, lb = keys[a], keys[b]
     if la < lb then return -1 elseif la > lb then return 1 else return 0 end
   end,
   dur  = function(a, b) return cmp_number(a.duration or 0, b.duration or 0) end,
@@ -109,6 +119,12 @@ function search.sort(list, col, asc, loud_field, pinned)
     end
   end
   if not compare then return list end
+  -- Folding a name allocates, so do it once per sound rather than per comparison.
+  local keys
+  if col == "name" then
+    keys = {}
+    for _, s in ipairs(list) do keys[s] = fold.lower(tostring(s.name or "")) end
+  end
   table.sort(list, function(a, b)
     if col == "loud" then
       -- Unmeasured loudness always at the bottom, independent of direction.
@@ -116,7 +132,7 @@ function search.sort(list, col, asc, loud_field, pinned)
       if anil ~= bnil then return bnil end -- the non-nil one comes first
       if anil and bnil then return a.id < b.id end
     end
-    local r = compare(a, b)
+    local r = compare(a, b, keys)
     if r ~= 0 then
       if asc then return r < 0 else return r > 0 end
     end

@@ -26,10 +26,14 @@ local tips = require("ui.tips")
 local widgets = require("ui.widgets")
 local icons = require("ui.icons")
 local focus = require("ui.focus")
+local anchored_panel = require("ui.anchored_panel")
 local whatsnew = require("ui.whatsnew")
 local hotkeys = require("ui.hotkeys")
 local reference_settings = require("ui.reference_settings")
+local audio_settings = require("ui.audio_settings")
 local fb_core = require("core.feedback") -- message cap for the Help composer
+local update_status = require("core.update_status")
+local update_check = require("core.update_check")
 local walkthrough_ui = require("ui.walkthrough")
 local T = theme.tokens
 local M = theme.metrics
@@ -65,6 +69,7 @@ local ui = { open = false, section = "library", libdir = "" }
 local pending_feedback
 
 function settings.is_open() return ui.open end
+function settings.audio_visible() return ui.open and ui.section == 'audio' end
 
 -- The browser's gear calls this. A real window, not a modal (2026-08-08, user's
 -- call): the rest of the tool stays live and clickable behind it — "just make it
@@ -107,6 +112,7 @@ end
 -- opts.button     fixed-width action label; the row returns true when clicked
 -- opts.beside     keep the action immediately after the value
 -- opts.compact    control-height square action
+-- opts.button_icon icon name and fallback for a square action
 -- opts.dead       retain the action footprint but disable interaction
 -- opts.input      editable value; the second return is the typed text
 -- opts.box        read-only selectable value box
@@ -243,17 +249,20 @@ local function row(ctx, label, value, opts)
 
       reaper.ImGui_TextColored(ctx, opts.value_color or T.TEXT_PRIMARY, shown)
       hovered = reaper.ImGui_IsItemHovered(ctx)
+      local hx0, hy0 = reaper.ImGui_GetItemRectMin(ctx)
       reaper.ImGui_SameLine(ctx, 0, gap)
       reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, arrow)
       hovered = hovered or reaper.ImGui_IsItemHovered(ctx)
       reaper.ImGui_SameLine(ctx, 0, gap)
       reaper.ImGui_TextColored(ctx, opts.next_value_color or T.ACCENT, opts.next_value)
       hovered = hovered or reaper.ImGui_IsItemHovered(ctx)
+      local hx1, hy1 = reaper.ImGui_GetItemRectMax(ctx)
 
       local was_cut = shown ~= value
       local full_value = value .. " " .. arrow .. " " .. opts.next_value
       tips.show(ctx, hovered,
-        was_cut and (full_value .. (opts.tip and ("\n\n" .. opts.tip) or "")) or opts.tip)
+        was_cut and (full_value .. (opts.tip and ("\n\n" .. opts.tip) or "")) or opts.tip,
+        nil, tips.rect(hx0, hy0, hx1 - hx0, hy1 - hy0))
     else
       local shown = widgets.ellipsize(ctx, value, val_x1 - x0, opts.cut)
       reaper.ImGui_TextColored(ctx, opts.value_color or T.TEXT_PRIMARY, shown)
@@ -274,7 +283,10 @@ local function row(ctx, label, value, opts)
     else
       reaper.ImGui_SameLine(ctx)
     end
-    if opts.dead then
+    if opts.button_icon then
+      clicked = icons.button(ctx, icon_font, opts.button, opts.button_icon.name,
+        { size = btn_w, fallback = opts.button_icon.fallback, tip = opts.button_tip })
+    elseif opts.dead then
       -- The pressed-out face: same footprint, fill and text dimmed, clicks
       -- meaningless. Never a smaller or absent button.
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.FILL_QUATERNARY)
@@ -286,7 +298,9 @@ local function row(ctx, label, value, opts)
     else
       clicked = reaper.ImGui_Button(ctx, opts.button, btn_w)
     end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), opts.button_tip)
+    if not opts.button_icon then
+      tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), opts.button_tip)
+    end
   end
 
   if opts.icon then
@@ -413,8 +427,7 @@ local function library_facts(state)
   i = put(i, human_size(bytes), true)
   i = put(i, " on disk", false)
   -- Loudness still running. It rides the end of this line rather than taking a
-  -- row of its own — nothing sits below the line, so its coming and going can't
-  -- push anything.
+  -- row of its own, so its coming and going can't push anything.
   if left > 0 then
     i = put(i, "  \u{00B7}  measuring ", false)
     i = put(i, tostring(left), true)
@@ -449,6 +462,8 @@ end
 -- "Switches which library" names the action; the reassurance follows it.
 local NOTE_FOLDER = "Switching libraries never moves or copies sounds."
 
+local ICON_CHOOSE_LIB = { name = "pencil", fallback = icons.draw_pencil }
+
 -- The reveal square the Folder row wears (2026-08-10, `.brief/settings-move`,
 -- the user's pick over an "Open in Explorer" row and a Folders section): the
 -- browser toolbar's folder button became this. One table, hoisted — never
@@ -457,6 +472,28 @@ local ICON_REVEAL_LIB = {
   id = "set_libfolder", name = "folder", fallback = icons.draw_folder,
   tip = "Show the library folder and its trash on your computer.",
 }
+
+local REVIEW_TIP = "List these files and choose what to do with each one."
+
+-- The line under the facts while the Library folder holds audio files that
+-- aren't part of the Library: yellow, because they're for the user to sort
+-- out, with Review Files at the far right. It is drawn only while such files
+-- exist (the user's call): a dimmed "nothing else here" line read as
+-- confusing, and it's the last thing in its group, so it pushes only the
+-- Current Project group below.
+local function draw_leftover_line(ctx, text)
+  local x0 = reaper.ImGui_GetCursorPosX(ctx)
+  local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
+  local gap = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing()))
+  if HAS_ALIGN_TEXT then reaper.ImGui_AlignTextToFramePadding(ctx) end
+  local shown = widgets.ellipsize(ctx, text, avail - M.SET_ACTION_W - gap)
+  reaper.ImGui_TextColored(ctx, T.WARNING_TEXT, shown)
+  tips.show(ctx, shown ~= text and reaper.ImGui_IsItemHovered(ctx), text)
+  reaper.ImGui_SameLine(ctx, x0 + avail - M.SET_ACTION_W)
+  local clicked = reaper.ImGui_Button(ctx, "Review Files", M.SET_ACTION_W)
+  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), REVIEW_TIP)
+  return clicked
+end
 
 local function setting_label(ctx, text)
   local bold = theme.push_bold_font(ctx)
@@ -640,10 +677,9 @@ local function draw_library(ctx, state)
   local opened, child = begin_settings_group(ctx, "library", "Reference Library")
   if opened then
     if state.deps.folder_picker then
-      -- A bare "…" means pick a new location (2026-08-08, user's call — it read
-      -- "Change…"). The folder square beside it opens the current folder.
+      -- The pencil changes the location; the folder square reveals it.
       local hit, _, reveal = row(ctx, "Folder Path", state.library_dir, {
-        button = "\u{2026}", compact = true, box = true,
+        button = "Choose Folder", button_icon = ICON_CHOOSE_LIB, compact = true, box = true,
         note = NOTE_FOLDER,
         icon = ICON_REVEAL_LIB,
         tip = "Switches which library you're using. The library you're using now stays on disk.",
@@ -665,21 +701,18 @@ local function draw_library(ctx, state)
       if reveal then action = action or { type = "reveal_library" } end
     end
 
-    local startup = row(ctx, "Open Library on Startup", nil, {
-      switch = state.open_library_on_startup,
-      far_right = true,
-    })
-    if startup then
-      action = action or {
-        type = "set_open_library_on_startup",
-        enabled = not state.open_library_on_startup,
-      }
-    end
-
     -- Library facts belong to the Library subject, not to the project-owned
     -- References folder below it.
     settings_separator(ctx)
     draw_facts(ctx, library_facts(state))
+
+    local lo = state.leftovers
+    if lo and lo.settings_text and #lo.entries > 0 then
+      settings_separator(ctx)
+      if draw_leftover_line(ctx, lo.settings_text) then
+        action = action or { type = "reopen_leftovers" }
+      end
+    end
     end_settings_group(ctx, child)
   end
 
@@ -749,7 +782,7 @@ local function version_route(ctx, state, installed, available, button, button_ti
   reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, "Available")
   reaper.ImGui_SameLine(ctx, x0 + M.SET_VERSION_LABEL_W + gap_x)
   bold = theme.push_bold_font(ctx)
-  reaper.ImGui_TextColored(ctx, available and T.ACCENT or T.TEXT_QUATERNARY,
+  reaper.ImGui_TextColored(ctx, available and T.ACCENT or T.TEXT_TERTIARY,
     available and ("v" .. available) or "—")
   if bold then reaper.ImGui_PopFont(ctx) end
 
@@ -792,56 +825,21 @@ local function version_message(ctx, text, color)
   if HAS_WRAP_POS then reaper.ImGui_PopTextWrapPos(ctx) end
 end
 
+local version_status = {}
 local function draw_version(ctx, state)
   local u = state.update
   local installed = (u and u.installed) or "?"
-  local detected = u and u.available or nil
-  local available
-  local status, note, button, button_tip
-
-  if not u or not u.enabled then
-    local reason = u and u.disabled_reason
-    if reason == "repo_off" then
-      status = "Paused. yb-Reference's repository is disabled in ReaPack."
-      note = "Re-enable the repository under Extensions \u{2192} ReaPack \u{2192} Manage repositories, then reopen the tool."
-    elseif reason == "noapi" then
-      status = "Updates are unavailable because ReaPack isn't installed."
-    else
-      status = "Updates are unavailable because this copy wasn't installed through ReaPack."
-    end
-  elseif u.phase == "reopen" then
-    status = "Update started."
-    note = "Close the ReaPack report when it appears. yb-Reference will reopen automatically."
-  elseif u.phase == "restarting" then
-    status = "Update finished."
-    note = "Reopening yb-Reference…"
-  elseif u.phase == "reopen_manual" then
-    status = "Close the ReaPack report if it's still open, then close and reopen yb-Reference."
-  elseif u.phase == "report_busy" then
-    available = detected
-    status = "Close the open ReaPack report before starting this update."
-    button = "Try Again"
-    button_tip = "Close the ReaPack report first, then try the update again."
-  elseif u.phase == "done" then
-    status = "Updated. Close and reopen yb-Reference."
-  else
-    available = detected
-    if u.pinned then
-      status = "Paused. This tool is pinned in ReaPack."
-      note = "Right-click it in Extensions \u{2192} ReaPack \u{2192} Browse packages and untick \"Pin to current version\"."
-    elseif available then
-      button = "Update Now"
-      button_tip = "ReaPack installs the update. Close its report when it appears; yb-Reference will then reopen automatically."
-    end
-    if u.phase == "failed_manual" then
-      status = "The update couldn't be completed from here."
-      note = "Run Extensions \u{2192} ReaPack \u{2192} Synchronize packages instead."
-    end
+  local info = update_status.describe(u, version_status)
+  local clicked = version_route(ctx, state, installed, info.available, info.button, info.button_tip)
+  version_message(ctx, info.status, T.TEXT_SECONDARY)
+  version_message(ctx, info.note, T.TEXT_TERTIARY)
+  -- Skipping a version only silences its popup; it can still be installed here.
+  local prefs = state.update_popup
+  if info.available and prefs and prefs.enabled ~= false and prefs.skipped
+      and update_check.compare(info.available, prefs.skipped) <= 0 then
+    version_message(ctx, "You skipped v" .. prefs.skipped
+      .. ". The update popup returns for a newer version.", T.TEXT_TERTIARY)
   end
-
-  local clicked = version_route(ctx, state, installed, available, button, button_tip)
-  version_message(ctx, status, T.TEXT_SECONDARY)
-  version_message(ctx, note, T.TEXT_TERTIARY)
   return clicked and { type = "start_update" } or nil
 end
 
@@ -852,6 +850,23 @@ local function draw_updates(ctx, state)
   local opened, child = begin_settings_group(ctx, "updates_version", "Version", nil, version_inset)
   if opened then
     action = draw_version(ctx, state)
+    end_settings_group(ctx, child)
+  end
+
+  -- Only a copy that can update has a popup to turn on or off.
+  opened = false
+  if state.update and state.update.enabled then
+    opened, child = begin_settings_group(ctx, "updates_popup", "Update Popup")
+  end
+  if opened then
+    local enabled = not (state.update_popup and state.update_popup.enabled == false)
+    if row(ctx, "Show When an Update Is Available", nil, {
+      switch = enabled,
+      far_right = true,
+      note = "The dot on the Settings button shows either way.",
+    }) then
+      action = action or { type = "set_update_popup", enabled = not enabled }
+    end
     end_settings_group(ctx, child)
   end
 
@@ -976,10 +991,10 @@ local function draw_help(ctx, state)
   -- (user, 2026-08-11). It doesn't list the stops: naming them dates the line
   -- every time the tour changes, and the tour introduces itself.
   local action
-  local opened, child = begin_settings_group(ctx, "help_walkthrough", "Walkthrough")
+  local opened, child = begin_settings_group(ctx, "help_walkthrough", "Tutorial")
   if opened then
-    if row(ctx, "Walkthrough", "A short walkthrough of how to use the tool.",
-        { hide_name = true, button = "Replay", button_tip = "Replay the walkthrough",
+    if row(ctx, "Tutorial", "A short tutorial of how to use the tool.",
+        { hide_name = true, button = "Replay", button_tip = "Replay the tutorial",
           value_color = T.TEXT_SECONDARY }) then
       action = { type = "walkthrough", ev = "show" }
     end
@@ -1141,6 +1156,7 @@ local function draw_feedback(ctx, state)
   -- the box itself can't be made to refuse keystrokes (see the draft note).
   local msg_chars = utf8.len(fbui.draft) or #fbui.draft
   local over_cap = msg_chars > fb_core.MAX_MESSAGE
+  local bad_email = not fb_core.valid_email(fbui.email)
   do
     local count_txt = msg_chars .. " / " .. fb_core.MAX_MESSAGE
     local bx0, by0 = reaper.ImGui_GetItemRectMin(ctx)
@@ -1149,11 +1165,11 @@ local function draw_feedback(ctx, state)
     local cw = select(1, reaper.ImGui_CalcTextSize(ctx, count_txt))
     if fbui.draft == "" then
       reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx),
-        bx0 + px, by0 + py, T.TEXT_QUATERNARY, FB_INTRO)
+        bx0 + px, by0 + py, T.TEXT_TERTIARY, FB_INTRO)
     end
     reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx),
       bx1 - px - cw, by1 - py - line_h,
-      over_cap and T.DANGER_RED or T.TEXT_QUATERNARY, count_txt)
+      over_cap and T.DANGER_RED or T.TEXT_TERTIARY, count_txt)
   end
 
   -- The action area always reserves one status line over one control line.
@@ -1195,14 +1211,14 @@ local function draw_feedback(ctx, state)
   end
 
   -- Send: the standard action width, flush right, and only ever one of three
-  -- faces — live, pressed-out "Sending…", or pressed-out "Send" while there is
+  -- faces — live, pressed-out "Sending", or pressed-out "Send" while there is
   -- nothing to send or the message is over the cap. Same footprint in every
   -- state (dead-face rule); the dead face says why on hover.
-  local can_send = not sending and not over_cap and fbui.draft:match("%S") ~= nil
+  local can_send = not sending and not over_cap and not bad_email and fbui.draft:match("%S") ~= nil
   reaper.ImGui_SameLine(ctx, action_x + avail_w - M.SET_ACTION_W)
   local retrying = fbs.phase == "failed" and fbui.draft == fbs.last_message
     and fbui.email == fbs.email
-  local label = sending and "Sending\u{2026}" or (retrying and "Retry" or "Send")
+  local label = sending and "Sending" or (retrying and "Retry" or "Send")
   if can_send then
     if reaper.ImGui_Button(ctx, label, M.SET_ACTION_W) then send_now = true end
   else
@@ -1215,6 +1231,7 @@ local function draw_feedback(ctx, state)
     tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
       (sending and "Sending your report\u{2026}")
       or (over_cap and "Your message is over the 1,000-character limit. Shorten it before sending.")
+      or (bad_email and "That email address doesn't look right. Fix it or clear it to send without one.")
       or nil)
     send_now = false
   end
@@ -1235,10 +1252,13 @@ local function draw_feedback_panel(ctx, state)
   return action
 end
 
+local draw_audio = audio_settings.draw
+
 -- The list in the user's chosen order. Adding a page remains one entry here;
 -- page-specific drawing stays in its owning module or function above.
 local SECTIONS = {
   { id = "library", name = "Library", draw = draw_library },
+  { id = "audio", name = "Audio", draw = draw_audio },
   { id = "appearance", name = "Appearance", draw = draw_appearance },
   { id = "hotkeys", name = "Hotkeys", draw = hotkeys.draw },
   { id = "updates", name = "Updates", draw = draw_updates },
@@ -1490,7 +1510,16 @@ function settings.draw(ctx, state, res)
   if reaper.ImGui_WindowFlags_NoDocking then
     flags = flags | reaper.ImGui_WindowFlags_NoDocking()
   end
-  reaper.ImGui_SetNextWindowSize(ctx, M.SET_WIN_W, M.SET_WIN_H, reaper.ImGui_Cond_Always())
+  local win_w, win_h = M.SET_WIN_W, M.SET_WIN_H
+  if HAS_VIEWPORT and res and res.monitor_work_area then
+    if not ui.work or ui.work_scale ~= theme.scale then
+      local cx, cy = reaper.ImGui_Viewport_GetCenter(reaper.ImGui_GetMainViewport(ctx))
+      ui.work = anchored_panel.work_area(ctx, res, {left = cx, right = cx, top = cy, bottom = cy})
+      ui.work_scale = theme.scale
+    end
+    win_w, win_h = anchored_panel.fit_size(ui.work, win_w, win_h, M.WINDOW_PAD)
+  end
+  reaper.ImGui_SetNextWindowSize(ctx, win_w, win_h, reaper.ImGui_Cond_Always())
   if HAS_VIEWPORT then
     local cx, cy = reaper.ImGui_Viewport_GetCenter(reaper.ImGui_GetMainViewport(ctx))
     reaper.ImGui_SetNextWindowPos(ctx, cx, cy, reaper.ImGui_Cond_FirstUseEver(), 0.5, 0.5)

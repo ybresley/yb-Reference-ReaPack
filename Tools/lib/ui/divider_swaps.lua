@@ -5,14 +5,16 @@ local icon_motion = require('ui.icon_motion')
 local tips = require('ui.tips')
 local T, M = theme.tokens, theme.metrics
 local swaps = {}
-local remembered = {}
+local remembered, spare = {}, {}
 
 local function contains(x, y, left, top, right, bottom)
   return x >= left and x <= right and y >= top and y <= bottom
 end
 
 function swaps.input(ctx, id, panels, dividers, x, y, names)
-  local previous, current = remembered[id] or {}, {}
+  local previous, current = remembered[id] or {}, spare[id] or {}
+  -- Two tables trade places each frame instead of allocating a fresh one.
+  for key in pairs(current) do current[key] = nil end
   local input = {faces={}, blocked=false, highlights={}}
   local result
   local mx, my = reaper.ImGui_GetMousePos(ctx)
@@ -61,7 +63,7 @@ function swaps.input(ctx, id, panels, dividers, x, y, names)
       face.held = false
     end
   end
-  remembered[id] = current
+  remembered[id], spare[id] = current, previous
   return result, input
 end
 
@@ -94,7 +96,8 @@ function swaps.paint(ctx, input)
       (face.x0+face.x1)/2, (face.y0+face.y1)/2,
       face.hot and T.TEXT_PRIMARY or T.TEXT_TERTIARY,
       false, face.pressed, true, M.ICON_FS)
-    tips.show(ctx, face.hot, face.label, face.id)
+    tips.show(ctx, face.hot, face.label, face.id,
+      tips.rect(face.x0, face.y0, face.x1 - face.x0, face.y1 - face.y0))
   end
 end
 

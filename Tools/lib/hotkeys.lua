@@ -12,6 +12,10 @@ local EXT_SECTION = "yb-Reference Hotkeys"
 local LEASE_PREFIX = "lease_"
 local QUEUE_PREFIX = "queue_"
 local HEARTBEAT_TIMEOUT = 2.0
+-- Renewing the heartbeat twice a second stays well inside the timeout without a
+-- REAPER write and a number format on every frame. The queue is still read
+-- every frame, so a press is never delayed by this.
+local HEARTBEAT_RENEW = 0.5
 local MAX_QUEUE = 64
 
 
@@ -61,6 +65,7 @@ local state = {
   command_ids = {},
   available = false,
   error = nil,
+  renew_at = 0,
 }
 
 local function now()
@@ -152,9 +157,15 @@ local function own_lease()
   return lease
 end
 
+local function write_lease()
+  local t = now()
+  set_ext(lease_key(state.key_suffix), encode_lease(state.identity, state.session, t))
+  state.renew_at = t + HEARTBEAT_RENEW
+end
+
 local function touch_lease()
   if not own_lease() then return false end
-  set_ext(lease_key(state.key_suffix), encode_lease(state.identity, state.session, now()))
+  write_lease()
   return true
 end
 
@@ -260,7 +271,7 @@ function hotkeys.start(root)
   local stamp = string.format("%.17g", now())
   local unique = tostring({}):gsub("[^%w]", "")
   state.session = stamp .. "_" .. unique
-  set_ext(lease_key(state.key_suffix), encode_lease(state.identity, state.session, now()))
+  write_lease()
   delete_ext(queue_key(state.key_suffix))
 
   if not native_api_available() then
@@ -297,8 +308,10 @@ function hotkeys.refresh()
 end
 
 function hotkeys.tick()
+  -- Ownership is still checked every frame: a newer session may have taken the
+  -- lease, and its queued requests must never be consumed or cleared here.
   if not own_lease() then return {} end
-  touch_lease()
+  if now() >= state.renew_at then write_lease() end
 
   local key = queue_key(state.key_suffix)
   local queued_session, ids = decode_queue(get_ext(key))

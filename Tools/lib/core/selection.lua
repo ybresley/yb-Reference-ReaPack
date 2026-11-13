@@ -49,7 +49,9 @@ function selection.click_category(lib, view, scope, id, ctrl, shift)
     if not range then return { scope = scope, id = id } end
     local ids = ctrl and category_set(view) or {}
     for range_id in pairs(range) do ids[range_id] = true end
-    return { scope = "categories", ids = ids, anchor = id }
+    -- The anchor stays on the row the range started from, as in Explorer and
+    -- Finder, so a second Shift-click re-draws the range from the same place.
+    return { scope = "categories", ids = ids, anchor = anchor }
   end
 
   local ids = category_set(view)
@@ -66,12 +68,22 @@ function selection.click_sound(sounds, current_ids, anchor, id, ctrl, shift)
     if not range then return { ids = { [id] = true }, anchor = id } end
     local ids = ctrl and copy_set(current_ids) or {}
     for range_id in pairs(range) do ids[range_id] = true end
-    return { ids = ids, anchor = id }
+    return { ids = ids, anchor = anchor } -- anchored like the category ranges above
   end
 
   local ids = copy_set(current_ids)
   if ids[id] then ids[id] = nil else ids[id] = true end
   return { ids = ids, anchor = id }
+end
+
+-- The mouse-down half of a click on a sound row. Pressing a row that is already
+-- selected must not break up the selection, or a group could never be dragged:
+-- the set stays as it was and the collapse the click would have made waits in
+-- `pending`, to be applied only if the button is released without a drag.
+function selection.press_sound(sounds, current_ids, anchor, id, ctrl, shift)
+  local clicked = selection.click_sound(sounds, current_ids, anchor, id, ctrl, shift)
+  if shift or not (current_ids and current_ids[id]) then return clicked end
+  return { ids = copy_set(current_ids), anchor = anchor, pending = clicked }
 end
 
 function selection.category_targets(categories, view, clicked_id)

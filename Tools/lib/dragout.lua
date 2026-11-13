@@ -169,11 +169,17 @@ end
 -- Returns { over_arrange, track, position, where }. `track` and `position` only
 -- mean anything when over_arrange is true; `where` names what the mouse was over
 -- instead, so a missed drop can say why.
+--
+-- The empty arrange below the last track is a drop target with no track:
+-- REAPER's own drops there make a new track at the end, and so does ours
+-- (`insert` with a nil track).
 function dragout.target()
   local window, segment = reaper.BR_GetMouseCursorContext()
   local track = reaper.BR_GetMouseCursorContext_Track()
   local position = reaper.BR_GetMouseCursorContext_Position()
-  local over_arrange = window == "arrange" and track ~= nil and position ~= nil and position >= 0
+  local below_tracks = track == nil and segment == "empty"
+  local over_arrange = window == "arrange" and (track ~= nil or below_tracks)
+    and position ~= nil and position >= 0
   return {
     over_arrange = over_arrange,
     track        = track,
@@ -199,11 +205,11 @@ end
 
 function dragout.hint(t, source_channels, new_track)
   if t.over_arrange then
-    local label = new_track and "a new track" or track_label(t.track)
+    local label = (new_track or not t.track) and "a new track" or track_label(t.track)
     local text = string.format("Drop on %s at %s", label,
       reaper.format_timestr_pos(t.position, "", 0))
     local needed = channels_for_track(source_channels)
-    local available = not new_track and track_channels(t.track) or needed
+    local available = not new_track and t.track and track_channels(t.track) or needed
     if available > 0 and needed > available then
       text = text .. string.format("\nThis drop needs %d track channels; the track has %d.",
         needed, available)
@@ -282,7 +288,9 @@ end
 -- owns normal and exit cleanup, so `hide_ghost` is safe and cheap for anyone
 -- to call at any time, including the exit handler. The hard-crash boundary is
 -- documented below.
-local ghost = nil -- { item, track, pos }
+-- The ghost remembers its project: the user can change project tabs mid-drag,
+-- and the item must still be found and removed from the project it was built in.
+local ghost = nil -- { item, track, pos, proj }
 
 -- Take it away. A no-op when there is none.
 --
@@ -298,8 +306,11 @@ function dragout.hide_ghost()
   local g = ghost
   ghost = nil
   if not g then return end
-  if reaper.ValidatePtr2(0, g.item, "MediaItem*")
-    and reaper.ValidatePtr2(0, g.track, "MediaTrack*") then
+  -- A closed project took the ghost with it. Its pointer is checked first, and
+  -- only then are the item and track looked up inside that project.
+  if reaper.ValidatePtr2(0, g.proj, "ReaProject*")
+    and reaper.ValidatePtr2(g.proj, g.item, "MediaItem*")
+    and reaper.ValidatePtr2(g.proj, g.track, "MediaTrack*") then
     reaper.DeleteTrackMediaItem(g.track, g.item)
     reaper.UpdateArrange()
   end
@@ -313,6 +324,9 @@ end
 -- Deliberately NOT wrapped in an undo block: an undo point here would put a
 -- throwaway into the user's history. The real drop makes its own, separately.
 function dragout.show_ghost(track, position, path, name, span_start, span_end, semitones)
+  local proj = reaper.EnumProjects(-1)
+  -- A ghost left in the project the user just switched away from goes first.
+  if ghost and ghost.proj ~= proj then dragout.hide_ghost() end
   if not reaper.ValidatePtr2(0, track, "MediaTrack*") then return dragout.hide_ghost() end
 
   -- Snapped before anything else, because the fast path below compares this
@@ -369,7 +383,7 @@ function dragout.show_ghost(track, position, path, name, span_start, span_end, s
   -- is a blank grey block until the user alt-tabs (see load_missing_peaks).
   load_missing_peaks()
 
-  ghost = { item = item, track = track, pos = position }
+  ghost = { item = item, track = track, pos = position, proj = proj }
 end
 
 ---------------------------------------------------------- the new-track zone
@@ -514,6 +528,7 @@ end
 --
 -- `new_track` (2026-08-08) makes a fresh track directly ABOVE `track` and puts
 -- every sound there instead — the drop half of REAPER's top-slice behaviour.
+-- With no `track` (a drop below the last track), the new track goes at the end.
 -- Created INSIDE the undo block, so one Ctrl+Z takes the track and the sound
 -- away together; `true` for wantdefaults, because this one is the user's real
 -- track and should arrive with whatever their template gives a new track.
@@ -526,7 +541,7 @@ end
 -- + a reason. Existing tracks are never changed; a mismatch is returned so the
 -- caller can tell the user without blocking the drop.
 function dragout.insert(entries_or_path, track, position, name_or_new_track, span_start, span_end, legacy_new_track)
-  if not reaper.ValidatePtr2(0, track, "MediaTrack*") then
+  if track ~= nil and not reaper.ValidatePtr2(0, track, "MediaTrack*") then
     return false, "That track is no longer there."
   end
 
@@ -542,6 +557,9 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
       span_end = span_end,
     }}
     new_track = legacy_new_track
+  end
+  if track == nil and not new_track then
+    return false, "That track is no longer there."
   end
 
   if #entries == 0 then
@@ -623,7 +641,8 @@ function dragout.insert(entries_or_path, track, position, name_or_new_track, spa
   -- block so one undo removes the track and all sounds together, and `track` is
   -- re-pointed at it so everything below is unchanged.
   if new_track then
-    local idx = math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")) - 1
+    local idx = track and math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")) - 1
+      or reaper.CountTracks(0)
     if idx >= 0 then
       reaper.InsertTrackAtIndex(idx, true)
       made_track = reaper.GetTrack(0, idx)

@@ -1,4 +1,5 @@
 local colours = require('ui.meter_colours')
+local stroke_corners = require('ui.stroke_corners')
 
 local line = {}
 
@@ -8,12 +9,8 @@ local function find_corners(points, count)
   local used = 0
   for i = 2, count - 1 do
     local x, y = points[i * 2 - 1], points[i * 2]
-    local ax, ay = x - points[i * 2 - 3], y - points[i * 2 - 2]
-    local bx, by = points[i * 2 + 1] - x, points[i * 2 + 2] - y
-    local dot = ax * bx + ay * by
-    -- Split turns greater than 60 degrees, including either end of a narrow
-    -- flat-bottomed dip. Native miters can fold over these short segments.
-    if dot < 0 or dot * dot < .25 * (ax * ax + ay * ay) * (bx * bx + by * by) then
+    if stroke_corners.sharp(x - points[i * 2 - 3], y - points[i * 2 - 2],
+        points[i * 2 + 1] - x, points[i * 2 + 2] - y) then
       used = used + 1
       corners[used] = i
     end
@@ -36,8 +33,7 @@ local function stroke(R, dl, points, count, scratch, colour, thickness, splits)
     scratch.copy(points, (first - 1) * 2 + 1, size, 1)
     R.ImGui_DrawList_AddPolyline(dl, scratch, colour, 0, thickness)
     if part <= splits then
-      R.ImGui_DrawList_AddCircleFilled(dl, points[last * 2 - 1], points[last * 2],
-        thickness / 2, colour, 12)
+      stroke_corners.join(R, dl, points[last * 2 - 1], points[last * 2], colour, thickness)
     end
     first = last
   end

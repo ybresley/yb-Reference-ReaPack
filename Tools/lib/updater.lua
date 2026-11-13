@@ -48,6 +48,7 @@
 
 local update_check = require("core.update_check")
 local mac_process = require("mac_process")
+local wsh_script = require("core.wsh_script")
 
 local updater = {}
 
@@ -79,10 +80,12 @@ local REPORT_TITLE   = "Transaction report"
 --                    "report_busy" (an older report must be closed first) |
 --                    "done" (a manual update had already landed) |
 --                    "failed_manual" (launch refused)
+--   checks           how many checks have finished, whatever their outcome; the
+--                    update popup decides at the first one (core/update_notice)
 local S = {
   enabled = false, disabled_reason = nil,
   installed = nil, available = nil, available_notes = {}, pinned = false,
-  phase = nil,
+  phase = nil, checks = 0,
 }
 updater.state = S
 
@@ -266,8 +269,9 @@ local function write_shim()
   }
   local f = io.open(P.vbs, "wb")
   if not f then return false end
-  f:write(table.concat(lines, "\r\n"), "\r\n")
-  f:close()
+  local wrote = f:write(wsh_script.encode(table.concat(lines, "\r\n") .. "\r\n"))
+  local closed = f:close()
+  if not wrote or not closed then os.remove(P.vbs) return false end
   return true
 end
 
@@ -407,6 +411,7 @@ function updater.tick()
           S.available_notes = {}
         end
         P.next_check = now + CHECK_EVERY
+        S.checks = S.checks + 1
         return
       end
     end
@@ -416,6 +421,7 @@ function updater.tick()
       os.remove(P.tmp)
       os.remove(P.vbs)
       P.next_check = now + CHECK_EVERY
+      S.checks = S.checks + 1
     end
     return
   end
@@ -438,7 +444,10 @@ function updater.tick()
         P.fetch_deadline = now + FETCH_TIMEOUT
       else
         os.remove(P.vbs)
+        S.checks = S.checks + 1
       end
+    else
+      S.checks = S.checks + 1
     end
   end
 end

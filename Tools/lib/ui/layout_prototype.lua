@@ -6,16 +6,32 @@ local tips = require('ui.tips')
 local divider_swaps = require('ui.divider_swaps')
 local T, M = theme.tokens, theme.metrics
 local prototype = {}
-local names = {waveform='Waveform', spectrum='Spectrum', stereo='Stereo', loudness='Loudness'}
+local names = {spectrum='Spectrum', stereo='Stereo', loudness='Loudness'}
 local modes = {{'auto','Auto'}, {'grid','Grid'}, {'top','Wide Top'}, {'left','Tall Left'}}
 local previous_modes = {}
 local header_drag, divider_drag, swap_panel
+-- A press on a divider is only a drag once the pointer has really moved, so a
+-- plain click never rewrites the saved proportion.
+local DIVIDER_DRAG_THRESHOLD = 3
+local PANEL_NUMBER = {waveform=1, spectrum=2, stereo=3, loudness=4}
+
+-- Changes whenever the panel order or the visible set does, without building a
+-- string on every frame.
+local function panel_signature(prefs)
+  local signature = 0
+  for _, list in ipairs({prefs.order, prefs.enabled}) do
+    for _, id in ipairs(list) do signature = signature*5 + (PANEL_NUMBER[id] or 0) end
+    signature = signature*5 + #list
+  end
+  return signature
+end
 
 local function action(operation)
   return {type='layout_prototype', operation=operation}
 end
 
-function prototype.measure(ctx, state, width, height)
+-- card: the Reference card sharing this area (ui/window.lua), or nil.
+function prototype.measure(ctx, state, width, height, card)
   local model, prefs = state.layout_prototype, core.current(state.layout_prototype)
   local frame = reaper.ImGui_GetFrameHeight(ctx)
   local meter_prefs = state.metering and state.metering.prefs or {}
@@ -24,11 +40,12 @@ function prototype.measure(ctx, state, width, height)
   local toolbar = model.editing and frame + M.ITEM_SPACING_Y or 0
   local header = model.editing and frame + M.ITEM_SPACING_Y or 0
   local previous=state.layout_prototype_geometry
-  local arrangement=prefs.mode..'/'..table.concat(prefs.order,',')..'/'..table.concat(prefs.enabled,',')
+  local arrangement=panel_signature(prefs)
   local same_arrangement=previous and previous.prototype_variant==model.active
-    and previous.arrangement==arrangement and not model.editing and not previous.editing
+    and previous.arrangement==arrangement and previous.intended==prefs.mode
+    and not model.editing and not previous.editing
   -- Each plot fits inside its frame; changing views must not move dividers.
-  local geometry = core.measure(width, math.max(0, height-toolbar), prefs, {
+  local options = {
     scale=theme.scale, gap=M.SPECTRUM_SPLIT_GAP,
     min_width=M.SPECTRUM_PANE_MIN_W, min_height=M.REFERENCE_PANE_MIN_H,
     header_height=header,
@@ -41,7 +58,18 @@ function prototype.measure(ctx, state, width, height)
     previous_mode=previous_modes[model.active],
     stereo_side_width=state.stereo_preferences and state.stereo_preferences.show_correlation
       and M.STEREO_CORRELATION_W or 0,
-  })
+  }
+  local geometry
+  if card then
+    -- Arranging in place keeps the card a column, clear of the toolbar.
+    card.column = model.editing
+    geometry = core.measure_with_card(width, math.max(0, height-toolbar), prefs, options, card)
+    if card.column then geometry.card_h = height end
+    geometry.inset = card.column and card.width or 0
+  else
+    geometry = core.measure(width, math.max(0, height-toolbar), prefs, options)
+    geometry.inset = 0
+  end
   if not geometry.temporary then previous_modes[model.active]=geometry.mode end
   geometry.toolbar_h, geometry.frame_h = toolbar, frame
   geometry.visual_h, geometry.count = height, #geometry.panels
@@ -104,7 +132,9 @@ function prototype.input(ctx, state, geometry, x, y, width)
   local mx, my = reaper.ImGui_GetMousePos(ctx)
   local window_hot = reaper.ImGui_IsWindowHovered(ctx,
     reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem())
-  if model.editing then result=toolbar(ctx,state,x,y,width) end
+  if model.editing then
+    result=toolbar(ctx,state,x+geometry.inset,y,width-geometry.inset)
+  end
 
   local swap_action, swap_input = divider_swaps.input(ctx, 'prototype_'..model.active,
     geometry.panels, geometry.dividers or {}, x, y, names)
@@ -173,7 +203,8 @@ function prototype.input(ctx, state, geometry, x, y, width)
       local pos=divider.axis=='x' and mx-x or my-y-geometry.toolbar_h
       local centre=divider.axis=='x' and divider.x+divider.w/2
         or divider.y-geometry.toolbar_h+divider.h/2
-      divider_drag={variant=model.active,key=key,offset=pos-centre}
+      divider_drag={variant=model.active,key=key,offset=pos-centre,
+        start=divider.axis=='x' and mx or my,moved=false}
     end
     if hot or held then
       input.blocked=true
@@ -181,6 +212,12 @@ function prototype.input(ctx, state, geometry, x, y, width)
         and reaper.ImGui_MouseCursor_ResizeEW() or reaper.ImGui_MouseCursor_ResizeNS())
     end
     if held and divider_drag and divider_drag.key==key then
+      local travelled=math.abs((divider.axis=='x' and mx or my)-divider_drag.start)
+      if travelled>=DIVIDER_DRAG_THRESHOLD*theme.scale then divider_drag.moved=true end
+    end
+    -- A divider squeezed to a single allowed position has nothing to move.
+    local movable=(divider.min_share or 0)<(divider.max_share or 1)
+    if held and divider_drag and divider_drag.key==key and divider_drag.moved and movable then
       local pointer=(divider.axis=='x' and mx-x or my-y-geometry.toolbar_h)-divider_drag.offset
       local span=divider.span or (divider.axis=='x' and width or geometry.visual_h-geometry.toolbar_h)
       local gap=divider.axis=='x' and divider.w or divider.h

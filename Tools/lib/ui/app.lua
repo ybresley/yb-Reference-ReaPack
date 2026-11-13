@@ -7,8 +7,9 @@
 local theme    = require("ui.theme")
 local widgets = require('ui.widgets')
 local numeric_input = require("ui.numeric_input")
-local window   = require("ui.window")
+local tips = require("ui.tips")
 local browser  = require("ui.browser")
+local library_host = require("ui.library_host")
 local dropzone = require("ui.dropzone")
 local newtrack_strip = require("ui.newtrack_strip")
 local settings = require("ui.settings")
@@ -16,6 +17,7 @@ local whatsnew = require("ui.whatsnew")
 local matchwin = require("ui.matchwin")
 local focus    = require("ui.focus")
 local walkthrough_ui = require("ui.walkthrough")
+local update_popup = require("ui.update_popup")
 local pitchwin = require("ui.pitchwin")
 local filterwin = require("ui.filterwin")
 local meter_controls = require('ui.meter_controls')
@@ -106,7 +108,8 @@ local function files_drag_window(ctx, state, files_active, mouse_x, mouse_y)
     return r and mx >= r.x and mx < r.x + r.w and my >= r.y and my < r.y + r.h
   end
   -- The browser wins an overlap: while open it sits above the Reference View.
-  if state.browser_open and inside(last_rect.browser) then return "browser" end
+  if state.browser_open and state.library_placement ~= "embedded"
+    and inside(last_rect.browser) then return "browser" end
   if inside(last_rect.main) then return "main" end
   return nil
 end
@@ -127,6 +130,7 @@ function app.create_context(font_path, context_name, monitor_work_area)
   assert(type(context_name) == "string" and context_name ~= "", "context name is required")
   -- Read-only platform geometry, injected to keep native REAPER calls in the adapter.
   res.monitor_work_area = monitor_work_area
+  tips.set_monitor_lookup(monitor_work_area)
   local ctx = reaper.ImGui_CreateContext(context_name)
   numeric_input.init(ctx)
   -- Feature detection by looking the ImGui function up directly (nil = absent), the
@@ -275,6 +279,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   end
   local rescue_blocked = popup_open or settings.is_open() or whatsnew.is_open()
     or matchwin.is_open() or (state.walkthrough and state.walkthrough.active)
+    or update_popup.is_open()
   local files_active, rescue_active = dropzone.begin_file_drag_frame(ctx, state,
     file_mouse_x, file_mouse_y, file_left_down, rescue_blocked)
 
@@ -337,8 +342,13 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   if reaper.ImGui_SetNextWindowSizeConstraints ~= nil
     and reaper.ImGui_NumericLimits_Float ~= nil then
     local _, flt_max = reaper.ImGui_NumericLimits_Float()
+    -- Content floor plus the window's padding and title bar.
+    local min_w, min_h = library_host.minimum_size(ctx, state)
+    local pad = 2 * theme.metrics.WINDOW_PAD
     reaper.ImGui_SetNextWindowSizeConstraints(ctx,
-      theme.metrics.MIN_WIN_W, theme.metrics.MIN_WIN_H, flt_max, flt_max)
+      math.max(theme.metrics.MIN_WIN_W, min_w + pad),
+      math.max(theme.metrics.MIN_WIN_H, min_h + pad + reaper.ImGui_GetFrameHeight(ctx)),
+      flt_max, flt_max)
   end
   -- No collapse arrow in the title bar (2026-07-30): this window has nothing to
   -- fold away to, so the arrow was one more thing to hit by accident. It also
@@ -365,7 +375,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
     local mwx, mwy = reaper.ImGui_GetWindowPos(ctx)
     last_rect.main = { x = mwx, y = mwy,
       w = reaper.ImGui_GetWindowWidth(ctx), h = reaper.ImGui_GetWindowHeight(ctx) }
-    -- ALWAYS draw, then merge — never `action = action or window.draw(...)`, which
+    -- ALWAYS draw, then merge — never `action = action or library_host.draw(...)`, which
     -- short-circuits in Lua and would skip the entire draw for that frame, blanking
     -- the window. The release wins the merge: it's a one-off event, while anything
     -- the frame reports can be reported again next frame. EXCEPT when the frame
@@ -374,7 +384,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
     -- ended" this pre-Begin watcher turned into.
     dropzone.set_current_window("main")
     local frame_action
-    frame_action, wave_id, wave_cols = window.draw(ctx, state, res)
+    frame_action, wave_id, wave_cols, browse_wave_id, browse_wave_cols = library_host.draw(ctx, state, res)
     dropzone.set_current_window(nil)
     if frame_action and frame_action.wins_release then
       action = frame_action
@@ -408,15 +418,6 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
     -- closing ReaPack's report safely restarts the tool, and the What's New card
     -- greets the new code on the way back up — see whatsnew.draw below.)
 
-    -- The walkthrough's pin stop rings the WHOLE window — it is one big
-    -- drop-to-pin target, and the ring finally shows the gesture.
-    walkthrough_ui.note_rect(ctx, state.walkthrough, "pin",
-      mwx, mwy, mwx + last_rect.main.w, mwy + last_rect.main.h)
-    -- The walkthrough's spotlight over this window (no-op unless it's active).
-    -- Inside the Begin scope on purpose: the wash reads this window's rect and
-    -- draws into its viewport's foreground list.
-    walkthrough_ui.wash(ctx, state.walkthrough, "main")
-
     if HAS_DOCK_ID then dock_id = reaper.ImGui_GetWindowDockID(ctx) end
 
     reaper.ImGui_End(ctx)
@@ -445,7 +446,7 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- it, or on an ancient ReaImGui) with Cond_FirstUseEver, so ImGui's own .ini
   -- memory and ours coexist — whichever ran first just gets overridden by
   -- FirstUseEver's usual "only if this window has no prior state" rule.
-  if state.browser_open then
+  if state.browser_open and state.library_placement ~= "embedded" then
     if state.browser_geom then
       local g = state.browser_geom
       reaper.ImGui_SetNextWindowPos(ctx, g.x, g.y, reaper.ImGui_Cond_FirstUseEver())
@@ -615,6 +616,14 @@ function app.frame(ctx, state, file_mouse_x, file_mouse_y, file_left_down)
   -- come back as actions like everything else.
   local walk_action = walkthrough_ui.card(ctx, state.walkthrough)
   action = action or walk_action
+
+  -- The update popup waits for What's New and the walkthrough to close, so
+  -- only one startup window asks for attention at a time.
+  local update_action = update_popup.draw(ctx, state,
+    whatsnew.is_open() or (state.walkthrough and state.walkthrough.active) or false)
+  -- Combined, so a Skip This Version press is saved even when another window
+  -- reports something in the same frame.
+  action = actions.combine(action, update_action)
 
   -- The "New Track /" band over REAPER's arrange, drawn LAST and outside both
   -- of our windows: it is its own overlay window sitting over REAPER, not part

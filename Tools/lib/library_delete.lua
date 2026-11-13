@@ -1,13 +1,13 @@
 -- Wait for SWS to release preview files before the existing Library deletion
--- operation runs. No files or records change while waiting. Captured records and
--- their Library must still match, so a delayed click cannot affect another sound.
-local preview = require("preview")
+-- operation runs (see release_wait.lua). No files or records change while
+-- waiting. Captured records and their Library must still match, so a delayed
+-- click cannot affect another sound.
 local holders = require("holders")
 local api = require("reaper_api")
+local release_wait = require("release_wait")
 
 local deletion = {}
 local pending
-local TIMEOUT = 2 -- failure limit only; completion follows SWS handle validity
 
 local function stop_requested_preview(state, job)
   if job.ids[state.preview.sound_id] then holders.stop_audio(state) end
@@ -15,17 +15,17 @@ end
 
 function deletion.request(state, ids)
   if pending then return false, "A deletion is already in progress." end
-  local records, wanted = {}, {}
+  local records, paths, wanted = {}, {}, {}
   for _, id in ipairs(ids or {}) do wanted[id] = true end
   for _, record in ipairs(state.library.sounds) do
     if wanted[record.id] then
-      records[#records + 1] = { record = record, filename = record.filename,
-        path = api.join(state.library_dir, record.filename) }
+      records[#records + 1] = { record = record, filename = record.filename }
+      paths[#paths + 1] = api.join(state.library_dir, record.filename)
     end
   end
   if #records == 0 then return false, "Those sounds are no longer in your Library." end
   pending = { library = state.library, dir = state.library_dir,
-    records = records, ids = wanted, deadline = api.now() + TIMEOUT }
+    records = records, paths = paths, ids = wanted, deadline = release_wait.deadline() }
   stop_requested_preview(state, pending)
   return true
 end
@@ -52,16 +52,12 @@ function deletion.tick(state)
 
   -- A new audition during the wait must not reopen a file just before moving it.
   stop_requested_preview(state, job)
-  for _, item in ipairs(job.records) do
-    if preview.releasing(item.path) then
-      if api.now() >= job.deadline then
-        pending = nil
-        return nil, "The sounds weren't deleted because playback hasn't finished stopping. Try again."
-      end
-      return
-    end
-  end
+  local status = release_wait.check(job.paths, job.deadline)
+  if status == "waiting" then return end
   pending = nil
+  if status == "timeout" then
+    return nil, "The sounds weren't deleted because playback hasn't finished stopping. Try again."
+  end
   local ids = {}
   for _, item in ipairs(job.records) do ids[#ids + 1] = item.record.id end
   return ids

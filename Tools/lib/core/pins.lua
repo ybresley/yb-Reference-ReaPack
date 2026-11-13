@@ -222,6 +222,16 @@ function pins.decode(text)
   return pins.migrate(result)
 end
 
+-- Whether stored text that failed to decode was written by a newer yb-Reference
+-- rather than damaged. The two need different answers: newer data is intact and
+-- must never be offered for discarding.
+function pins.saved_by_newer(text)
+  if type(text) ~= "string" then return false end
+  local ok, data = pcall(json.decode, text)
+  return ok and type(data) == "table" and type(data.version) == "number"
+    and data.version > pins.VERSION
+end
+
 function pins.find(data, id)
   for _, p in ipairs(data.pins) do
     if p.id == id then return p end
@@ -269,15 +279,18 @@ function pins.origin_match(pin, sound)
 end
 
 -- Is this library sound already pinned here? Matched by verified origin first,
--- then by content facts alone — which also catches a teammate's pin of a file
--- you happen to own under a different record.
-function pins.already_pinned(data, sound)
+-- then by content facts — which also catches a teammate's pin of a file you
+-- happen to own under a different record. Matching facts only make a
+-- candidate: two different exports can share a name and a size. Core can't
+-- read files, so `same_audio(pin)` from the caller decides.
+function pins.already_pinned(data, sound, same_audio)
   for _, p in ipairs(data.pins) do
     if pins.origin_match(p, sound) then return p end
   end
   if sound.source_name ~= nil and sound.size_bytes ~= nil then
     for _, p in ipairs(data.pins) do
-      if p.source_name == sound.source_name and p.size_bytes == sound.size_bytes then
+      if p.source_name == sound.source_name and p.size_bytes == sound.size_bytes
+          and same_audio(p) then
         return p
       end
     end

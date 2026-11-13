@@ -9,8 +9,8 @@
 -- The cadence is STRICTLY EVEN (user's explicit call, overriding the more
 -- common "always label the end" ruler convention from the early research): major
 -- ticks land at k*step for k=0,1,2,... while k*step <= duration, full stop.
--- The final partial interval past the last major is left unticked rather than
--- getting a synthesised end-of-file tick.
+-- Minor ticks continue through the final partial interval at the same spacing.
+-- There is no synthesised end-of-file tick.
 
 local ruler = {}
 
@@ -24,6 +24,15 @@ local ruler = {}
 -- would mis-classify 15 and 30 (their mantissa rounds to 2 under a plain
 -- order-of-magnitude test, which is a different, wrong answer).
 local STEPS = {
+  -- Millisecond steps, used only for sounds shorter than FINE_BELOW so a
+  -- short effect still gets numbered ticks; longer sounds keep 0.1 s as the
+  -- finest step.
+  { s = 0.001, div = 5, fine = true },
+  { s = 0.002, div = 4, fine = true },
+  { s = 0.005, div = 5, fine = true },
+  { s = 0.01,  div = 5, fine = true },
+  { s = 0.02,  div = 4, fine = true },
+  { s = 0.05,  div = 5, fine = true },
   { s = 0.1,   div = 5 },
   { s = 0.2,   div = 4 },
   { s = 0.5,   div = 5 },
@@ -49,6 +58,8 @@ local STEPS = {
 -- scale (this module is pure core and can't require ui.theme; 12 happens to
 -- already be on that scale, so it isn't a magic number in spirit either).
 local LABEL_PAD_PX = 12
+
+local FINE_BELOW = 0.1
 
 -- Tolerance for k*step <= duration comparisons, so float error (3*0.1 landing
 -- a hair over 0.3) can never drop or add a tick that should/shouldn't be there.
@@ -117,6 +128,7 @@ end
 local function choose_step(duration_sec, width_px, measure)
   local px_per_sec = width_px / duration_sec
   for _, step in ipairs(STEPS) do
+    if step.fine and duration_sec >= FINE_BELOW then goto continue end
     local spacing = step.s * px_per_sec
     local k_max = math.floor(duration_sec / step.s + EPS)
     local last_label = format_major(k_max * step.s, duration_sec, true)
@@ -127,6 +139,7 @@ local function choose_step(duration_sec, width_px, measure)
       and labels_fit(step, duration_sec, width_px, measure) then
       return step
     end
+    ::continue::
   end
   return STEPS[#STEPS]
 end
@@ -173,12 +186,13 @@ function ruler.build(duration_sec, width_px, measure)
       x = t * px_per_sec, t = t, major = true,
       label = label,
     }
-    -- Minors only fill intervals between two REAL majors (k < k_max): the
-    -- trailing partial interval past the last major has no major of its own
-    -- to subdivide toward, and strict cadence means it stays unticked too.
-    if minors_on and k < k_max then
+    -- Continue the regular subdivision past the last label, stopping at the
+    -- audio boundary rather than leaving its final partial interval blank.
+    if minors_on then
       for i = 1, step.div - 1 do
         local mt = t + i * (step.s / step.div)
+        if mt > duration_sec + EPS then break end
+        mt = math.min(mt, duration_sec)
         ticks[#ticks + 1] = { x = mt * px_per_sec, t = mt, major = false }
       end
     end
@@ -195,7 +209,9 @@ function ruler.hover_label(t_seconds, duration_sec)
   if t < 0 then t = 0 end
   duration_sec = duration_sec or 0
 
-  if duration_sec < 10 then
+  if duration_sec > 0 and duration_sec < FINE_BELOW then
+    return string.format("%.3f", t)
+  elseif duration_sec < 10 then
     return string.format("%.2f", t)
   elseif duration_sec < 60 then
     return string.format("%.1f", t)

@@ -1,22 +1,21 @@
--- matchwin: the Reference View's LOUDNESS panel — the target button (◎) beside
--- the trim fader and the window it opens (DESIGN.md "Loudness").
+-- matchwin: Normalize — the target button beside the trim bar and the dropdown
+-- menu it opens (DESIGN.md "Loudness").
 --
--- On screen it is "LOUDNESS", and its custom-target button is "Normalize"
--- (user's rename, 2026-08-11 — it was "MATCH LOUDNESS" / "Match"). The file,
--- the module and every internal name stay `match*`: `core/match.lua` owns the
--- arithmetic and the saved preset keys, and renaming those would throw away
--- the user's stored presets for nothing.
+-- The file, the module and every internal name stay `match*`: `core/match.lua`
+-- owns the arithmetic and the saved preset keys, and renaming those would
+-- throw away the user's stored presets for nothing.
 --
--- The popup is the numbers' ONLY home (user's call after three rounds — the
--- corner overlay and hover tooltip were offered and rejected): the armed
--- sound's six measurements, preset rows each showing the trim they would set,
--- a custom row, and Edit presets on the bottom edge. Clicking a preset sets
--- the trim NOW (arithmetic, no analysis — core/match.lua owns the numbers)
--- and becomes the remembered target, named in the button's tooltip.
+-- Normalizing is occasional, so it stays behind the button. The menu lists the
+-- preset targets, each showing the trim it would set, then a custom target
+-- row, then Reset to Original Loudness (trim back to 0 dB) and Edit Presets.
+-- Clicking a preset sets the trim at once (arithmetic, no analysis:
+-- core/match.lua owns the numbers) and becomes the remembered target, named
+-- in the button's tooltip. The menu stays open so several
+-- targets can be compared. The readings live in the Reference card; when it is
+-- too short for them, the menu shows them above the targets.
 --
--- It lives in its own file for the same reason refpicker does: one
--- responsibility ("what target, and what trim gets you there"), while
--- transport.lua only decides where the button sits in the bar.
+-- The menu is an ImGui popup, like the reference picker's list: it closes on
+-- an outside click (the button included) or Escape.
 --
 -- A ui/ module: reaper.ImGui_* only. Reports intent as actions; the entry
 -- script performs them.
@@ -30,6 +29,7 @@ local focus = require("ui.focus")
 local match = require("core.match")
 local anchored_panel = require("ui.anchored_panel")
 local numeric_input = require("ui.numeric_input")
+local readings = require("ui.readings")
 -- Only for pins.drop_target — the tested "insertion gap -> final position"
 -- arithmetic the picker's reorder drag uses; the preset list reorders with
 -- exactly the same gesture and must not re-derive that off-by-one.
@@ -39,31 +39,30 @@ local M = theme.metrics
 
 local matchwin = {}
 
--- Transient view state (the refpicker idiom): opening the popup, its anchor,
--- edit mode, the custom row's inputs, and the in-flight preset reorder drag.
--- Never on the shared `state`.
+local POPUP_ID = "normalize_menu"
+
+-- Transient view state (the refpicker idiom). Never on the shared `state`.
 local ui = {
-  -- `open` is the standing state; `open_request` marks the frame the button
-  -- opened it (that frame positions the window).
+  -- `open` mirrors the popup as of its last drawn frame; `open_request` and
+  -- `close_request` are handed to the popup on its next draw.
   open = false,
   open_request = false,
-  -- The button's rect: the window prefers floating above its top edge, and
-  -- falls back to below its bottom edge when the screen ends too close above
-  -- (user-reported 2026-08-06 — docked top-right, the window opened mostly
-  -- off the top of the monitor; an explicitly positioned window is NOT
-  -- clamped by ImGui the way an auto-placed popup is).
-  anchor_x = nil, anchor_y = nil, anchor_y1 = nil,
-  rect = nil, -- last drawn frame's window rect (matchwin.rect, for the walkthrough)
-  geometry = nil,
-  work = nil,
+  close_request = false,
+  -- The button's rect: the menu opens under it with matching left edges, as the
+  -- other anchored panels do, or above it when the screen ends too close below.
+  anchor_x0 = nil, anchor_y = nil, anchor_y1 = nil,
+  rect = nil, -- last drawn frame's menu rect
+  settle = 0,
+  place = nil, -- { x, y, pivot_y, max_h } chosen while opening
   edit_mode = false,
   custom_unit = 1, -- 0-based Combo index into UNITS
   custom_text = "-16",
   edit_index = nil, -- preset whose values are loaded into the target row
   drag_index = nil, -- the preset being dragged by its row body (edit mode)
   normalize_pending = nil, -- waits for the owner to apply a requested trim
-  reveal_requested = false,
   motion_generation = nil,
+  -- The Reference card has no room for the readings, so the menu shows them.
+  show_readings = false,
 }
 
 -- The cursor shown over a draggable preset row — same detection refpicker uses.
@@ -75,18 +74,10 @@ local REORDER_CURSOR = (reaper.ImGui_MouseCursor_ResizeNS and reaper.ImGui_Mouse
 -- rules) — the reorder drag resolves against what is actually on screen.
 local prow_rects, prow_n = {}, 0
 
--- The six units, in the user's reading order: LUFS S -> M -> I, then
--- True Peak · Peak · RMS. The readout lays them out COLUMN-major — the three
--- LUFS down the left, the peaks and RMS down the right (user's call,
--- 2026-08-06: two columns of three, LUFS on the left, so the window can be
--- narrower).
---
--- Every name is spelled out, in the readout and the dropdown alike (user's
--- call, 2026-08-07 — "TP" and "Pk" were shorthand only the writer could read,
--- and "Sample peak" named an implementation detail rather than the thing).
--- The name that follows a preset's VALUE ("-16 LUFS-M") is a different job and
--- comes from core/match.lua, so the window and the status line share one
--- vocabulary there.
+-- The six units, in the dropdown's established order. Every name is spelled
+-- out (user's call, 2026-08-07). The name that follows a preset's VALUE
+-- ("-16 LUFS-M") comes from core/match.lua, so the menu and the status line
+-- share one vocabulary there.
 local UNITS = {
   { key = "lufs_s_max", tag = "LUFS-S",    combo = "LUFS-S" },
   { key = "lufs_m_max", tag = "LUFS-M",    combo = "LUFS-M" },
@@ -96,17 +87,9 @@ local UNITS = {
   { key = "rms",        tag = "RMS",       combo = "RMS" },
 }
 
--- The dropdown keeps its established unit order. The readout puts momentary
--- before short-term, which is the scan order the user wants at the top of the
--- panel.
-local READOUT_UNITS = {
-  UNITS[2], UNITS[1], UNITS[3], UNITS[4], UNITS[5], UNITS[6],
-}
-
 -- Built once (frame-allocation rule). This ReaImGui's Combo takes the C API's
 -- NUL-separated items and REQUIRES the trailing NUL — it raises
--- "items must be null-terminated" without it (live-verified 2026-08-06; the
--- \31 separator belongs to older ReaImGui versions, not this one).
+-- "items must be null-terminated" without it (live-verified 2026-08-06).
 local COMBO_ITEMS
 do
   local parts = {}
@@ -114,7 +97,13 @@ do
   COMBO_ITEMS = table.concat(parts, "\0") .. "\0"
 end
 
+local HEADING = "NORMALIZE TO"
+local READINGS_HEADING = "MEASUREMENTS"
 local EDITING_TEXT = "Editing…"
+local APPLY_TEXT = "Apply"
+local UNIT = "dB"
+local EMPTY_TEXT = "No presets yet. Choose Edit Presets to add one."
+local EMPTY_EDIT_TEXT = "Set a target below, then choose Add."
 
 local function combo_index(unit)
   for i, u in ipairs(UNITS) do
@@ -124,6 +113,14 @@ local function combo_index(unit)
 end
 
 local function unit_label(key)
+  return match.label(key)
+end
+
+-- What the measurement is called in the dropdown, for sentences that name it.
+local function measurement_name(key)
+  for _, u in ipairs(UNITS) do
+    if u.key == key then return u.tag end
+  end
   return match.label(key)
 end
 
@@ -138,22 +135,17 @@ local function fmt_trim(db)
   return decibels.format(db) .. " dB"
 end
 
-local function fmt_meas(v)
-  return type(v) == "number" and string.format("%.1f", v) or "\u{2014}"
-end
-
 local function fmt_shortfall(required, trim)
   return string.format("%.1f dB short", math.abs(required - trim))
 end
 
--- One decimal, the precision both the row and the trim fader show. Comparing
--- what is on screen is the point: two trims that read "-3.2 dB" are the same
--- trim as far as the reader is concerned.
+-- One decimal, the precision both the row and the trim bar show. Two trims
+-- that read "-3.2 dB" are the same trim as far as the reader is concerned.
 local function round1(v) return math.floor(v * 10 + 0.5) / 10 end
 
--- Snap to a whole pixel (the refpicker rule: a glyph run at a fractional
--- origin renders visibly softer).
+-- Snap to a whole pixel: a glyph run at a fractional origin renders softer.
 local function px(v) return math.floor(v + 0.5) end
+
 local function draw_limit_marker(ctx, dl, right, y0, y1, colour)
   local marker = "!"
   local mw, mh = reaper.ImGui_CalcTextSize(ctx, marker)
@@ -161,24 +153,22 @@ local function draw_limit_marker(ctx, dl, right, y0, y1, colour)
     px((y0 + y1) * 0.5 - mh * 0.5), colour, marker)
 end
 
-
--- Whether the window stands open (or is about to, this frame). Read by the
--- walkthrough's finale, whose real-action advance is exactly this turning
--- true — open_request counts, or the tour would lag its own click by a frame.
-function matchwin.is_open()
-  return ui.open or ui.open_request or false
+-- Whether the menu shows the readings, set by the Reference card each frame.
+function matchwin.set_show_readings(show)
+  ui.show_readings = show
 end
 
--- Open it from somewhere other than the ◎ — today only the walkthrough's
--- finale, which opens it for the user as the stop is reached. Takes the anchor
--- the ◎ would have supplied (its rect), so the window still stands exactly
--- where clicking the button yourself would have put it; without one it falls
--- back to wherever ImGui last had it.
-function matchwin.open_at(x, y_top, y_bottom, options)
+-- Whether the menu stands open (or is about to, this frame). open_request
+-- counts, or callers would lag the click that opened it by a frame.
+function matchwin.is_open()
+  return (ui.open or ui.open_request) and not ui.close_request
+end
+
+-- Open it from somewhere other than the button, at the button's rect
+-- (x_left is its left edge).
+function matchwin.open_at(x_left, y_top, y_bottom, options)
   if ui.open then return end
-  ui.rect, ui.geometry, ui.work, ui.settle = nil, nil, nil, 0
-  ui.normalize_pending, ui.reveal_requested = nil, false
-  ui.open_request = true
+  ui.open_request, ui.close_request = true, false
   ui.edit_mode = false
   ui.edit_index = nil
   if options then
@@ -190,116 +180,65 @@ function matchwin.open_at(x, y_top, y_bottom, options)
     end
     ui.drag_index = nil
   end
-  ui.anchor_x, ui.anchor_y, ui.anchor_y1 = x, y_top, y_bottom
+  ui.anchor_x0, ui.anchor_y, ui.anchor_y1 = x_left, y_top, y_bottom
 end
 
--- Shut it from outside — today only the walkthrough, taking back the window it
--- opened for the finale when the tour ends. Clears the pending request too, so
--- a close on the very frame it was asked for can't leave it opening anyway.
+-- Shut it from outside. Clears a pending open too, so a close on the very
+-- frame it was asked for can't leave it opening anyway.
 function matchwin.close()
-  ui.open, ui.open_request = false, false
-  ui.rect, ui.geometry, ui.work, ui.settle = nil, nil, nil, 0
-  ui.normalize_pending, ui.reveal_requested = nil, false
+  ui.open_request = false
+  if ui.open then ui.close_request = true end
+  ui.normalize_pending = nil
 end
 
--- Last drawn frame's window rect, or nil while it is shut. The walkthrough's
--- card reads it to keep clear of the panel it is describing — it can't ask
--- ImGui itself, being outside this window's scope by then.
-function matchwin.rect()
-  -- Withheld until the window has SETTLED (see the placement block below).
-  -- Handing out the opening frame's rect would place the tour's card against a
-  -- window that is about to move, and the card would follow it a frame later.
-  if not ui.open or (ui.settle or 0) < 2 then return nil end
-  return ui.rect
+--------------------------------------------------------------- the button
+
+-- The target icon, centred.
+local function paint_button_face(ctx, font, colour)
+  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+  local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  colour = theme.fade(colour, alpha)
+  local cx, cy = px((x0 + x1) * 0.5), (y0 + y1) * 0.5
+  if not icons.paint_glyph(ctx, font, "target", cx, cy, colour, M.ICON_FS) then
+    icons.draw_target(reaper.ImGui_GetWindowDrawList(ctx), cx, cy, colour)
+  end
 end
 
---------------------------------------------------------------- the bar button
-
--- The ◎ square, LEFT of the trim fader and collapsing with it (transport.lua
--- decides where; the tie to the fader is the design's — the button drives it).
-function matchwin.draw_button(ctx, state, res)
+-- width: the Reference card's Normalize cell.
+function matchwin.draw_button(ctx, state, res, width)
   local font = res and res.icon_font
-  local target = state.match and state.match.target
-  if widgets.panel_button(ctx, font, "matchtarget", "target",
-      matchwin.is_open(), icons.draw_target) then
-    -- A toggle now that the window stands open on its own: the button is
-    -- also the way to put it away without reaching for its ✕.
-    if ui.open then
-      ui.open = false
-      ui.normalize_pending, ui.reveal_requested = nil, false
-    else
-      ui.open_request = true
-      ui.edit_mode = false -- a freshly opened window is never already editing
-      ui.edit_index = nil
-      ui.anchor_x, ui.anchor_y = reaper.ImGui_GetItemRectMin(ctx)
-      ui.anchor_y1 = select(2, reaper.ImGui_GetItemRectMax(ctx))
-    end
+  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  -- A release demonstration's button never shows the live menu as open.
+  local shown_open = not state.showcase and matchwin.is_open()
+  -- While the menu is open it blocks this button, so a press here only
+  -- closes the menu (ImGui's outside click) and its release opens nothing.
+  if widgets.panel_button_frame(ctx, "##matchtarget", width or ctrl, ctrl, shown_open)
+      and not state.showcase then
+    ui.open_request, ui.close_request = true, false
+    ui.edit_mode, ui.edit_index = false, nil
+    ui.anchor_x0, ui.anchor_y = reaper.ImGui_GetItemRectMin(ctx)
+    ui.anchor_y1 = select(2, reaper.ImGui_GetItemRectMax(ctx))
   end
   local hovered = reaper.ImGui_IsItemHovered(ctx)
-  if hovered and not matchwin.is_open() then
-    local tip = "Open Loudness. Normalize the selected reference to a target."
-      .. (target and ("\nRemembered target: " .. fmt_target(target.unit, target.value)) or "")
-    tips.show(ctx, true, tip)
+  local colour = shown_open and T.ACCENT_HOVER
+    or (hovered and T.TEXT_PRIMARY or T.TEXT_SECONDARY)
+  paint_button_face(ctx, font, colour)
+  if hovered and not shown_open then
+    local target = state.match and state.match.target
+    tips.show(ctx, true, (ui.show_readings
+      and "Normalize the selected reference to a loudness target, and see its measurements."
+      or "Normalize the selected reference to a loudness target.")
+      .. (target and ("\nRemembered target: " .. fmt_target(target.unit, target.value)) or ""))
   end
-  return nil -- opening is view state; every action comes from the window
-end
-
---------------------------------------------------------------- the readout
-
--- The armed sound's numbers: labels dim, values bright (the user's explicit
--- readability rule), three cells per line, two lines, fixed geometry.
-local function draw_readout(ctx, sel, width)
-  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
-  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
-  local line_h = ctrl - 4
-  -- Two columns of three (column-major: LUFS down the left), not three of two
-  -- — the user's call, 2026-08-06, and what lets the window be narrower.
-  reaper.ImGui_Dummy(ctx, width, line_h * 3)
-  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
-  local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  local cell_w = (width - pad_x * 2) / 2
-
-  -- Each cell spreads to its own edges — tag flush left, value flush RIGHT —
-  -- with a hairline between the columns (user's call, 2026-08-06: the old
-  -- left-packed cells left a ragged run of empty space mid-window). The
-  -- divider is what lets the two value columns end at different x without
-  -- reading as misalignment.
-  local mid = x0 + pad_x + cell_w
-  local gutter = 8
-  reaper.ImGui_DrawList_AddLine(dl, px(mid), y0 + 2, px(mid), y0 + line_h * 3 - 2, T.STROKE_TERTIARY)
-
-  -- Tags in the PRESET ROWS' exact voice — body size, TEXT_SECONDARY (2026-08-09,
-  -- user's ask from the running build: small dim tags were "quite hard to read"
-  -- next to rows saying the same unit names comfortably one section down. The
-  -- fifth small-text report; same fix as the first three — the element moves to
-  -- the body size and colour carries the hierarchy, values staying the brighter
-  -- of the two). Widths re-checked: worst cell "True Peak" + "-120.0" at 13px
-  -- ≈ 95px in the 110px zone.
-  for i, u in ipairs(READOUT_UNITS) do
-    local col, row = math.floor((i - 1) / 3), (i - 1) % 3
-    local tx = (col == 0) and (x0 + pad_x) or (mid + gutter)
-    local th = select(2, reaper.ImGui_CalcTextSize(ctx, u.tag))
-    reaper.ImGui_DrawList_AddText(dl, px(tx),
-      px(y0 + row * line_h + (line_h - th) * 0.5), T.TEXT_SECONDARY, u.tag)
-  end
-
-  for i, u in ipairs(READOUT_UNITS) do
-    local col, row = math.floor((i - 1) / 3), (i - 1) % 3
-    local right_edge = (col == 0) and (mid - gutter) or (x0 + width - pad_x)
-    local v = sel and sel[u.key]
-    local text = fmt_meas(v)
-    local vw, vh = reaper.ImGui_CalcTextSize(ctx, text)
-    reaper.ImGui_DrawList_AddText(dl, px(right_edge - vw),
-      px(y0 + row * line_h + (line_h - vh) * 0.5),
-      type(v) == "number" and T.TEXT_PRIMARY or T.TEXT_QUATERNARY, text)
-  end
+  return nil -- opening is view state; every action comes from the menu
 end
 
 --------------------------------------------------------------- preset rows
 
 -- One preset row: the target on the left, the trim it would set on the right
--- (edit mode: edit and remove controls instead). The shown trim IS the capped value —
--- clicking sets exactly what the row promised, never more.
+-- (edit mode: edit and remove controls instead). The shown trim IS the capped
+-- value — clicking sets exactly what the row promised, never more.
 local function draw_preset_row(ctx, state, res, sel, p, i, width)
   local action
   local font = res and res.icon_font
@@ -345,16 +284,14 @@ local function draw_preset_row(ctx, state, res, sel, p, i, width)
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, row_fill, 4)
   end
 
-  -- ACCENT means "the trim is AT this row right now" — nothing else. It used to
-  -- mean "this was the last target picked", which survives a manual fader move,
-  -- so a row stayed lit while the trim had been dragged somewhere else entirely
-  -- (user-reported 2026-08-07). The remembered target still names itself in the
-  -- ◎ button's tooltip; it just no longer colours anything.
+  -- ACCENT means "the trim is AT this row right now" — nothing else. A hand
+  -- trim elsewhere clears it (user-reported 2026-08-07).
   local at_this = trim ~= nil and sel ~= nil
     and round1(sel.trim_db or 0) == round1(trim)
   local label = fmt_target(p.unit, p.value)
   local lh = select(2, reaper.ImGui_CalcTextSize(ctx, label))
-  reaper.ImGui_DrawList_AddText(dl, px(x0 + pad_x), px((y0 + y1) * 0.5 - lh * 0.5),
+  local text_y = px((y0 + y1) * 0.5 - lh * 0.5)
+  reaper.ImGui_DrawList_AddText(dl, px(x0 + pad_x), text_y,
     at_this and T.ACCENT or T.TEXT_SECONDARY, label)
 
   if ui.edit_mode then
@@ -386,30 +323,29 @@ local function draw_preset_row(ctx, state, res, sel, p, i, width)
     end
     reaper.ImGui_SetCursorScreenPos(ctx, x0, y1)
   else
-    -- The trim this preset would set, right-aligned. "—" when this sound has
-    -- no number in the preset's unit. When the fader can't reach the target,
-    -- "short X dB" gives the honest distance between what was asked and what a
-    -- click will set (user's ask, 2026-08-06: a plain "capped" hid how far off
-    -- it was).
-    -- The trim value right-aligns inside a FIXED zone sized for the widest
-    -- possible reading, so the flag beside it sits at one x whatever the
-    -- number says (user's call, 2026-08-06 — a flag that wandered with the
-    -- digits read as ragged).
-    local trim_zone = select(1, reaper.ImGui_CalcTextSize(ctx, "+24.0 dB"))
-    local text = trim and fmt_trim(trim) or "\u{2014}"
-    local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
-    reaper.ImGui_DrawList_AddText(dl, px(x1 - pad_x - tw), px((y0 + y1) * 0.5 - th * 0.5),
-      trim and T.TEXT_PRIMARY or T.TEXT_QUATERNARY, text)
+    -- The trim this preset would set, laid out like the measurements card:
+    -- the value ends on a fixed "dB" column. "—" when this sound has no
+    -- number in the preset's unit. The "!" sits at one x, left of the widest
+    -- possible reading, so it never wanders with the digits.
+    local unit_w = M.STRIP_UNIT_GAP + reaper.ImGui_CalcTextSize(ctx, UNIT)
+    local right = x1 - pad_x
+    if trim then
+      local text = decibels.format(trim)
+      local tw = reaper.ImGui_CalcTextSize(ctx, text)
+      reaper.ImGui_DrawList_AddText(dl, px(right - unit_w - tw), text_y, T.TEXT_PRIMARY, text)
+      reaper.ImGui_DrawList_AddText(dl, px(right - unit_w + M.STRIP_UNIT_GAP), text_y, T.TEXT_TERTIARY, UNIT)
+    else
+      local tw = reaper.ImGui_CalcTextSize(ctx, "\u{2014}")
+      reaper.ImGui_DrawList_AddText(dl, px(right - unit_w - tw), text_y, T.TEXT_QUATERNARY, "\u{2014}")
+    end
     if limited then
-      -- The exact shortfall moves to the tooltip so the target, marker and
-      -- applied trim remain readable without adding or widening a row.
-      draw_limit_marker(ctx, dl,
-        x1 - pad_x - trim_zone - M.ITEM_SPACING_X, y0, y1, T.DANGER_RED)
+      -- The exact shortfall is in the tooltip so the row keeps its height.
+      local zone = reaper.ImGui_CalcTextSize(ctx, "+24.0")
+      draw_limit_marker(ctx, dl, right - unit_w - zone - M.ITEM_SPACING_X, y0, y1, T.DANGER_RED)
     end
 
     if pressed and clickable then
-      -- The window STAYS OPEN on a pick (user's call, 2026-08-06 — same as
-      -- the reference list: comparing targets means clicking several).
+      -- The menu STAYS OPEN on a pick: comparing targets means clicking several.
       action = { type = "match_trim", db = trim, limited = limited, unit = p.unit, value = p.value }
     end
   end
@@ -419,17 +355,17 @@ local function draw_preset_row(ctx, state, res, sel, p, i, width)
     if ui.edit_mode then
       tip = "Drag to reorder"
     elseif not sel then
-      tip = "Choose a reference first. Normalize sets the selected reference's trim."
+      tip = "Choose a reference first."
     elseif why == "unmeasured" then
-      tip = "No " .. unit_label(p.unit) .. " measurement is available. It may still be analysing, or the audio may have no measurable signal."
+      tip = "No " .. measurement_name(p.unit) .. " measurement is available. It may still be analysing, or the audio may have no measurable signal."
     elseif limited == "range" then
       local shortfall = fmt_shortfall(p.value - sel[p.unit], trim)
       tip = shortfall .. " of the target. Selecting it applies "
         .. fmt_trim(trim) .. ", the maximum."
     else
-      tip = "Set the selected reference's trim and remember this target."
+      tip = "Set the selected reference's trim to " .. fmt_trim(trim) .. "."
     end
-    tips.show(ctx, hovered, tip)
+    tips.show(ctx, hovered, tip, nil, tips.rect(x0, y0, x1 - x0, y1 - y0))
   end
 
   return action
@@ -437,10 +373,8 @@ end
 
 --------------------------------------------------------------- the target row
 
--- Unit dropdown + typed number + Normalize ("Match" until 2026-08-11, the
--- user's rename). Sits directly under the readout, in the same section as the
--- six measurements it aims at. In edit mode the button becomes Add, or Save
--- after a row's pencil loads that preset into the same two inputs.
+-- Unit dropdown, typed number and Apply. In edit mode the button becomes Add,
+-- or Save after a row's pencil loads that preset into the same two inputs.
 local function draw_target_row(ctx, sel, presets, width)
   local action, limit_text
   -- The sweep follows the state that the owner has actually applied, rather
@@ -450,20 +384,14 @@ local function draw_target_row(ctx, sel, presets, width)
   if theme.motion.enabled and ui.normalize_pending then
     confirmed = sel and sel.id == ui.normalize_pending.id
       and math.abs((sel.trim_db or 0) - ui.normalize_pending.db) < 0.001
-    -- This is deliberately a one-frame acknowledgement: if the owner rejects
-    -- the request or the armed sound changes, a later hand trim must not make
-    -- an old Normalize click look confirmed.
+    -- A one-frame acknowledgement: a later hand trim must not make an old
+    -- Apply click look confirmed.
     ui.normalize_pending = nil
   end
-  local small = theme.push_heading_font(ctx)
-  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, "SET LOUDNESS")
-  if small then reaper.ImGui_PopFont(ctx) end
 
   -- The Combo paints its arrow square Col_Button and its text area FrameBg —
   -- two different fills in this theme, a seam the user read as a mistake
-  -- (2026-08-06). One control, one colour: the arrow zone takes the frame's
-  -- own fills, hover variant included, so the whole box reads as one piece
-  -- the way the picker's name slot does.
+  -- (2026-08-06). The arrow zone takes the frame's own fills instead.
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(),
     reaper.ImGui_GetStyleColor(ctx, reaper.ImGui_Col_FrameBg()))
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(),
@@ -490,8 +418,7 @@ local function draw_target_row(ctx, sel, presets, width)
     local editing = ui.edit_index ~= nil
     local full = not editing and #presets >= match.PRESET_MAX
     -- The same target twice would be two rows doing one job (user's rule,
-    -- 2026-08-06) — Add/Save refuses, and says why. An edited row excludes
-    -- itself from the check so saving an unchanged value remains valid.
+    -- 2026-08-06). An edited row excludes itself from the check.
     local dup = unit and value
       and match.preset_exists(presets, unit.key, value, ui.edit_index) or false
     local ok_save = unit and value and not full and not dup
@@ -506,19 +433,18 @@ local function draw_target_row(ctx, sel, presets, width)
     local tip = editing and "Save changes to this preset." or "Save this target as a preset."
     if dup then tip = "This target is already another preset."
     elseif full then tip = "The preset list is full (" .. match.PRESET_MAX .. "). Remove a preset first." end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), tip)
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx, reaper.ImGui_HoveredFlags_AllowWhenDisabled()), tip)
   else
     local trim, aux
     if unit and value then trim, aux = match.trim_for(sel, unit.key, value) end
     if trim and aux == "range" and sel and type(sel[unit.key]) == "number" then
-      local required = value - sel[unit.key]
-      limit_text = fmt_shortfall(required, trim)
+      limit_text = fmt_shortfall(value - sel[unit.key], trim)
     end
     local why = (not trim) and aux or nil
     local ok_match = trim ~= nil and sel ~= nil
     if not ok_match then reaper.ImGui_BeginDisabled(ctx) end
-    local clicked = reaper.ImGui_Button(ctx, "Normalize##matchcustom", btn_w, 0)
-    local button_hovered = reaper.ImGui_IsItemHovered(ctx)
+    local clicked = reaper.ImGui_Button(ctx, APPLY_TEXT .. "##matchcustom", btn_w, 0)
+    local button_hovered = reaper.ImGui_IsItemHovered(ctx, reaper.ImGui_HoveredFlags_AllowWhenDisabled())
     if limit_text then
       local _, by0 = reaper.ImGui_GetItemRectMin(ctx)
       local bx1, by1 = reaper.ImGui_GetItemRectMax(ctx)
@@ -527,7 +453,6 @@ local function draw_target_row(ctx, sel, presets, width)
         bx1 - M.FRAME_PAD_X, by0, by1, theme.fade(T.DANGER_RED, alpha))
     end
     if clicked and ok_match then
-      -- Stays open, like a preset pick.
       action = { type = "match_trim", db = trim, limited = trim and aux or nil,
         unit = unit.key, value = value }
       if theme.motion.enabled then
@@ -537,8 +462,7 @@ local function draw_target_row(ctx, sel, presets, width)
     if not ok_match then reaper.ImGui_EndDisabled(ctx) end
     local sweep = widgets.motion_event(ctx, "match_normalize_sheen", true, 0.62, confirmed)
     if sweep then
-      -- A quiet satin pass is paint-only, so the button stays where it is and
-      -- remains fully usable while the confirmation settles.
+      -- A quiet satin pass is paint-only, so the button stays usable.
       local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
       local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
       local span = x1 - x0
@@ -554,214 +478,206 @@ local function draw_target_row(ctx, sel, presets, width)
       reaper.ImGui_DrawList_AddRectFilledMultiColor(dl, centre, y0,
         centre + half, y1, light, clear, clear, light)
       reaper.ImGui_DrawList_PopClipRect(dl)
-      -- The Button has already painted its label. Repaint it over the brighter
-      -- pass so the sweep remains noticeable without reducing its contrast.
-      local label = "Normalize"
-      local tw, th = reaper.ImGui_CalcTextSize(ctx, label)
-      local text = theme.fade(reaper.ImGui_GetStyleColor(ctx,
+      -- Repaint the label over the brighter pass to keep its contrast.
+      local tw, th = reaper.ImGui_CalcTextSize(ctx, APPLY_TEXT)
+      local text_col = theme.fade(reaper.ImGui_GetStyleColor(ctx,
         reaper.ImGui_Col_Text()), alpha)
       reaper.ImGui_DrawList_AddText(dl, x0 + (span - tw) * 0.5,
-        y0 + (y1 - y0 - th) * 0.5, text, label)
+        y0 + (y1 - y0 - th) * 0.5, text_col, APPLY_TEXT)
     end
     local tip
     if not value then tip = "Type a target value first."
     elseif not sel then tip = "Choose a reference first."
     elseif why == "unmeasured" then
-      tip = "No " .. unit_label(unit.key) .. " measurement is available. It may still be analysing, or the audio may have no measurable signal."
-    elseif aux == "range" then
-      tip = "Apply the closest available trim: " .. fmt_trim(trim) .. "."
+      tip = "No " .. measurement_name(unit.key) .. " measurement is available. It may still be analysing, or the audio may have no measurable signal."
     elseif trim then tip = "Set the selected reference's trim to " .. fmt_trim(trim) .. "." end
     if limit_text then
-      tip = limit_text .. " of the target. Normalize applies "
+      tip = limit_text .. " of the target. Apply sets "
         .. fmt_trim(trim) .. ", the maximum."
     end
     tips.show(ctx, button_hovered, tip)
   end
-
-
   return action
 end
 
---------------------------------------------------------------- the popup
+--------------------------------------------------------------- menu pieces
+
+-- The preset reorder drag (edit mode), resolved against the rows just drawn —
+-- the picker's exact mechanics: an insertion line at the gap while held, the
+-- move itself on release, the tested gap arithmetic in core.
+local function resolve_drag(ctx, presets, x, width)
+  if not ui.drag_index then return nil end
+  local action
+  local gap_i = nil
+  if prow_n > 0 then
+    local my = select(2, reaper.ImGui_GetMousePos(ctx))
+    for ri = 1, prow_n do
+      if my < (prow_rects[ri].y0 + prow_rects[ri].y1) * 0.5 then gap_i = ri break end
+    end
+    gap_i = gap_i or (prow_n + 1)
+    local edge = prow_rects[gap_i] and prow_rects[gap_i].y0
+      or (prow_rects[prow_n] and prow_rects[prow_n].y1)
+    if edge then
+      reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
+        x, edge - 1, x + width, edge - 1, T.ACCENT, 2)
+    end
+  end
+  if not reaper.ImGui_IsMouseDown(ctx, 0) then
+    local to = gap_i and pins.drop_target(ui.drag_index, gap_i) or nil
+    if to and presets[ui.drag_index] then
+      action = { type = "reorder_match_preset", from = ui.drag_index, to = to }
+    end
+    ui.drag_index = nil
+  end
+  return action
+end
+
+-- Reset to Original Loudness: trim back to 0 dB, so the reference plays as
+-- recorded. A committed set_trim, the same as the trim bar's right-click.
+-- Disabled with nothing selected or no trim to remove, so the row never moves.
+local RESET_TEXT = "Reset to Original Loudness"
+local function draw_reset_item(ctx, sel, width)
+  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+  local live = sel ~= nil and round1(sel.trim_db or 0) ~= 0
+  local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
+  local clicked = reaper.ImGui_InvisibleButton(ctx, "##matchreset", width, ctrl)
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  if live and hovered then
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + ctrl, T.FILL_TERTIARY, 4)
+  end
+  local lh = select(2, reaper.ImGui_CalcTextSize(ctx, RESET_TEXT))
+  local colour = not live and T.TEXT_QUATERNARY or (hovered and T.TEXT_PRIMARY or T.TEXT_SECONDARY)
+  reaper.ImGui_DrawList_AddText(dl, px(x0 + pad_x), px(y0 + (ctrl - lh) * 0.5), colour, RESET_TEXT)
+  tips.show(ctx, hovered, live
+    and "Set the trim back to 0 dB so the reference plays at its recorded level."
+    or (sel and "The reference already plays at its recorded level." or "Select a reference first."))
+  if clicked and live then return { type = "set_trim", db = 0, commit = true } end
+  return nil
+end
+
+-- Edit Presets / Done: a menu row rather than a full button, since it is the
+-- least used thing here.
+local function draw_edit_item(ctx, width)
+  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+  local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
+  if reaper.ImGui_InvisibleButton(ctx, "##matchedit", width, ctrl) then
+    ui.edit_mode = not ui.edit_mode
+    ui.edit_index = nil
+  end
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  if hovered then
+    reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0 + width, y0 + ctrl, T.FILL_TERTIARY, 4)
+  end
+  local label = ui.edit_mode and "Done" or "Edit Presets"
+  local lh = select(2, reaper.ImGui_CalcTextSize(ctx, label))
+  reaper.ImGui_DrawList_AddText(dl, px(x0 + pad_x), px(y0 + (ctrl - lh) * 0.5),
+    ui.edit_mode and T.ACCENT_HOVER or (hovered and T.TEXT_PRIMARY or T.TEXT_SECONDARY), label)
+  tips.show(ctx, hovered, ui.edit_mode
+    and "Finish editing the preset list"
+    or "Add, edit, remove and reorder preset targets")
+end
+
+-- Chooses the menu's side and position while it opens: right-aligned under the
+-- button, or above it when the screen ends too close below. The first frame
+-- estimates the height; the second uses the measured one.
+local function place_menu(ctx, res, presets, outer_width)
+  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  local est_h = 2 * M.WINDOW_PAD + (#presets + 5) * ctrl + 6 * M.ITEM_SPACING_Y
+    + (ui.show_readings and (ctrl + 3 * M.STRIP_READING_H + 2 * M.ITEM_SPACING_Y) or 0)
+  local measured_h = ui.rect and (ui.rect.y2 - ui.rect.y1) or 0
+  local height = math.max(est_h, measured_h)
+  local anchor = {
+    left = ui.anchor_x0, right = ui.anchor_x0,
+    top = ui.anchor_y, bottom = ui.anchor_y1 or ui.anchor_y,
+  }
+  local geometry, work = anchored_panel.place(ctx, res, anchor, {
+    width = outer_width, height = height, min_height = 0,
+    gap = M.PANEL_ANCHOR_GAP, margin = M.PICK_SCREEN_MARGIN, prefer_above = false,
+  })
+  local above = geometry.y < anchor.top
+  local edge = above and (anchor.top - M.PANEL_ANCHOR_GAP)
+    or (anchor.bottom + M.PANEL_ANCHOR_GAP)
+  local top = work.top + M.PICK_SCREEN_MARGIN
+  ui.place = ui.place or {}
+  ui.place.x, ui.place.y, ui.place.pivot_y = geometry.x, edge, above and 1 or 0
+  ui.place.max_h = above and math.max(0, edge - top)
+    or anchored_panel.available_height(work, edge, M.PICK_SCREEN_MARGIN)
+end
+
+--------------------------------------------------------------- the menu
 
 function matchwin.draw_popup(ctx, state, res)
   local action
   local width = M.MATCH_WIN_W
+  if ui.show_readings then width = math.max(width, math.ceil(readings.measure(ctx).two_w)) end
   local outer_width = width + M.WINDOW_PAD * 2
+  local presets = (state.match and state.match.presets) or {}
 
   if theme.motion.enabled and ui.motion_generation ~= theme.motion.generation then
-    -- The shared helpers discard their own tracks on this generation change.
-    -- Drop these screen-owned acknowledgement flags at the same time.
     ui.motion_generation = theme.motion.generation
-    ui.normalize_pending, ui.reveal_requested = nil, false
+    ui.normalize_pending = nil
   end
 
   if ui.open_request then
     ui.open_request = false
-    ui.open = true
-    ui.rect, ui.geometry, ui.work = nil, nil, nil
-    ui.settle = 0
-    if theme.motion.enabled then ui.reveal_requested = true end
+    ui.rect, ui.settle = nil, 0
+    reaper.ImGui_OpenPopup(ctx, POPUP_ID)
   end
 
-  -- Hold the edge beside the button while auto-size measures the contents.
-  -- An estimated top edge lets the real height grow downward over the button.
-  -- After the opening frames, ordinary window dragging remains available.
-  if ui.open and ui.anchor_x and (ui.settle or 0) < 2 then
-    -- Prefer below the button, falling above when there is not enough room.
-    -- The first pass estimates the height; the second
-    -- considers the first drawn frame's actual height but keeps the estimate
-    -- as a floor because an opening auto-sized frame can report decorations
-    -- alone. A fresh open clears the old rectangle so a previous preset list
-    -- cannot affect the next opening.
-    local ctrl = reaper.ImGui_GetFrameHeight(ctx)
-    local n = (state.match and state.match.presets and #state.match.presets) or 0
-    local est_h = (n + 6) * ctrl + 70
-    local measured_h = ui.rect and (ui.rect.y2 - ui.rect.y1) or 0
-    local height = math.max(est_h, measured_h)
-    local anchor = {
-      left = ui.anchor_x,
-      top = ui.anchor_y,
-      right = ui.anchor_x,
-      bottom = ui.anchor_y1 or ui.anchor_y,
-    }
-    local geometry, work = anchored_panel.place(ctx, res, anchor, {
-      width = outer_width,
-      height = height,
-      min_height = 0,
-      gap = M.PANEL_ANCHOR_GAP,
-      margin = M.PICK_SCREEN_MARGIN,
-      prefer_above = false,
-    })
-    ui.geometry, ui.work = geometry, work
-    local above = geometry.y < anchor.top
-    local edge = above and (anchor.top - M.PANEL_ANCHOR_GAP)
-      or (anchor.bottom + M.PANEL_ANCHOR_GAP)
-    -- Scroll within the chosen side when the contents cannot fit there.
-    -- The estimate chooses a side; ImGui's measured size determines placement.
-    local top = work.top + M.PICK_SCREEN_MARGIN
-    ui.geometry.max_height = above and math.max(0, edge - top)
-      or anchored_panel.available_height(work, edge, M.PICK_SCREEN_MARGIN)
-    reaper.ImGui_SetNextWindowPos(ctx, geometry.x, edge,
-      reaper.ImGui_Cond_Always(), 0, above and 1 or 0)
+  if ui.anchor_x0 and reaper.ImGui_IsPopupOpen(ctx, POPUP_ID) then
+    if ui.settle < 2 or ui.scale ~= theme.scale then place_menu(ctx, res, presets, outer_width) end
+    ui.scale = theme.scale
+    reaper.ImGui_SetNextWindowPos(ctx, ui.place.x, ui.place.y,
+      reaper.ImGui_Cond_Always(), 0, ui.place.pivot_y)
+    -- A menu taller than the room scrolls; its scrollbar gets its own width
+    -- so the rows keep theirs and nothing at their right edge is cut off.
+    local window_w = outer_width
+    if ui.scrolls then
+      window_w = window_w + reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_ScrollbarSize())
+    end
+    reaper.ImGui_SetNextWindowSizeConstraints(ctx, window_w, 0, window_w, ui.place.max_h)
   end
 
-  if not ui.open then
-    ui.drag_index = nil
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), M.WINDOW_PAD, M.WINDOW_PAD)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_PopupBg(), T.BG_WINDOW)
+  local opened = reaper.ImGui_BeginPopup(ctx, POPUP_ID, reaper.ImGui_WindowFlags_NoMove())
+  reaper.ImGui_PopStyleColor(ctx, 1)
+  reaper.ImGui_PopStyleVar(ctx, 1)
+  ui.open = opened
+  if not opened then
+    ui.close_request, ui.drag_index, ui.edit_index = false, nil, nil
+    ui.edit_mode, ui.scrolls = false, false
     return nil
   end
+  ui.scrolls = reaper.ImGui_GetScrollMaxY(ctx) > 0
 
-  if ui.settle >= 2 and ui.scale and ui.scale ~= theme.scale and ui.rect then
-    local r = ui.rect
-    local rect = { left = r.x1, top = r.y1, right = r.x2, bottom = r.y2 }
-    ui.geometry, ui.work = anchored_panel.resize(ctx, res, rect,
-      outer_width, (r.y2 - r.y1) * theme.scale / ui.scale, M.PICK_SCREEN_MARGIN)
-    reaper.ImGui_SetNextWindowPos(ctx, ui.geometry.x, ui.geometry.y, reaper.ImGui_Cond_Always())
-  end
-  ui.scale = theme.scale
-
-  -- Auto-size the height at a fixed content width. Position comes from the
-  -- opening button rather than saved window placement.
-  local flags = reaper.ImGui_WindowFlags_NoCollapse()
-    | reaper.ImGui_WindowFlags_AlwaysAutoResize()
-    | reaper.ImGui_WindowFlags_NoSavedSettings()
-  if reaper.ImGui_WindowFlags_NoDocking then
-    flags = flags | reaper.ImGui_WindowFlags_NoDocking()
-  end
-  -- A vertical scrollbar also consumes content width. Allow horizontal scrolling
-  -- whenever the fixed-width controls overflow, even on a wide monitor.
-  if reaper.ImGui_WindowFlags_HorizontalScrollbar then
-    flags = flags | reaper.ImGui_WindowFlags_HorizontalScrollbar()
-  end
-  -- Centred title (user's call, 2026-08-07): this one is a small floating panel
-  -- whose name sits over its own contents, not a full app window whose title
-  -- reads as a label on the left.
-  -- Titled "LOUDNESS" since 2026-08-11 (user's call — "MATCH LOUDNESS" until
-  -- then): the panel shows the numbers as much as it sets them, and "match"
-  -- named only half of it. The ### id is unchanged on purpose — it is what
-  -- ImGui keys the window by, and renaming it would drop its remembered state.
-  -- Every state uses the same content width, including an empty preset list.
-  if ui.geometry then
-    -- Ordinary dragging keeps its placement; a UI size change contains it again.
-    outer_width = math.min(outer_width,
-      anchored_panel.available_width(ui.work, M.PICK_SCREEN_MARGIN))
-    local max_height = ui.geometry.max_height or anchored_panel.available_height(
-      ui.work, ui.geometry.y, M.PICK_SCREEN_MARGIN)
-    reaper.ImGui_SetNextWindowSizeConstraints(ctx,
-      outer_width, 0, outer_width, max_height)
-  else
-    reaper.ImGui_SetNextWindowSizeConstraints(ctx, outer_width, 0, outer_width, 10000)
-  end
-  local visible, still_open = theme.begin_window(ctx, "LOUDNESS###yb_matchwin",
-    true, flags, true)
-  if not still_open then
-    ui.open = false
-    ui.normalize_pending, ui.reveal_requested = nil, false
-  end
-  -- No End on this path: ReaImGui's Begin already called ImGui::End itself when
-  -- it returned false (api/window.cpp, verified 2026-08-09) — an extra End here
-  -- pops the PARENT window. End belongs to the visible path only.
-  if not visible then
-    ui.drag_index = nil
-    return nil
-  end
-
-  local dismiss = anchored_panel.dismissed(ctx, ui)
-
-  -- Keep the window at its anchored position and leave every item in its
-  -- normal hit rectangle. A paint-only veil gives the contents a short reveal
-  -- without making the close or Normalize controls drift away from the cursor.
-  local reveal = widgets.motion_event(ctx, "matchwin_reveal", true, 0.38,
-    theme.motion.enabled and ui.reveal_requested)
-  if theme.motion.enabled then ui.reveal_requested = false end
-
-  -- Keep measured bounds for anchored placement and UI size changes.
   local wx, wy = reaper.ImGui_GetWindowPos(ctx)
   local ww, wh = reaper.ImGui_GetWindowSize(ctx)
-  ui.rect = { x1 = wx, y1 = wy, x2 = wx + ww, y2 = wy + wh }
-  ui.settle = (ui.settle or 0) + 1
+  ui.rect = ui.rect or {}
+  ui.rect.x1, ui.rect.y1, ui.rect.x2, ui.rect.y2 = wx, wy, wx + ww, wy + wh
+  ui.settle = ui.settle + 1
 
   local sel = state.selected
-  local presets = (state.match and state.match.presets) or {}
-
-  -- Every section of the window is named (user's call, 2026-08-07) — the six
-  -- numbers were the one anonymous block, and the target row under them read as
-  -- controls with no job. "This reference" over the numbers, because they follow
-  -- whatever is armed rather than describing a fixed thing.
-  --
-  -- Headings are BOLD and TEXT_PRIMARY (2026-08-08/09, both the user's call).
-  -- They were small dim regular text, which is the treatment for metadata
-  -- sitting beside something louder — and a heading has nothing louder to sit
-  -- beside. Weight is what makes it lead now, so it needs no size step and no
-  -- colour step; see theme.push_heading_font.
-  local small = theme.push_heading_font(ctx)
-  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, "THIS REFERENCE")
-  if small then reaper.ImGui_PopFont(ctx) end
-  -- The armed sound's numbers — the window is their only home. Without a
-  -- selection the cells hold dashes and one dim line says why.
-  draw_readout(ctx, sel, width)
-  if not sel then
-    reaper.ImGui_PushTextWrapPos(ctx, width)
-    reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY,
-      "No reference selected. Choose a reference to normalize it to a target.")
-    reaper.ImGui_PopTextWrapPos(ctx)
+  local heading
+  if ui.show_readings then
+    heading = theme.push_heading_font(ctx)
+    reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, READINGS_HEADING)
+    if heading then reaper.ImGui_PopFont(ctx) end
+    local rx, ry = reaper.ImGui_GetCursorScreenPos(ctx)
+    local row_h = M.STRIP_READING_H
+    readings.draw_columns(ctx, reaper.ImGui_GetWindowDrawList(ctx), sel, rx, ry, width, row_h)
+    reaper.ImGui_Dummy(ctx, width, 3 * row_h)
+    reaper.ImGui_Separator(ctx)
   end
-  -- One rule for the whole window: a divider opens each section and nothing
-  -- separates a section from its own contents. So a line lands above SET
-  -- LOUDNESS and above PRESET TARGETS, and none above Edit presets — that
-  -- button belongs to the preset list, not to a fourth thing (user's call,
-  -- 2026-08-07; "SET A TARGET" until 2026-08-09).
-  reaper.ImGui_Separator(ctx)
-  -- Drawn first, merged second: `action = action or draw_…()` short-circuits in
-  -- Lua, so a frame that already had an action would skip the row entirely.
-  local target_action = draw_target_row(ctx, sel, presets, width)
-  action = action or target_action
+  heading = theme.push_heading_font(ctx)
+  reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, HEADING)
+  if heading then reaper.ImGui_PopFont(ctx) end
 
-  reaper.ImGui_Separator(ctx)
-  local psmall = theme.push_heading_font(ctx)
-  reaper.ImGui_TextColored(ctx, T.TEXT_PRIMARY, "PRESET TARGETS")
-  if psmall then reaper.ImGui_PopFont(ctx) end
-
+  local rows_x = reaper.ImGui_GetCursorScreenPos(ctx)
   prow_n = 0
   for i, p in ipairs(presets) do
     local row_action = draw_preset_row(ctx, state, res, sel, p, i, width)
@@ -769,91 +685,34 @@ function matchwin.draw_popup(ctx, state, res)
   end
   if #presets == 0 then
     reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + width)
-    reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY,
-      ui.edit_mode and "Set a target above, then choose Add."
-        or "No presets yet. Choose Edit Presets to add one.")
+    reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, ui.edit_mode and EMPTY_EDIT_TEXT or EMPTY_TEXT)
     reaper.ImGui_PopTextWrapPos(ctx)
   else
-    -- The rows sit flush (their own ItemSpacing is zeroed), which also swallows
-    -- the gap between the LAST row and whatever follows it (user-reported
-    -- 2026-08-06). A zero-height item hands the theme's normal spacing back
-    -- without inventing a second gap value.
+    -- The rows sit flush, which also swallows the gap after the last row. A
+    -- zero-height item hands the theme's normal spacing back.
     reaper.ImGui_Dummy(ctx, 0, 0)
   end
+  local drag_action = resolve_drag(ctx, presets, rows_x, width)
+  action = action or drag_action
 
-  -- The preset reorder drag (edit mode), resolved against the rows just
-  -- drawn — the picker's exact mechanics: an insertion line at the gap while
-  -- held, the move itself on release, the tested gap arithmetic in core.
-  if ui.drag_index then
-    local gap_i = nil
-    if prow_n > 0 then
-      local my = select(2, reaper.ImGui_GetMousePos(ctx))
-      for ri = 1, prow_n do
-        if my < (prow_rects[ri].y0 + prow_rects[ri].y1) * 0.5 then gap_i = ri break end
-      end
-      gap_i = gap_i or (prow_n + 1)
-      local edge = prow_rects[gap_i] and prow_rects[gap_i].y0
-        or (prow_rects[prow_n] and prow_rects[prow_n].y1)
-      if edge then
-        local wx = reaper.ImGui_GetWindowPos(ctx)
-        reaper.ImGui_DrawList_AddLine(reaper.ImGui_GetWindowDrawList(ctx),
-          wx, edge - 1, wx + width, edge - 1, T.ACCENT, 2)
-      end
-    end
-    if not reaper.ImGui_IsMouseDown(ctx, 0) then
-      local to = gap_i and pins.drop_target(ui.drag_index, gap_i) or nil
-      if to and presets[ui.drag_index] then
-        action = action or { type = "reorder_match_preset", from = ui.drag_index, to = to }
-      end
-      ui.drag_index = nil
-    end
+  reaper.ImGui_Separator(ctx)
+  local target_action = draw_target_row(ctx, sel, presets, width)
+  action = action or target_action
+  reaper.ImGui_Separator(ctx)
+  local reset_action = draw_reset_item(ctx, sel, width)
+  action = action or reset_action
+  draw_edit_item(ctx, width)
+
+  local escape = reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_RootAndChildWindows())
+    and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape())
+  if ui.close_request or escape then
+    ui.close_request = false
+    ui.normalize_pending = nil
+    reaper.ImGui_CloseCurrentPopup(ctx)
+    -- Escape leaves the menu that had focus; hand it back to REAPER.
+    if escape then focus.request() end
   end
-
-  -- ("Match all pins to target" lived above the bottom edge until 2026-08-06,
-  -- built — the user found it off in this window and asked for it gone. The
-  -- arithmetic, match.bulk, stays in core with its specs in case it returns
-  -- with a better home.)
-
-  -- Edit presets, the bottom edge — the same shape the picker's edit mode and
-  -- the sidebar's "+ New category" have. No divider above it: it edits the list
-  -- it sits under, and a line there made it read as a section of its own.
-  local edit_was_active = ui.edit_mode
-  local edit_pushed = widgets.push_soft_active(ctx, edit_was_active)
-  if edit_was_active then
-    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT_HOVER)
-  end
-  if reaper.ImGui_Button(ctx, (ui.edit_mode and "Done" or "Edit Presets") .. "##matchedit", width, 0) then
-    ui.edit_mode = not ui.edit_mode
-    ui.edit_index = nil
-  end
-  if edit_was_active then reaper.ImGui_PopStyleColor(ctx) end
-  widgets.pop_soft_active(ctx, edit_pushed)
-  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), ui.edit_mode
-    and "Finish editing the preset list"
-    or "Add, edit, remove and reorder preset targets")
-
-  if dismiss then matchwin.close() end
-  -- Escape returns keyboard focus; an outside click keeps its chosen target.
-  if reaper.ImGui_IsWindowFocused(ctx)
-    and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape()) then
-    ui.open = false
-    ui.normalize_pending, ui.reveal_requested = nil, false
-    -- The window Esc dismisses was the focused one — hand focus back to
-    -- REAPER rather than leaving it on a window that's about to vanish.
-    focus.request()
-  end
-
-  if reveal and reveal < 1 then
-    local wx, wy = reaper.ImGui_GetWindowPos(ctx)
-    local ww, wh = reaper.ImGui_GetWindowSize(ctx)
-    local content_top = wy + reaper.ImGui_GetFrameHeight(ctx)
-    local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
-    local veil = 0.68 * (1 - reveal) * (1 - reveal) * alpha
-    reaper.ImGui_DrawList_AddRectFilled(reaper.ImGui_GetWindowDrawList(ctx),
-      wx, content_top, wx + ww, wy + wh, theme.fade(T.BG_WINDOW, veil))
-  end
-
-  reaper.ImGui_End(ctx)
+  reaper.ImGui_EndPopup(ctx)
   return action
 end
 

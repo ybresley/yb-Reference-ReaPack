@@ -13,6 +13,7 @@ local T = {
   BG_WINDOW       = 0x181818FF, -- main content background
   BG_POPUP        = 0x1F1F1FFF, -- popups, menus, tooltips
   SET_GROUP_BG    = 0x1F1F1FFF, -- filled subject groups inside Settings
+  ANALYSIS_PAUSED_DIM = 0x1818189E, -- unavailable analysis pictures behind one notice
   -- Fills (white overlays for hover/selection/inputs)
   FILL_PRIMARY    = 0xE4E4E430, -- active/pressed
   FILL_SECONDARY  = 0xE4E4E41E, -- selected rows, button hover
@@ -44,6 +45,10 @@ local T = {
   -- Destructive controls keep a fixed colour independent of the chosen accent.
   -- Red is reserved for warnings and destructive actions, not accent choices.
   DANGER_RED   = 0xFC6B83FF,
+  -- Something for the user to sort out that isn't an error, such as audio
+  -- files in the Library folder that aren't part of the Library. Warmer and
+  -- brighter than the Yellow category colour, so it never reads as a category.
+  WARNING_TEXT = 0xE5C07BFF,
   -- The title bar's ✕ under the cursor. The same red, THINNED over the dark
   -- title bar rather than laid on at full strength: at full strength the cross
   -- on top of it all but disappeared (user-reported 2026-08-08). What these two
@@ -227,13 +232,9 @@ local BASE = {
   SPECTRUM_SPLIT_GAP = 8,
   REFERENCE_PANE_MIN_H = 180,
   REFERENCE_PICKER_W = 112,
-  -- Full panel heights, including rulers, before stacking becomes useful.
-  SPECTRUM_STACK_WAVE_MIN_H = 140,
-  SPECTRUM_STACK_MIN_H = 180,
   SPECTRUM_BAND_GAP = 3,
   SPECTRUM_TAG_PAD_X = 4,
   SPECTRUM_TAG_PAD_Y = 2,
-  SPECTRUM_GROUP_GAP = 6,
   SPECTRUM_PLOT_PAD = 8,
   SPECTRUM_OVERLAY_TRAVEL = 16,
   SPECTRUM_LEVEL_W = 32,
@@ -246,7 +247,6 @@ local BASE = {
   STEREO_RESTORE_H = 166,
   STEREO_LABEL_GAP = 8,
   STEREO_CORRELATION_W = 34,
-  SPECTRUM_SWITCH_SIZE = 20,
   SPECTRUM_SETTINGS_W = 300,
   SPECTRUM_SETTINGS_H = 459, -- opening height until the Spectrum groups are measured
   SETTINGS_TAB_FS = 14,
@@ -379,16 +379,6 @@ local BASE = {
   -- needs enough horizontal air to read as its own target. Height stays a full
   -- control, so widening them does not change the row.
   PICK_TOOL_W    = 22,
-  -- Between the two step arrows. They were welded together (gap 0) so they'd
-  -- read as ONE TARGET rather than two things to aim between; at zero they read
-  -- as one BUTTON instead (user-reported 2026-08-06). A hairline of air tells
-  -- them apart without breaking the pair.
-  PICK_ARROW_GAP = 4,
-  -- The count's own breathing room, EITHER SIDE — wider than ItemSpacing (8) on
-  -- purpose. At 8 it read as squeezed between the arrows and the trim fader
-  -- (user-reported 2026-08-06): a small dim number between two much heavier
-  -- controls needs more air than two controls need from each other.
-  PICK_COUNT_PAD = 12,
   -- The match window (the target button's popup, 2026-08-06 loudness tools).
   -- Fixed width: its rows are short ("−16.0 LUFS-M" + a trim), and a popup that
   -- resized with its content would shift on every preset edit. 320 originally;
@@ -420,6 +410,27 @@ local BASE = {
   -- rows visible — the strip is for checking a sound, the list is the
   -- browser's actual job. A bigger window therefore allows a bigger strip.
   BROWSER_LIST_MIN_ROWS = 2,
+  BROWSER_PANEL_WAVE_H = 48,
+  BROWSER_PREVIEW_NAME_W = 160,
+  BROWSER_PREVIEW_DETAILS_GAP = 20,
+  BROWSER_PANEL_LOUD_W = 280,
+  BROWSER_PANEL_CHANNELS_W = 360,
+  BROWSER_PANEL_TIGHT_W = 250,
+  BROWSER_PANEL_TIGHT_GAP = 4,
+  BROWSER_PANEL_ACTION_GAP = 4,
+  BROWSER_PANEL_DUR_W = 40,
+  BROWSER_PANEL_PIN_W = 20,
+  -- The separate Library window uses the docked audition row. It stretches with
+  -- the window up to this width, then stays centred, so a very wide window does
+  -- not turn its buttons into long bars. Just above the row's width in the
+  -- default window, where it still fills the panel.
+  BROWSER_ROW_MAX_W = 560,
+  -- A docked Library too short for its list shows a picker instead. Its
+  -- waveform folds stereo lanes into one below this lane height, as the
+  -- card's does. The picker's list opens this wide.
+  BROWSER_PICKER_LANE_MIN_H = 20,
+  BROWSER_PICKER_LIST_W = 360,
+  BROWSER_PICKER_LIST_ROWS = 12,
   -- Breathing room between a channel lane's loudest possible bar and the lane edge,
   -- so stereo lanes don't touch across their hairline. A fixed inset, NOT a fraction
   -- of the lane (which was the original 0.85 factor): a proportional gap grew with
@@ -430,25 +441,23 @@ local BASE = {
   -- line, resolved inside the waveform's one hit item — never a second widget
   -- fighting the seek click.
   SPAN_GRAB = 6,
+  -- Start/end flag and line, and the ruler's playhead marker, so they scale
+  -- with UI Size like the rest of the waveform chrome.
+  SPAN_LINE_W = 2,
+  SPAN_FLAG_W = 5,
+  SPAN_FLAG_H = 6,
+  PLAYHEAD_MARKER_HALF_W = 4,
+  PLAYHEAD_MARKER_TOP = 1,
+  PLAYHEAD_MARKER_BOTTOM = 8,
   -- REF_W is retired (2026-07-30): the latch is a square like every other
   -- transport control now, faced "L", so it sizes from GetFrameHeight like the
   -- rest and needs no width of its own.
-  -- Trim / master volume fader TOTAL width (track + gap + readout). 140 until
-  -- the 2026-08-07 density pass, and the 8px it lost came entirely off the
-  -- READOUT, not the track: the tapered trim fader's feel was measured on a
-  -- 70px track the day before (0.69 dB/px on the boost), and a shorter track
-  -- would silently coarsen every fader move. 132 = 70 track + 8 gap + 54 number.
+  -- Default width of a slider or dB bar whose caller gives none.
   SLIDER_W  = 132,
-  -- Fader anatomy (all inside SLIDER_W, so the row layout never changes):
-  FADER_VAL_W   = 54, -- fixed readout zone right of the track ("+24.0 dB" at BASE_FS 13; was 62 at 15px)
-  -- Gap between the end of the track and the first digit. Widened from 6 to 8
-  -- (2026-08-01): the knob is a pill that overhangs the track's end, so a
-  -- fader parked at its maximum left barely 4px of clear air before the number.
-  FADER_VAL_GAP = 8,
+  -- Slider anatomy:
   FADER_TRACK_H = 4,  -- track bar thickness (spacing scale)
   FADER_KNOB_W  = 4,  -- slim pill knob: width …
   FADER_KNOB_H  = 12, -- … and height (taller than the track so it reads at the ends)
-  FADER_TICK_H  = 8,  -- 0 dB detent mark height (overhangs the track 2px each side)
   -- TRIM_MIN_TAIL retired 2026-08-06: the bar's collapse order is now a plain
   -- list of arrangements tried richest-first (ui/transport.lua), so "how much
   -- tail must be left over" has nothing to guard.
@@ -472,17 +481,21 @@ local BASE = {
   CLOSE_STROKE = 1,
   -- Small confirmations fit their text; cap long names so they wrap.
   POPUP_MAX_W = 280,
+  -- The Review Files panel above a notice (leftover_panel.lua). Columns, left
+  -- to right: tick box (the font size), play button, name, reason, length.
+  LEFTOVER_PANEL_W  = 500,
+  LEFTOVER_ROW_H    = 22,
+  LEFTOVER_PLAY     = 19,
+  LEFTOVER_REASON_W = 180,
+  LEFTOVER_LENGTH_W = 40,
+  LEFTOVER_COL_GAP  = 10,
+  LEFTOVER_MIN_ROWS = 3, -- rows kept even when the window is very short
   -- A consistent card width gives the broader lessons room to breathe.
   WALK_CARD_W   = 340,
   WALK_CARD_PAD = 12, -- its inner padding (spacing scale)
   WALK_BUTTON_W = 112, -- fits Start Tutorial without shifting the footer between cards
   WALK_RING_PAD = 4,  -- accent ring's inflation around the target (spacing scale)
   WALK_RING_RADIUS = 5,
-  -- What's New and release history share a fixed reading width.
-  -- Height is a CEILING, not a size — the window auto-sizes to a short release
-  -- and scrolls inside this once a big one (or several missed ones) passes it.
-  WN_WIN_W    = 495,
-  WN_MAX_H    = 420,
   WN_SHOWCASE_W = 820,
   WN_SHOWCASE_H = 900,
   WN_SHOWCASE_MIN_W = 720,
@@ -514,12 +527,9 @@ local BASE = {
   WN_GROUP_PAD_X = 12,
   WN_GROUP_PAD_Y = 10,
   -- A remembered library that disappears opens a compact recovery surface.
-  -- One reserved status line keeps the actions still when a message appears
-  -- without leaving the old three-line blank block during the normal state.
-  RECOVERY_WIN_W    = 420,
-  RECOVERY_WIN_H    = 150,
-  RECOVERY_STATUS_H = 24,
   RECOVERY_ACTION_W = 120,
+  ANALYSIS_NOTICE_W = 342,
+  ANALYSIS_NOTICE_PAD = 12,
   -- The bullet indent (2026-08-09 round 2, `.brief/_done/changelog-lines/` —
   -- REPLACES the area-word rail of the same day, which the user turned down:
   -- a rail can cut or bend a long area word). A bullet hangs alone in this
@@ -528,6 +538,11 @@ local BASE = {
   -- token, which is why it may sit off the spacing scale.
   WN_IND      = 14,
   SET_WIN_W   = 632,
+  AUDIO_LAYOUT_H = 248,
+  AUDIO_LAYOUT_GAP = 12,
+  AUDIO_LAYOUT_FIELD_GAP = 7,
+  AUDIO_LAYOUT_KEY_GAP = 3,
+  AUDIO_LAYOUT_KEY_NUMBER_W = 15,
   SET_CONTENT_GAP = 12, -- separates the navigation from the content's own padding
   SET_LAYOUT_CHOICE_H = 55,
   SET_LAYOUT_MINI_W = 40,
@@ -645,36 +660,38 @@ local BASE = {
   MAIN_WIN_H = 360,
   BROWSER_WIN_W = 720,
   BROWSER_WIN_H = 520,
-  -- The Library popup's OWN width floor (2026-08-12). MIN_WIN_W above is sized
-  -- for the Reference View's transport bar; the browser just reused it, which was
-  -- already tight with two toggles on the info row and went stale as transport
-  -- controls joined them (six squares now — see the info row's own comment in
-  -- ui/browser.lua). Applied at the browser's own
-  -- SetNextWindowSizeConstraints call IN PLACE OF MIN_WIN_W (mirrors how
-  -- MIN_WIN_H already gets RULER_H added for that same call — width needs a
-  -- full replacement rather than an addition, since the row's shape has
-  -- nothing in common with the Reference View's bar).
-  --
-  -- Derived from what the row needs, worst case for room: the sidebar dragged
-  -- to ITS OWN floor (SIDEBAR_MIN_W, 120 — the pane-splitter can't go narrower
-  -- than that regardless of the window, so it can't violate this number).
-  -- Left to right: SIDEBAR_MIN_W (120) + the main pane's own WINDOW_PAD on
-  -- both sides (16) + a readable slice of the tech line (80 — enough to read
-  -- the sample rate and bit depth before the rest clips, not the whole line;
-  -- the one judgement call here, tune by eye) + the row's own 8px text-to-
-  -- controls gap (browser.lua) + six control-height squares with their
-  -- trailing gaps — play, pause, stop, loop, Pitch, auto-audition: 6×(BASE_FS +
-  -- FRAME_PAD_Y×2) + 6×ITEM_SPACING_X = 162 + the "Preview" fader caption
-  -- (~46 at GROUP_FS — CalcTextSize only knows the real width at runtime, so
-  -- this is a hand measurement, the same way SEARCH_W's text allowance was)
-  -- + its 6px gap to the track (transport.lua's own `spacing`) + the whole
-  -- master fader (SLIDER_W, 132, already track + gap + FADER_VAL_W). Total:
-  -- 120+16+80+8+162+46+6+132 = 570.
+  -- The separate Library window's own width floor, applied at its
+  -- SetNextWindowSizeConstraints call in place of MIN_WIN_W (which is sized for
+  -- the Reference View's bar). Worst case for room is the sidebar dragged to
+  -- SIDEBAR_MIN_W (120): the main pane then keeps about 430 px of content.
+  -- That holds the toolbar's 176 px search plus Add Sounds and Dock, the list
+  -- with all its columns, and the audition row with every cell well above a
+  -- control square and the Vol readout clear (core/browser_panel_layout.lua's
+  -- minimum_width is about 220 px).
   BROWSER_MIN_W = 570,
   -- The update notice: an ACCENT dot drawn over the gear button's top-right
   -- corner while a newer version is published (DESIGN.md "Settings, help,
   -- feedback, and releases" — the gear is the notice's only home).
   UPDATE_DOT_R = 3,
+  -- The Reference card (ui/reference_controls.lua) and the docked Library's
+  -- picker form, which mirrors it: picker row, details line, readings below a
+  -- hairline, waveform, transport row. core/card_plan.lua folds them.
+  STRIP_PAD = 8,            -- inside the card
+  STRIP_TIGHT_PAD = 4,      -- the card's padding at its shortest
+  STRIP_GROUP_GAP = 8,      -- between joined button groups, and label to value
+  STRIP_FACTS_GAP = 6,      -- between the card's rows, and either side of the hairline
+  STRIP_FACTS_H = 16,       -- the details line
+  STRIP_UNIT_GAP = 3,       -- a reading's value to its "dB"
+  -- The card's waveform (without its ruler): its height when the card is not
+  -- stretched, and the heights below which the details line, then the
+  -- readings, then the waveform itself give way.
+  CARD_WAVE_H = 64,
+  CARD_WAVE_FACTS_MIN = 64,
+  CARD_WAVE_READINGS_MIN = 40,
+  CARD_WAVE_MIN = 24,
+  STRIP_LABEL_GAP = 6,      -- a compact reading's label to its value
+  STRIP_READING_H = 20,     -- one row of the two-column readings
+  STRIP_COMPACT_READING_H = 16, -- one row of the three-column readings
   -- The paint-only loudness progress card. It lives inside the waveform item,
   -- so it never changes the layout or covers the transport bar below it.
   ANALYSIS_CARD_W = 160,
@@ -700,6 +717,8 @@ local BASE = {
 local UNSCALED = {
   PICK_LIST_ROWS = true,
   BROWSER_LIST_MIN_ROWS = true,
+  BROWSER_PICKER_LIST_ROWS = true,
+  LEFTOVER_MIN_ROWS = true,
 }
 
 theme.MIN_SCALE = 1.0
@@ -767,6 +786,16 @@ local COLORS = {
   { "CheckMark",        "ACCENT" },
   { "SliderGrab",       "ACCENT" },
   { "SliderGrabActive", "ACCENT_HOVER" },
+  -- Slots that would otherwise show ImGui's own blue and yellow defaults,
+  -- ignoring the chosen accent.
+  { "ResizeGrip",          "FILL_SECONDARY" },
+  { "ResizeGripHovered",   "ACTIVE_CONTROL_HOVER" },
+  { "ResizeGripActive",    "ACTIVE_CONTROL_HELD" },
+  { "SeparatorHovered",    "ACTIVE_CONTROL_BORDER" },
+  { "SeparatorActive",     "ACCENT" },
+  { "TextSelectedBg",      "SEARCH_MATCH_BG" },
+  { "DragDropTarget",      "ACCENT" },
+  { "DockingPreview",      "ACTIVE_CONTROL_BORDER" },
 }
 
 -- ImGui style var -> value(s). The padding and spacing values come from the

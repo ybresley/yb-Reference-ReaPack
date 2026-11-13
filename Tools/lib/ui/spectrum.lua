@@ -11,11 +11,11 @@ local tips = require('ui.tips')
 local settings = require('ui.filterwin')
 local entry = require('ui.filter_entry')
 local focus = require('ui.focus')
-local helper_status = require('ui.spectrum_status')
 local controls = require('ui.spectrum_controls')
 local hover_peaks = require('ui.spectrum_hover')
 local frequency_axis = require('ui.spectrum_axis')
 local level_axis = require('ui.spectrum_level_axis')
+local stroke_corners = require('ui.stroke_corners')
 local T, M = theme.tokens, theme.metrics
 local spectrum = {}
 local drag, focused_handle
@@ -133,10 +133,6 @@ local function draw_live_readout(dl, live_readout, data)
   reaper.ImGui_DrawList_PopClipRect(dl)
 end
 
--- Callers supply separate readout state so demonstrations cannot affect the live hover.
-spectrum.prepare_readout = prepare_live_readout
-spectrum.paint_readout = draw_live_readout
-
 local function curve(dl, data, count, gx, gy, width, height, bottom, colour, fill, draw,
     line_width, round_corners)
   line_width = (line_width or 1.25) * theme.scale
@@ -154,7 +150,7 @@ local function curve(dl, data, count, gx, gy, width, height, bottom, colour, fil
     if not colour then return end
     reaper.ImGui_DrawList_AddLine(dl, x1, y1, x2, y2, colour, line_width)
   end
-  local last_x, last_y, last_fill_column
+  local last_x, last_y, last_dx, last_dy, last_fill_column
   -- Round only the held outline between its existing measurement positions.
   -- Subdivision is bounded even in a very wide graph.
   local subdivisions = round_corners and curve_shape.subdivisions(count, width) or 1
@@ -185,11 +181,16 @@ local function curve(dl, data, count, gx, gy, width, height, bottom, colour, fil
         end
       end
       if points then
-        if used == 1024 or not last_x
-            or math.abs(x1 - last_x) > 0.01 or math.abs(y1 - last_y) > 0.01 then
+        local dx, dy = x2 - x1, y2 - y1
+        local continuous = last_x
+          and math.abs(x1 - last_x) <= 0.01 and math.abs(y1 - last_y) <= 0.01
+        local corner = continuous and stroke_corners.sharp(last_dx, last_dy, dx, dy)
+        if used == 1024 or not continuous or corner then
           flush(); used = 1; points[1], points[2] = x1, y1
+          if corner then stroke_corners.join(reaper, dl, x1, y1, colour, line_width) end
         end
         used = used + 1; points[used * 2 - 1], points[used * 2] = x2, y2
+        last_dx, last_dy = dx, dy
       else
         stroke(x1, y1, x2, y2)
       end
@@ -255,7 +256,8 @@ local function clear_button(ctx, res, x, y)
     icons.draw_reset(dl, x + size * 0.5, y + size * 0.5, theme.fade(colour, alpha))
   end
   widgets.button_outline(ctx, button_hovered and T.TEXT_QUATERNARY or T.STROKE_PRIMARY)
-  tips.show(ctx, button_hovered, 'Clear Spectrum History', 'reset_spectrum_history')
+  tips.show(ctx, button_hovered, 'Clear Spectrum History', 'reset_spectrum_history',
+    tips.rect(x, y, size, size))
   if clicked then return {type = 'reset_spectrum_history'} end
 end
 
@@ -289,7 +291,7 @@ function spectrum.paint_grid(dl, gx, gy, gw, gh, bottom, fmin, fmax)
   end
 end
 
-function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_height, background_painted)
+function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_height, background_painted, blocked)
   local model, listening = state.spectrum, state.monitor_filter
   local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
@@ -311,6 +313,7 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_h
     and controls.contains(input_exclusion, mx, my)
   -- Holding a button blocks ordinary window hover, but must not hide its row.
   local controls_visible = settings.is_open()
+    or listening.system.rejected_range ~= nil
     or (listening.system.available == true and listening.on)
     or (reaper.ImGui_IsWindowHovered(ctx,
       reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem())
@@ -325,6 +328,14 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_h
   reaper.ImGui_Dummy(ctx, width, height)
 
   spectrum.paint_grid(dl, gx, gy, gw, gh, bottom, fmin, fmax)
+  if blocked then
+    spectrum.clear_handle_focus()
+    local axes={gx=gx,gy=gy,gw=gw,gh=gh,axis=axis,fmin=fmin,fmax=fmax,
+      bottom=bottom,eligible=false,level_right=x+width-M.SPECTRUM_BAND_GAP}
+    frequency_axis.draw(ctx,dl,model,axes)
+    level_axis.draw(ctx,dl,axes)
+    return
+  end
 
   local available = listening.system.available == true
   local draw_live = available and model.live_visible and model.ready
@@ -455,7 +466,8 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_h
           T.TEXT_PRIMARY, label)
       end
       tips.show(ctx, hot and not held,
-        'Drag to adjust. Right-click, or click then press Enter, to type a frequency.', 'spectrum_' .. boundary)
+        'Drag to adjust. Right-click, or click then press Enter, to type a frequency.', 'spectrum_' .. boundary,
+        tips.rect(hx0, gy, hx1 - hx0, gh))
     end
   else spectrum.clear_handle_focus() end
 
@@ -483,14 +495,6 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_h
   local ruler_readout = frequency_axis.draw(ctx, dl, model, axis_input)
   level_axis.draw(ctx, dl, axis_input)
   if pointer_readout and not ruler_readout then draw_live_readout(dl, live_readout, live_input) end
-  if not available then
-    action = action or helper_status.draw(ctx, listening.system, gx, gy, gw, gh)
-  elseif model.playing and (model.status == 'stale' or model.status == 'invalid') then
-    local message = 'Waiting for spectrum data'
-    local tw, th = reaper.ImGui_CalcTextSize(ctx, message)
-    reaper.ImGui_DrawList_AddText(dl, x + math.max(pad, (width - tw) / 2), gy + math.max(0, (gh - th) / 2),
-      T.TEXT_SECONDARY, message)
-  end
   -- Timed histories refill immediately during playback; clearing is useful
   -- for Infinite accumulation or for history left after playback stops.
   if show_clear then

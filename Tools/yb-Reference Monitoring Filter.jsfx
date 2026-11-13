@@ -3,13 +3,14 @@ author:Yoni Bresley
 tags:filter analysis utility
 options:gmem=yb_reference_monitor_filter_v1 no_meter
 
-slider1:protocol=13<1,13,1>-Protocol
+slider1:protocol=15<1,15,1>-Protocol
 slider2:filter_active=0<0,1,1{Off,On}>-Active
 slider3:reserved_mode=1<0,2,1>-Reserved
 slider4:low_hz=700<10,20000,1>-Lower boundary
 slider5:high_hz=3000<10,20000,1>-Upper boundary
 slider6:slope_index=1<0,3,1{12 dB/oct,24 dB/oct,36 dB/oct,48 dB/oct}>-Slope
 slider7:heartbeat=0<0,999999,1>-Controller heartbeat
+
 
 in_pin:Channel 1
 in_pin:Channel 2
@@ -19,6 +20,126 @@ in_pin:Channel 5
 in_pin:Channel 6
 in_pin:Channel 7
 in_pin:Channel 8
+in_pin:Channel 9
+in_pin:Channel 10
+in_pin:Channel 11
+in_pin:Channel 12
+in_pin:Channel 13
+in_pin:Channel 14
+in_pin:Channel 15
+in_pin:Channel 16
+in_pin:Channel 17
+in_pin:Channel 18
+in_pin:Channel 19
+in_pin:Channel 20
+in_pin:Channel 21
+in_pin:Channel 22
+in_pin:Channel 23
+in_pin:Channel 24
+in_pin:Channel 25
+in_pin:Channel 26
+in_pin:Channel 27
+in_pin:Channel 28
+in_pin:Channel 29
+in_pin:Channel 30
+in_pin:Channel 31
+in_pin:Channel 32
+in_pin:Channel 33
+in_pin:Channel 34
+in_pin:Channel 35
+in_pin:Channel 36
+in_pin:Channel 37
+in_pin:Channel 38
+in_pin:Channel 39
+in_pin:Channel 40
+in_pin:Channel 41
+in_pin:Channel 42
+in_pin:Channel 43
+in_pin:Channel 44
+in_pin:Channel 45
+in_pin:Channel 46
+in_pin:Channel 47
+in_pin:Channel 48
+in_pin:Channel 49
+in_pin:Channel 50
+in_pin:Channel 51
+in_pin:Channel 52
+in_pin:Channel 53
+in_pin:Channel 54
+in_pin:Channel 55
+in_pin:Channel 56
+in_pin:Channel 57
+in_pin:Channel 58
+in_pin:Channel 59
+in_pin:Channel 60
+in_pin:Channel 61
+in_pin:Channel 62
+in_pin:Channel 63
+in_pin:Channel 64
+in_pin:Channel 65
+in_pin:Channel 66
+in_pin:Channel 67
+in_pin:Channel 68
+in_pin:Channel 69
+in_pin:Channel 70
+in_pin:Channel 71
+in_pin:Channel 72
+in_pin:Channel 73
+in_pin:Channel 74
+in_pin:Channel 75
+in_pin:Channel 76
+in_pin:Channel 77
+in_pin:Channel 78
+in_pin:Channel 79
+in_pin:Channel 80
+in_pin:Channel 81
+in_pin:Channel 82
+in_pin:Channel 83
+in_pin:Channel 84
+in_pin:Channel 85
+in_pin:Channel 86
+in_pin:Channel 87
+in_pin:Channel 88
+in_pin:Channel 89
+in_pin:Channel 90
+in_pin:Channel 91
+in_pin:Channel 92
+in_pin:Channel 93
+in_pin:Channel 94
+in_pin:Channel 95
+in_pin:Channel 96
+in_pin:Channel 97
+in_pin:Channel 98
+in_pin:Channel 99
+in_pin:Channel 100
+in_pin:Channel 101
+in_pin:Channel 102
+in_pin:Channel 103
+in_pin:Channel 104
+in_pin:Channel 105
+in_pin:Channel 106
+in_pin:Channel 107
+in_pin:Channel 108
+in_pin:Channel 109
+in_pin:Channel 110
+in_pin:Channel 111
+in_pin:Channel 112
+in_pin:Channel 113
+in_pin:Channel 114
+in_pin:Channel 115
+in_pin:Channel 116
+in_pin:Channel 117
+in_pin:Channel 118
+in_pin:Channel 119
+in_pin:Channel 120
+in_pin:Channel 121
+in_pin:Channel 122
+in_pin:Channel 123
+in_pin:Channel 124
+in_pin:Channel 125
+in_pin:Channel 126
+in_pin:Channel 127
+in_pin:Channel 128
 out_pin:Channel 1
 out_pin:Channel 2
 out_pin:Channel 3
@@ -27,6 +148,126 @@ out_pin:Channel 5
 out_pin:Channel 6
 out_pin:Channel 7
 out_pin:Channel 8
+out_pin:Channel 9
+out_pin:Channel 10
+out_pin:Channel 11
+out_pin:Channel 12
+out_pin:Channel 13
+out_pin:Channel 14
+out_pin:Channel 15
+out_pin:Channel 16
+out_pin:Channel 17
+out_pin:Channel 18
+out_pin:Channel 19
+out_pin:Channel 20
+out_pin:Channel 21
+out_pin:Channel 22
+out_pin:Channel 23
+out_pin:Channel 24
+out_pin:Channel 25
+out_pin:Channel 26
+out_pin:Channel 27
+out_pin:Channel 28
+out_pin:Channel 29
+out_pin:Channel 30
+out_pin:Channel 31
+out_pin:Channel 32
+out_pin:Channel 33
+out_pin:Channel 34
+out_pin:Channel 35
+out_pin:Channel 36
+out_pin:Channel 37
+out_pin:Channel 38
+out_pin:Channel 39
+out_pin:Channel 40
+out_pin:Channel 41
+out_pin:Channel 42
+out_pin:Channel 43
+out_pin:Channel 44
+out_pin:Channel 45
+out_pin:Channel 46
+out_pin:Channel 47
+out_pin:Channel 48
+out_pin:Channel 49
+out_pin:Channel 50
+out_pin:Channel 51
+out_pin:Channel 52
+out_pin:Channel 53
+out_pin:Channel 54
+out_pin:Channel 55
+out_pin:Channel 56
+out_pin:Channel 57
+out_pin:Channel 58
+out_pin:Channel 59
+out_pin:Channel 60
+out_pin:Channel 61
+out_pin:Channel 62
+out_pin:Channel 63
+out_pin:Channel 64
+out_pin:Channel 65
+out_pin:Channel 66
+out_pin:Channel 67
+out_pin:Channel 68
+out_pin:Channel 69
+out_pin:Channel 70
+out_pin:Channel 71
+out_pin:Channel 72
+out_pin:Channel 73
+out_pin:Channel 74
+out_pin:Channel 75
+out_pin:Channel 76
+out_pin:Channel 77
+out_pin:Channel 78
+out_pin:Channel 79
+out_pin:Channel 80
+out_pin:Channel 81
+out_pin:Channel 82
+out_pin:Channel 83
+out_pin:Channel 84
+out_pin:Channel 85
+out_pin:Channel 86
+out_pin:Channel 87
+out_pin:Channel 88
+out_pin:Channel 89
+out_pin:Channel 90
+out_pin:Channel 91
+out_pin:Channel 92
+out_pin:Channel 93
+out_pin:Channel 94
+out_pin:Channel 95
+out_pin:Channel 96
+out_pin:Channel 97
+out_pin:Channel 98
+out_pin:Channel 99
+out_pin:Channel 100
+out_pin:Channel 101
+out_pin:Channel 102
+out_pin:Channel 103
+out_pin:Channel 104
+out_pin:Channel 105
+out_pin:Channel 106
+out_pin:Channel 107
+out_pin:Channel 108
+out_pin:Channel 109
+out_pin:Channel 110
+out_pin:Channel 111
+out_pin:Channel 112
+out_pin:Channel 113
+out_pin:Channel 114
+out_pin:Channel 115
+out_pin:Channel 116
+out_pin:Channel 117
+out_pin:Channel 118
+out_pin:Channel 119
+out_pin:Channel 120
+out_pin:Channel 121
+out_pin:Channel 122
+out_pin:Channel 123
+out_pin:Channel 124
+out_pin:Channel 125
+out_pin:Channel 126
+out_pin:Channel 127
+out_pin:Channel 128
 
 @init
 
@@ -43,6 +284,10 @@ SCENE_SLOPE = 412;
 BIQUADS_PER_SCENE = 8;
 COEFFS_PER_BIQUAD = 5;
 MAX_CHANNELS = 8;
+OUTPUTS = 448;
+NEXT_OUTPUTS = 464;
+output_init = 0; loop(8, OUTPUTS[output_init] = output_init; output_init += 1;);
+max_output = 2;
 LEASE_TIMEOUT = 0.75;
 ACTIVATION_FADE_SECONDS = 0.020;
 CONFIG_FADE_SECONDS = 0.040;
@@ -198,7 +443,7 @@ last_srate = srate;
 // Spectrum data uses slots 32–1087. Stereo packets occupy 200000–1249599.
 // FFT buffers begin after 65536, outside the filter scenes.
 MAGIC = 260826.1;
-CONTRACT_VERSION = 13;
+CONTRACT_VERSION = 15;
 DATA_OFFSET = 64;
 AVERAGE_DATA_OFFSET = 576;
 STEREO_BASE = 200000;
@@ -211,10 +456,9 @@ DISPLAY_BINS = 512;
 MIN_HZ = 10;
 MAX_HZ = 22050;
 
-RING_L = 65536;
-RING_R = 73728;
+RING_BASE = 262144;
+RING_STRIDE = 8192;
 FFT_L = 81920;
-FFT_R = 98304;
 WINDOW = 114688;
 POWER = 122880;
 DISPLAY_POWER = 126976;
@@ -263,6 +507,10 @@ stereo_block_start_sample = 0;
 stereo_block_rate = srate;
 stereo_last_sample_at = 0;
 stereo_enabled = 0;
+analysis_channels = 2;
+analysis_revision = -1;
+pair_left = 0;
+pair_right = 1;
 
 function begin_stereo_packet() local(slot)
 (
@@ -320,9 +568,8 @@ function reset_capture() local(i)
   stereo_last_clip_at = 0;
   stereo_last_clip_sample = 0;
   i = 0;
-  loop(FFT_SIZE,
-    RING_L[i] = 0;
-    RING_R[i] = 0;
+  loop(RING_STRIDE * MAX_CHANNELS,
+    RING_BASE[i] = 0;
     i += 1;
   );
 );
@@ -626,65 +873,73 @@ function update_histories(measured_samples) local(i, target_power,
   );
 );
 
-function prepare_live_fft() local(i, source_index)
+// Retain the window description so every channel uses the same source samples.
+function prepare_live_fft()
 (
-  i = 0;
-  loop(FFT_SIZE,
-    source_index = (write_pos + i) % FFT_SIZE;
-    FFT_L[i] = RING_L[source_index] * WINDOW[i];
-    FFT_R[i] = RING_R[source_index] * WINDOW[i];
-    i += 1;
-  );
+  fft_final = 0;
 );
 
-function prepare_final_fft(anchor, available) local(i, source_index,
+function prepare_final_fft(anchor, available)
+(
+  fft_final = 1;
+  fft_anchor = anchor;
+  fft_available = available;
+);
+
+function prepare_channel_fft(channel_index) local(i, ring, source_index,
     target_start, target_index)
 (
+  ring = RING_BASE + channel_index * RING_STRIDE;
   i = 0;
-  loop(FFT_SIZE,
-    FFT_L[i] = 0;
-    FFT_R[i] = 0;
-    i += 1;
-  );
-
-  source_index = (write_pos - available + FFT_SIZE) % FFT_SIZE;
-  target_start = floor(FFT_SIZE / 2 - anchor);
-  i = 0;
-  loop(available,
-    target_index = target_start + i;
-    target_index >= 0 && target_index < FFT_SIZE ? (
-      FFT_L[target_index] = RING_L[source_index] * WINDOW[target_index];
-      FFT_R[target_index] = RING_R[source_index] * WINDOW[target_index];
+  fft_final ? (
+    loop(FFT_SIZE, FFT_L[i] = 0; i += 1;);
+    source_index = (write_pos - fft_available + FFT_SIZE) % FFT_SIZE;
+    target_start = floor(FFT_SIZE / 2 - fft_anchor);
+    i = 0;
+    loop(fft_available,
+      target_index = target_start + i;
+      target_index >= 0 && target_index < FFT_SIZE ? (
+        FFT_L[target_index] = ring[source_index] * WINDOW[target_index];
+      );
+      source_index = (source_index + 1) % FFT_SIZE;
+      i += 1;
     );
-    source_index = (source_index + 1) % FFT_SIZE;
-    i += 1;
+  ) : (
+    loop(FFT_SIZE,
+      source_index = (write_pos + i) % FFT_SIZE;
+      FFT_L[i] = ring[source_index] * WINDOW[i];
+      i += 1;
+    );
   );
 );
 
-function analyse_prepared_fft(measured_samples) local(measured_max_hz)
+function analyse_prepared_fft(measured_samples) local(measured_max_hz, fft_channel)
 (
-  fft_real(FFT_L, FFT_SIZE);
-  fft_permute(FFT_L, FFT_SIZE / 2);
-  fft_real(FFT_R, FFT_SIZE);
-  fft_permute(FFT_R, FFT_SIZE / 2);
-
   // JSFX names ignore case: keep the current rate's limit separate from MAX_HZ.
   measured_max_hz = min(MAX_HZ, srate * 0.5);
   normalise = 1 / WINDOW_SUM;
-  normalise_power = normalise * normalise;
+  normalise_power = normalise * normalise / analysis_channels;
   BIN_LIMIT = FFT_SIZE / 2 - 1;
   BIN_HZ = srate / FFT_SIZE;
-
   fft_bin = 1;
-  loop(BIN_LIMIT,
-    offset = fft_bin * 2;
-    l_re = FFT_L[offset];
-    l_im = FFT_L[offset + 1];
-    r_re = FFT_R[offset];
-    r_im = FFT_R[offset + 1];
-    POWER[fft_bin] = ((l_re * l_re + l_im * l_im)
-      + (r_re * r_re + r_im * r_im)) * 0.5 * normalise_power;
-    fft_bin += 1;
+  loop(BIN_LIMIT, POWER[fft_bin] = 0; fft_bin += 1;);
+
+  // Average channel powers after separate transforms. Summing samples first
+  // would cancel opposite-polarity channels and hide real surround energy.
+  fft_channel = 0;
+  loop(analysis_channels,
+    prepare_channel_fft(fft_channel);
+    fft_real(FFT_L, FFT_SIZE);
+    fft_permute(FFT_L, FFT_SIZE / 2);
+    fft_bin = 1;
+    loop(BIN_LIMIT,
+      offset = fft_bin * 2;
+      l_re = FFT_L[offset];
+      l_im = FFT_L[offset + 1];
+      POWER[fft_bin] += (l_re * l_re + l_im * l_im) * normalise_power;
+      fft_bin += 1;
+    );
+    fft_channel += 1;
   );
 
   display_step_octaves = log(measured_max_hz / MIN_HZ) / LN2 / DISPLAY_BINS;
@@ -732,6 +987,7 @@ function publish_snapshot(final_marker) local(band)
   gmem[49] = average_ready;
   gmem[51] = history_samples;
   gmem[52] = spectrum_session;
+  gmem[53] = analysis_channels;
 
   sequence += 1;
   gmem[34] = sequence; // even means the frame is complete
@@ -739,13 +995,129 @@ function publish_snapshot(final_marker) local(band)
 );
 
 
+// BEGIN VIRTUAL MASTER INPUT v1 (identical transport in both consumers).
+VM_B=1400000; VM_P=600000; VM_STRIDE=65552; VM_QUEUE=8; VM_RESERVE=3;
+vm_last=0; vm_session=0; vm_token=0; vm_instance=0; vm_width=0; vm_rate=0;
+vm_previous_request=0; vm_previous_ready=0; vm_failed=0; vm_ack_serial=0; vm_force_reset=0;
+memset(VM_P,0,65536);
+function vm_acknowledge(ready_value,error_value) local(k) (
+  vm_ack_serial+=2;
+  gmem[vm_ack+15]=vm_ack_serial-1;
+  gmem[vm_ack]=1; gmem[vm_ack+1]=ready_value;
+  k=2; loop(12,gmem[vm_ack+k]=0; k+=1;);
+  ready_value || (error_value>=4 && error_value<=9) ? (
+    gmem[vm_ack+2]=vm_token; gmem[vm_ack+3]=vm_session;
+    gmem[vm_ack+4]=vm_last; gmem[vm_ack+5]=vm_width;
+    gmem[vm_ack+6]=vm_rate; gmem[vm_ack+7]=vm_instance;
+    gmem[vm_ack+9]=samplesblock; gmem[vm_ack+10]=time_precise();
+    gmem[vm_ack+11]=vm_revision; gmem[vm_ack+12]=vm_consumer_instance;
+    gmem[vm_ack+13]=vm_block_started_at;
+  );
+  gmem[vm_ack+8]=error_value; gmem[vm_ack+15]=vm_ack_serial;
+);
+function vm_identity_current() (
+  gmem[VM_B+1]==1 && gmem[VM_B+10]==1 && gmem[VM_B+vm_request_slot]==1
+    && gmem[VM_B+2]==vm_token && gmem[VM_B+3]==vm_session
+    && gmem[VM_B+4]==vm_width && gmem[VM_B+5]==vm_rate
+    && gmem[VM_B+9]==vm_instance;
+);
+function vm_bridge_begin(ack_base,request_slot,consumer_instance)
+  local(rev,valid_control,tok,sess,width,rate,inst,latest,wanted,bank,seal,
+    age,block_at,fr,ch,pos,copy_ok,error_value,changed_owner,sender_session,sender_error,sender_matches) (
+  vm_ack=ack_base; vm_request_slot=request_slot; vm_consumer_instance=consumer_instance;
+  vm_requested=gmem[VM_B+request_slot]!=0;
+  vm_changed=vm_requested!=vm_previous_request || vm_force_reset; vm_force_reset=0;
+  vm_ready=0; vm_frame=0; error_value=0;
+  vm_requested ? (
+    rev=gmem[VM_B]; tok=gmem[VM_B+2]; sess=gmem[VM_B+3];
+    width=gmem[VM_B+4]; rate=gmem[VM_B+5]; inst=gmem[VM_B+9];
+    valid_control=rev>=0 && rev==floor(rev) && rev%2==0 && gmem[VM_B+1]==1
+      && tok>0 && tok<=999999999 && tok==floor(tok)
+      && sess>0 && sess<=999999999 && sess==floor(sess)
+      && width>=1 && width<=8 && width==floor(width) && rate==srate
+      && inst>0 && inst<=999999999 && inst==floor(inst)
+      && gmem[VM_B+10]==1 && gmem[VM_B+request_slot]==1 && rev==gmem[VM_B];
+    // A heartbeat can begin or finish during this read. Keep the complete
+    // grant only while every identity field still matches; no new lease is earned.
+    !valid_control && vm_identity_current() && vm_session>0 && vm_rate==srate ? (
+      valid_control=1; tok=vm_token; sess=vm_session; width=vm_width;
+      rate=vm_rate; inst=vm_instance; rev=vm_revision;
+    );
+    valid_control ? (
+      changed_owner=tok!=vm_token || sess!=vm_session || width!=vm_width
+        || rate!=vm_rate || inst!=vm_instance;
+      changed_owner ? (vm_last=0; vm_failed=0; vm_changed=1;);
+      vm_token=tok; vm_session=sess; vm_width=width; vm_rate=rate;
+      vm_instance=inst; vm_revision=rev;
+      sender_session=gmem[VM_B+19]; sender_error=gmem[VM_B+24];
+      sender_matches=sender_session==sess && gmem[VM_B+16]==2601104.1 && gmem[VM_B+17]==1
+        && gmem[VM_B+20]==tok && gmem[VM_B+21]==width && gmem[VM_B+22]==rate
+        && gmem[VM_B+23]==inst && gmem[VM_B+19]==sender_session;
+      latest=gmem[VM_B+18];
+      !vm_failed && sender_matches && sender_error==0 && gmem[VM_B+27]==1
+          && latest>=VM_RESERVE+1 && latest==floor(latest) ? (
+        // Leave three complete banks between reader and writer at startup.
+        wanted=vm_last>0 ? vm_last+1 : latest-VM_RESERVE;
+        latest-wanted>=VM_QUEUE-1 ? (vm_failed=6; error_value=6;) : wanted<=latest ? (
+          bank=VM_B+64+((wanted-1)%VM_QUEUE)*VM_STRIDE;
+          seal=gmem[bank]; block_at=gmem[bank+7]; age=time_precise()-block_at;
+          seal==wanted*2 && gmem[bank+1]==tok && gmem[bank+2]==sess
+              && gmem[bank+3]==inst && gmem[bank+4]==width && gmem[bank+5]==rate
+              && gmem[bank+6]==samplesblock && samplesblock>=1 && samplesblock<=8192
+              && age>=0 && age<=max(.25,4*samplesblock/srate) ? (
+            copy_ok=1; fr=0;
+            loop(samplesblock,
+              ch=0; loop(width,
+                pos=bank+16+fr*8+ch;
+                !(gmem[pos]>=-1000000 && gmem[pos]<=1000000) ? copy_ok=0;
+                VM_P[fr*8+ch]=gmem[pos]; ch+=1;
+              ); fr+=1;
+            );
+            copy_ok && seal==gmem[bank] && vm_identity_current() ? (
+              vm_last=wanted; vm_ready=1; vm_block_started_at=block_at;
+            ) : (vm_failed=copy_ok ? 4 : 7; error_value=vm_failed;);
+          ) : (error_value=gmem[bank+6]!=samplesblock ? 8 : age<0 || age>max(.25,4*samplesblock/srate) ? 5 : 4;);
+        ) : (
+          error_value=time_precise()-gmem[VM_B+25]>max(.25,4*samplesblock/srate) ? 5 : 3;
+        );
+      ) : (
+        // The sender may still be reporting the grant that stopped.
+        error_value=vm_failed ? vm_failed : sender_matches
+          && sender_error>=4 && sender_error<=9 && sender_error==floor(sender_error) ? sender_error : 3;
+      );
+    ) : error_value=2;
+    // Waiting never advances the sample clock or erases measured samples. A
+    // genuine discontinuity remains visible until a new source generation.
+    !vm_ready && error_value!=3 ? (
+      !vm_failed ? vm_changed=1;
+      vm_failed=error_value;
+    );
+    vm_acknowledge(vm_ready,error_value);
+  ) : (
+    vm_previous_request ? vm_acknowledge(0,1);
+    vm_last=0; vm_session=0; vm_token=0; vm_failed=0;
+  );
+  vm_previous_ready=vm_ready; vm_previous_request=vm_requested;
+);
+// END VIRTUAL MASTER INPUT v1.
+
+vm_ack=VM_B+48; vm_acknowledge(0,1);
+
 @block
+vm_bridge_begin(VM_B+48,7,0);
+measurement_inputs=vm_requested ? (vm_ready ? vm_width : 0) : num_ch;
+vm_changed ? (
+  reset_capture(); reset_history(); has_publication=0; capture_authorized=0;
+  stereo_serial=0; stereo_clip_total=0;
+  gmem[34]=0; gmem[44]=0; gmem[1093]=0; gmem[1094]=0;
+  gmem[1095]=0; gmem[1096]=0;
+);
 
 source_samples > stereo_block_start_sample && stereo_block_started_at > 0 ? (
   stereo_last_sample_at = stereo_block_started_at
     + (source_samples - stereo_block_start_sample) / stereo_block_rate;
 );
-stereo_this_block_at = time_precise();
+stereo_this_block_at = vm_requested && vm_ready ? vm_block_started_at : time_precise();
 
 // Odd/even publication rejects a partial shape without interrupting the last
 // accepted filter. Active off remains an immediate, independent dry command.
@@ -771,7 +1143,7 @@ control_revision >= 0 && control_revision == floor(control_revision)
     );
     control_revision != accepted_revision || srate != last_srate ? (
       accepted_revision = control_revision;
-      desired_valid = control_protocol == 13 && next_mode == 1
+      desired_valid = control_protocol == 15 && next_mode == 1
         && next_low >= 10 && next_low <= 20000
         && next_high >= next_low + 1 && next_high <= min(20000, floor(srate * 0.49))
         && next_slope >= 0 && next_slope <= 3 && next_slope == floor(next_slope);
@@ -788,7 +1160,7 @@ control_revision >= 0 && control_revision == floor(control_revision)
 controller_alive = time_precise() - lease_time < LEASE_TIMEOUT;
 // Recheck the device limit even while a configuration is being published.
 should_filter = accepted_active >= 0.5 && gmem[1] >= 0.5
-  && control_protocol == 13 && controller_alive && desired_valid
+  && control_protocol == 15 && controller_alive && desired_valid
   && desired_high <= min(20000, floor(srate * 0.49));
 
 should_filter && (!last_filtering || srate != last_srate) ? (
@@ -843,7 +1215,23 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
   next_history_epoch = gmem[23];
   next_idle_seconds = gmem[24];
   next_stereo_enabled = gmem[22];
-  valid_spectrum_config = next_epoch == floor(next_epoch)
+  next_analysis_channels = gmem[26];
+  next_pair_left = gmem[27];
+  next_pair_right = gmem[28];
+  next_analysis_revision = gmem[29];
+  outputs_valid = 1; outputs_changed = 0; next_max_output = 0; map_channel = 0;
+  loop(MAX_CHANNELS,
+    next_output = gmem[55 + map_channel];
+    NEXT_OUTPUTS[map_channel] = next_output - 1;
+    !(next_output == floor(next_output) && next_output >= 1 && next_output <= 128) ? outputs_valid = 0;
+    map_channel < next_analysis_channels ? (
+      next_max_output = max(next_max_output, next_output);
+      OUTPUTS[map_channel] != next_output - 1 ? outputs_changed = 1;
+      prior = 0; loop(map_channel, NEXT_OUTPUTS[prior] == next_output - 1 ? outputs_valid = 0; prior += 1;);
+    );
+    map_channel += 1;
+  );
+  valid_spectrum_config = outputs_valid && next_epoch == floor(next_epoch)
     && next_epoch >= 0 && next_epoch <= 1000000000
     && next_session == floor(next_session) && next_session > 0 && next_session <= 1000000000
     && next_capture_state == floor(next_capture_state)
@@ -853,14 +1241,25 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
     && next_history_epoch == floor(next_history_epoch)
     && next_history_epoch >= 0 && next_history_epoch <= 1000000000
     && next_idle_seconds >= 0 && next_idle_seconds <= 1000000000
-    && (next_stereo_enabled == 0 || next_stereo_enabled == 1);
+    && (next_stereo_enabled == 0 || next_stereo_enabled == 1)
+    && next_analysis_channels == floor(next_analysis_channels)
+    && next_analysis_channels >= 1 && next_analysis_channels <= MAX_CHANNELS
+    && next_pair_left == floor(next_pair_left) && next_pair_left >= 1
+    && next_pair_left <= next_analysis_channels
+    && next_pair_right == floor(next_pair_right) && next_pair_right >= 1
+    && next_pair_right <= next_analysis_channels
+    && next_analysis_revision == floor(next_analysis_revision)
+    && next_analysis_revision >= 0 && next_analysis_revision <= 1000000000;
   spectrum_revision == gmem[20] && valid_spectrum_config ? (
     fft_changed = requested_fft != FFT_SIZE;
     rate_changed = srate != spectrum_srate;
     fft_or_rate_changed = fft_changed || rate_changed;
     smoothing_changed = next_smoothing != smoothing_octaves;
     session_changed = next_session != spectrum_session;
-    epoch_changed = next_epoch != spectrum_epoch || session_changed;
+    channel_layout_changed = outputs_changed || next_analysis_channels != analysis_channels
+      || next_analysis_revision != analysis_revision;
+    pair_changed = next_pair_left - 1 != pair_left || next_pair_right - 1 != pair_right;
+    epoch_changed = next_epoch != spectrum_epoch || session_changed || channel_layout_changed;
     same_retiring_epoch = !epoch_changed;
     (epoch_changed || next_capture_state != 1) ? capture_authorized = 0;
     session_changed ? capture_session_pending = 1;
@@ -873,10 +1272,16 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
       // ages and averages because their timing would otherwise be wrong.
       rate_changed ? reset_history();
     ) : epoch_changed ? reset_capture();
-    history_changed = next_history_epoch != history_epoch || session_changed;
+    history_changed = next_history_epoch != history_epoch || session_changed || channel_layout_changed;
     (smoothing_changed || history_changed) ? reset_history();
     next_average_seconds != average_seconds ? reset_average();
-    next_stereo_enabled != stereo_enabled ? stereo_packet_count = 0;
+    (next_stereo_enabled != stereo_enabled || pair_changed) ? (
+      stereo_packet_count = 0;
+      stereo_last_clip_l = 0;
+      stereo_last_clip_r = 0;
+      stereo_last_clip_at = 0;
+      stereo_last_clip_sample = 0;
+    );
 
     final_requested = 0;
     next_capture_state == 1 && capture_state != 1 ? reset_capture();
@@ -911,6 +1316,16 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
     history_epoch = next_history_epoch;
     idle_seconds = next_idle_seconds;
     stereo_enabled = next_stereo_enabled;
+    outputs_changed ? (
+      clear_scene(0); clear_scene(1);
+      activation_position = 0;
+    );
+    memcpy(OUTPUTS, NEXT_OUTPUTS, MAX_CHANNELS);
+    max_output = next_max_output;
+    analysis_channels = next_analysis_channels;
+    analysis_revision = next_analysis_revision;
+    pair_left = next_pair_left - 1;
+    pair_right = next_pair_right - 1;
     history_changed ? (
       applied_idle_seconds = idle_seconds;
     ) : (
@@ -922,7 +1337,7 @@ spectrum_revision == floor(spectrum_revision) && spectrum_revision % 2 == 0 ? (
     // A complete command may start capture only while this controller is live.
     // Once armed, capture outlives the short lease that keeps filtering safe.
     (spectrum_config_changed || heartbeat_changed) && next_capture_state == 1
-        && !capture_session_pending && controller_alive && control_protocol == 13
+        && !capture_session_pending && controller_alive && control_protocol == 15
         ? capture_authorized = 1;
 
     smoothing_changed && has_publication && same_retiring_epoch
@@ -962,18 +1377,21 @@ stereo_block_started_at = stereo_this_block_at;
 stereo_block_start_sample = source_samples;
 stereo_block_rate = srate;
 // An off command or incompatible controller revokes capture immediately.
-(gmem[19] != 1 || gmem[0] != 13 || control_protocol != 13
+(gmem[19] != 1 || gmem[0] != 15 || control_protocol != 15
     || gmem[18] != spectrum_epoch || gmem[25] != spectrum_session)
     ? capture_authorized = 0;
-active = capture_authorized && control_protocol == 13 && capture_state == 1
+gmem[54] = measurement_inputs;
+active = capture_authorized && control_protocol == 15 && capture_state == 1
+  && measurement_inputs >= (vm_requested ? analysis_channels : max_output)
   && gmem[19] == 1
   && gmem[18] == spectrum_epoch && gmem[25] == spectrum_session;
 gmem[44] = active;
 gmem[1093] = active && stereo_enabled;
 // A pending final command freezes the real samples for its complete revision.
 !active && last_capture_active && !drain_active && gmem[19] != 2
-    ? reset_capture();
-last_capture_active = active;
+    && !(vm_requested && !vm_ready && !vm_failed) ? reset_capture();
+// A temporary raw wait pauses this source without discarding its FFT history.
+!(vm_requested && !vm_ready && !vm_failed) ? last_capture_active = active;
 
 // Finalisation is staged one FFT per callback so Detailed mode cannot perform
 // five expensive transforms in one real-time block. The source ring is frozen.
@@ -1031,25 +1449,35 @@ drain_active ? (
 
 
 @sample
+vm_requested && vm_ready && !vm_identity_current() ? (
+  vm_ready=0; vm_force_reset=1; vm_acknowledge(0,1); active=0; gmem[44]=0; gmem[1093]=0;
+);
 
-// Capture the original stereo pair before any monitoring filter writes spl().
+// Capture every active input before any monitoring filter writes spl().
 active ? (
-RING_L[write_pos] = spl0;
-RING_R[write_pos] = spl1;
-sample_peak = max(sample_peak, max(abs(spl0), abs(spl1)));
+capture_channel = 0;
+loop(analysis_channels,
+  capture_ring = RING_BASE + capture_channel * RING_STRIDE;
+  capture_sample=vm_requested ? VM_P[vm_frame*8+capture_channel] : spl(OUTPUTS[capture_channel]);
+  capture_ring[write_pos] = capture_sample;
+  sample_peak = max(sample_peak, abs(capture_sample));
+  capture_channel += 1;
+);
 
 write_pos = (write_pos + 1) % FFT_SIZE;
 samples_filled = min(FFT_SIZE, samples_filled + 1);
 source_samples += 1;
 stereo_enabled ? (
   stereo_packet_count == 0 ? begin_stereo_packet();
-  gmem[stereo_packet_start + 16 + stereo_packet_count] = spl0;
-  gmem[stereo_packet_start + 16 + STEREO_POINTS + stereo_packet_count] = spl1;
+  capture_l = vm_requested ? VM_P[vm_frame*8+pair_left] : spl(OUTPUTS[pair_left]);
+  capture_r = vm_requested ? VM_P[vm_frame*8+pair_right] : spl(OUTPUTS[pair_right]);
+  gmem[stereo_packet_start + 16 + stereo_packet_count] = capture_l;
+  gmem[stereo_packet_start + 16 + STEREO_POINTS + stereo_packet_count] = capture_r;
   stereo_packet_count += 1;
-  (abs(spl0) >= 1 || abs(spl1) >= 1) ? (
+  (abs(capture_l) >= 1 || abs(capture_r) >= 1) ? (
     stereo_clip_total += 1;
-    stereo_last_clip_l = spl0;
-    stereo_last_clip_r = spl1;
+    stereo_last_clip_l = capture_l;
+    stereo_last_clip_r = capture_r;
     stereo_last_clip_at = stereo_block_started_at
       + (source_samples - stereo_block_start_sample) / srate;
     stereo_last_clip_sample = source_samples;
@@ -1072,6 +1500,7 @@ since_hop >= HOP_SIZE ? (
 );
 
 
+vm_ready ? vm_frame+=1;
 filtering_now ? (
   activation_blend = smoothstep(min(1, activation_position));
   transition_blend = transition_phase == 2
@@ -1086,9 +1515,9 @@ filtering_now ? (
   );
 
   channel = 0;
-  channels_to_process = min(num_ch, MAX_CHANNELS);
+  channels_to_process = num_ch >= max_output ? analysis_channels : 0;
   loop(channels_to_process,
-    dry_sample = spl(channel);
+    dry_sample = spl(OUTPUTS[channel]);
     filtered_sample = process_scene(dry_sample, active_scene, channel);
     transition_phase > 0 ? (
       target_sample = process_scene(dry_sample, fade_to, channel);
@@ -1096,7 +1525,7 @@ filtering_now ? (
         filtered_sample = filtered_sample * old_gain + target_sample * new_gain;
       );
     );
-    spl(channel) = dry_sample
+    spl(OUTPUTS[channel]) = dry_sample
       + (filtered_sample - dry_sample) * activation_blend;
     channel += 1;
   );

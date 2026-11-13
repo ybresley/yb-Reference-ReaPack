@@ -72,11 +72,7 @@ local function position_label(ctx, rect, index, owner)
   local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
   local w, h = tw + pad_x * 2, th + pad_y * 2
   if db < label_bottom or w > width or h + gap > height then return end
-  rect.x0 = math.max(bounds.x0, math.min(bounds.x1 - w, xx - w / 2))
-  rect.x1 = rect.x0 + w
-  rect.y0 = yy - h - gap
-  rect.y1 = yy - gap
-  if label_layout.fits(space, rect, owner) then return text, xx, yy end
+  if label_layout.place(space, rect, owner, xx, yy, w, h, gap) then return text, xx, yy end
 end
 
 local function visible_layout(item)

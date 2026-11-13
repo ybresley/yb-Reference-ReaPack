@@ -184,7 +184,8 @@ function panels.paint(ctx, geometry, input, x, y, res, walkthrough_active)
         face.axis == 'y' and 'arrow-up-down' or 'arrow-left-right',
         (face.x0+face.x1)/2, cy, colour, false, face.pressed, true, M.ICON_FS)
     end
-    tips.show(ctx, face.hot, face.picker and 'Choose a panel for this position.' or face.label, face.id)
+    tips.show(ctx, face.hot, face.picker and 'Choose a panel for this position.' or face.label, face.id,
+      tips.rect(face.x0, face.y0, face.x1 - face.x0, face.y1 - face.y0))
   end
 end
 

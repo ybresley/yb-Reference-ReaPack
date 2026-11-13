@@ -6,14 +6,29 @@ local focus = require('ui.focus')
 local targets = require('core.meter_targets')
 local preferences = require('core.meter_preferences')
 local icons = require('ui.icons')
+local pointer = require('ui.meter_hover')
 
 local settings = {}
 local R, T, M = reaper, theme.tokens, theme.metrics
 local ui = {open=false, page=1}
 local preview_view, preview_targets
+
+-- A demonstration copy of a control must not share animation state with the
+-- live one, so previews add their own suffix to the widget id.
+local function widget_id(key)
+  return 'meter_' .. key .. (preview_view and ('_' .. preview_view.preview_id) or '')
+end
 local pages = {'Display', 'Loudness', 'L/R', 'History', 'Appearance', 'Session'}
+local function channel_label(model)
+  local profile=model and model.channel_profile
+  return profile and (profile.count~=2 or profile.known==false) and 'Channels' or 'L/R'
+end
+local function page_label(model,index)
+  return index==3 and channel_label(model) or pages[index]
+end
 local SAVED_DISPLAY_HINT = 'One saved display setup. Restoring it keeps your playback rules and measurements.'
-local RESET_HINT = 'Reset All Settings to Defaults to enable changes.'
+local RESET_LABEL = 'Reset Loudness Settings'
+local RESET_HINT = 'Loudness is using defaults. Reset to replace your saved settings.'
 -- Row counts match the controls in each group. Wrapped paragraphs are measured separately.
 local PAGE_GROUPS = {
   {{'display_visible',5}},
@@ -51,8 +66,10 @@ local function measure_page(ctx, model, width, view)
     height = height + heading + gap + groups[id] + (index>1 and gap*2 or 0)
   end
   if model.preference_error then
-    height = height + gap*2 + text_height(model.preference_error,pad*2) + text_height(RESET_HINT,pad*2)
-    if view.page ~= 6 then height = height + gap + frame end
+    height = height + gap*2 + text_height(RESET_HINT,pad*2) + frame
+  end
+  if model.preference_reset_error then
+    height = height + gap + text_height(model.preference_reset_error,pad*2)
   end
   return math.ceil(height), groups
 end
@@ -83,7 +100,7 @@ local OPTIONS = {
 
 local HINTS = {
   mode='K-system readings use sine-calibrated RMS. Listening-level calibration is separate.',
-  peak_measurement='Chooses which peak measurement appears in the L/R bars, readings, hold marks and clipping warnings.',
+  peak_measurement='Chooses which peak measurement appears in the channel bars, readings, hold marks and clipping warnings.',
   readings='Absolute shows LUFS. Relative shows LU above or below the target. Bar positions stay the same.',
   preset='Targets change the display only. Audio gain is unchanged.',
   history_position='Arranges the meters and history side by side or stacked. Automatic chooses based on the available space.',
@@ -163,7 +180,7 @@ end
 local function switch_row(ctx, prefs, key, label, disabled, disabled_hint)
   row_label(ctx, label, key, M.SET_SWITCH_W)
   local on = prefs[key] == true
-  local clicked = widgets.switch(ctx, 'meter_' .. key, on,
+  local clicked = widgets.switch(ctx, widget_id(key), on,
       disabled and disabled_hint or HINTS[key], not disabled)
   record_target(key)
   if clicked then return set(key, not on) end
@@ -173,7 +190,7 @@ local function percent_row(ctx, prefs, key, label, low, high, default, disabled)
   row_label(ctx, label, key, M.SPECTRUM_OPTION_W)
   if disabled then R.ImGui_BeginDisabled(ctx) end
   local number_width = R.ImGui_CalcTextSize(ctx, '150%')
-  local next_value, commit = widgets.step_slider(ctx, 'meter_' .. key, prefs[key] * 100,
+  local next_value, commit = widgets.step_slider(ctx, widget_id(key), prefs[key] * 100,
     {min=low, max=high, step=1, tick_step=10,
       width=M.SPECTRUM_OPTION_W - number_width - M.ITEM_SPACING_X})
   local reset = widgets.wants_reset(ctx)
@@ -248,7 +265,7 @@ local function segments(ctx, prefs, id, label, entries, disabled)
     choices[#choices+1] = {key=entry[1], label=entry[2], on=prefs[entry[1]] == true,
       enabled=not disabled and not err, tip=err or entry[3]}
   end
-  local key = widgets.multi_switch(ctx, 'meter_' .. id, choices, M.SPECTRUM_OPTION_W)
+  local key = widgets.multi_switch(ctx, widget_id(id), choices, M.SPECTRUM_OPTION_W)
   if preview_targets then
     local x0, y0 = R.ImGui_GetItemRectMin(ctx)
     local x1, y1 = R.ImGui_GetItemRectMax(ctx)
@@ -262,12 +279,12 @@ local function segments(ctx, prefs, id, label, entries, disabled)
   if key then return set(key, not prefs[key]) end
 end
 
-local function display_page(ctx, prefs)
+local function display_page(ctx, prefs, model)
   return group(ctx, 'display_visible', 'Display', true, function()
     local result = segments(ctx,prefs,'panels','Panels',
       {{'show_meters','Meters'},{'show_history','History'}})
     result = accept(result, segments(ctx,prefs,'meter_groups','Meters',
-      {{'show_loudness','Loudness'},{'show_lr','L/R'}}, not prefs.show_meters))
+      {{'show_loudness','Loudness'},{'show_lr',channel_label(model)}}, not prefs.show_meters))
     result = accept(result, option_row(ctx,prefs,'history_position','Panel Layout',not prefs.show_history))
     result = accept(result, switch_row(ctx,prefs,'extra_readings','Extra Readings'))
     result = accept(result, option_row(ctx,prefs,'target_difference_measurement','Target Diff',
@@ -324,7 +341,7 @@ local function history_page(ctx,prefs)
       {{'history_m','M','Momentary'},{'history_s','S','Short-Term'},{'history_integrated','I','Integrated'}},disabled)
     action = accept(action,option_row(ctx,prefs,'seconds','Time Window',disabled))
     action = accept(action,option_row(ctx,prefs,'history_fill','Fill Under',disabled))
-    action = accept(action,percent_row(ctx,prefs,'history_opacity','Fill Opacity',0,50,.22,disabled or prefs.history_fill=='Off'))
+    action = accept(action,percent_row(ctx,prefs,'history_opacity','Fill Opacity',0,50,.22,disabled or not preferences.fill_active(prefs)))
     action = accept(action,switch_row(ctx,prefs,'history_colours','Loudness Colours',disabled or prefs.colours~='Accent Fade',
       'Choose Accent Fade to colour the short-term line and its fill by level.'))
     action = accept(action,switch_row(ctx,prefs,'history_legend','Show Legend',disabled))
@@ -332,12 +349,12 @@ local function history_page(ctx,prefs)
   end)
 end
 
-local function appearance_page(ctx,prefs)
+local function appearance_page(ctx,prefs,model)
   return group(ctx,'appearance_style','Colour',true,function()
     local action = option_row(ctx,prefs,'colours','Meter Colours')
     action = accept(action,option_row(ctx,prefs,'yellow_lead','Yellow Fade Start',prefs.colours~='Accent Fade'))
     action = accept(action,option_row(ctx,prefs,'red_span','Red Fade End',prefs.colours~='Accent Fade'))
-    action = accept(action,switch_row(ctx,prefs,'lr_shading','L/R Shading',not prefs.show_meters or not prefs.show_lr))
+    action = accept(action,switch_row(ctx,prefs,'lr_shading',channel_label(model)..' Shading',not prefs.show_meters or not prefs.show_lr))
     return action
   end)
 end
@@ -370,24 +387,24 @@ local function session_page(ctx,model,failed)
       R.ImGui_TextColored(ctx,T.DANGER_RED,model.display_preset_error)
       R.ImGui_PopTextWrapPos(ctx)
     end
-    if R.ImGui_Button(ctx,'Reset All Settings to Defaults',width) then result={type='meter_reset_settings'} end
+    if not failed and R.ImGui_Button(ctx,RESET_LABEL,width) then result={type='meter_reset_settings'} end
     return result
   end))
   return action
 end
 
 local DRAW_PAGE = {
-  function(ctx, model) return display_page(ctx, model.prefs) end,
+  function(ctx, model) return display_page(ctx, model.prefs,model) end,
   function(ctx, model) return loudness_page(ctx, model.prefs) end,
   function(ctx, model) return lr_page(ctx, model.prefs) end,
   function(ctx, model) return history_page(ctx, model.prefs) end,
-  function(ctx, model) return appearance_page(ctx, model.prefs) end,
+  function(ctx, model) return appearance_page(ctx, model.prefs,model) end,
   session_page,
 }
 
-local function section_items(ctx, view)
+local function section_items(ctx, view, model)
   for i,name in ipairs(pages) do
-    if R.ImGui_Selectable(ctx,name,view.page==i) and i ~= view.page then
+    if R.ImGui_Selectable(ctx,page_label(model,i),view.page==i) and i ~= view.page then
       view.next_page=i
     end
     if preview_view then
@@ -406,9 +423,9 @@ local function draw_content(ctx, model, res, view)
   local frame = R.ImGui_GetFrameHeight(ctx)
   local width = R.ImGui_GetContentRegionAvail(ctx)
   R.ImGui_SetNextItemWidth(ctx,width-2*(frame+M.ITEM_SPACING_X))
-  local section_open = R.ImGui_BeginCombo(ctx,'##meter_section',pages[view.page])
+  local section_open = R.ImGui_BeginCombo(ctx,'##meter_section',page_label(model,view.page))
   if section_open then
-    section_items(ctx, view)
+    section_items(ctx, view,model)
     R.ImGui_EndCombo(ctx)
   end
   record_target('section')
@@ -430,31 +447,36 @@ local function draw_content(ctx, model, res, view)
     local menu = R.ImGui_Begin(ctx,'##meter_gallery_section_' .. view.preview_id,nil,flags)
     R.ImGui_PopStyleColor(ctx,2)
     if menu then
-      section_items(ctx, view)
+      section_items(ctx, view,model)
       R.ImGui_End(ctx)
     end
   end
   R.ImGui_SameLine(ctx)
+  local failed = model.preference_error ~= nil
+  if failed then R.ImGui_BeginDisabled(ctx) end
   local reset_page = icons.button(ctx,res and res.icon_font,'meter_reset_page','rotate-ccw',
-    {size=frame,fallback=icons.draw_reset,tip='Reset '..pages[view.page]..' settings to defaults'})
+    {size=frame,fallback=icons.draw_reset,tip='Reset '..page_label(model,view.page)..' settings to defaults'})
+  if failed then R.ImGui_EndDisabled(ctx) end
   R.ImGui_SameLine(ctx)
   local closed = widgets.close_button(ctx, 'meter_settings_close')
   R.ImGui_SetCursorPosY(ctx,R.ImGui_GetCursorPosY(ctx)+M.ITEM_SPACING_Y)
-  local failed = model.preference_error ~= nil
+  local reset
+  if failed or model.preference_reset_error then
+    R.ImGui_PushTextWrapPos(ctx, 0)
+    if failed then R.ImGui_TextColored(ctx, T.TEXT_SECONDARY, RESET_HINT) end
+    if model.preference_reset_error then
+      R.ImGui_TextColored(ctx, T.DANGER_RED, model.preference_reset_error)
+    end
+    R.ImGui_PopTextWrapPos(ctx)
+    if failed then
+      reset = R.ImGui_Button(ctx, RESET_LABEL, R.ImGui_GetContentRegionAvail(ctx))
+    end
+  end
   if failed and view.page ~= 6 then R.ImGui_BeginDisabled(ctx) end
   local action = DRAW_PAGE[view.page](ctx, model, failed)
   if reset_page and not failed then action={type='meter_reset_page',page=pages[view.page]} end
   if failed and view.page ~= 6 then R.ImGui_EndDisabled(ctx) end
-  if failed then
-    R.ImGui_PushTextWrapPos(ctx, 0)
-    R.ImGui_TextColored(ctx, T.DANGER_RED, model.preference_error)
-    R.ImGui_TextDisabled(ctx, RESET_HINT)
-    R.ImGui_PopTextWrapPos(ctx)
-    if view.page ~= 6 and R.ImGui_Button(ctx, 'Reset All Settings to Defaults',
-        R.ImGui_GetContentRegionAvail(ctx)) then
-      action = {type='meter_reset_settings'}
-    end
-  end
+  if reset then action={type='meter_reset_settings'} end
   return action, closed
 end
 
@@ -526,7 +548,25 @@ function settings.toggle()
 end
 
 function settings.draw_panel(ctx, model, res)
-  if not ui.open or not model or not model.prefs then return end
+  if not ui.open then
+    pointer.cover(nil)
+    -- A slider released after the window closed (Escape mid-drag) never
+    -- reported its commit; write the previewed value out now.
+    if model and model.prefs and model.preferences_dirty then
+      local action = set('history_opacity', model.prefs.history_opacity)
+      action.commit = true
+      return action
+    end
+    return
+  end
+  -- Every early return releases last frame's hover cover, or meters under the
+  -- panel's old position would stay unhoverable.
+  if not model or not model.prefs then pointer.cover(nil); return end
+  -- Escape belongs to an open dropdown or an active text box first. ImGui
+  -- consumes it during the frame, so the state is read before drawing.
+  local escape_taken = (R.ImGui_IsPopupOpen and R.ImGui_PopupFlags_AnyPopupId
+    and R.ImGui_IsPopupOpen(ctx, '', R.ImGui_PopupFlags_AnyPopupId() | R.ImGui_PopupFlags_AnyPopupLevel()))
+    or (R.ImGui_IsAnyItemActive and R.ImGui_IsAnyItemActive(ctx))
   -- Switch before Begin so the new page receives its own window bounds.
   if ui.next_page then
     ui.page, ui.next_page, ui.reposition = ui.next_page, nil, true
@@ -582,14 +622,15 @@ function settings.draw_panel(ctx, model, res)
   R.ImGui_PushStyleColor(ctx, R.ImGui_Col_WindowBg(), T.BG_WINDOW)
   local visible = R.ImGui_Begin(ctx, '##yb_meter_settings', nil, flags)
   R.ImGui_PopStyleColor(ctx)
-  if not visible then return end
+  if not visible then pointer.cover(nil); return end
   local wx, wy = R.ImGui_GetWindowPos(ctx)
   local ww, wh = R.ImGui_GetWindowSize(ctx)
   ui.bounds = {left=wx, top=wy, right=wx+ww, bottom=wy+wh}
+  pointer.cover(ui.bounds)
   local dismiss = anchored_panel.dismissed(ctx, ui)
   local action, closed = draw_content(ctx, model, res)
   if ui.closing or dismiss then ui.open, ui.closing = false, nil end
-  if closed or (R.ImGui_IsWindowFocused(ctx, R.ImGui_FocusedFlags_RootAndChildWindows())
+  if closed or (not escape_taken and R.ImGui_IsWindowFocused(ctx, R.ImGui_FocusedFlags_RootAndChildWindows())
       and R.ImGui_IsKeyPressed(ctx, R.ImGui_Key_Escape())) then
     ui.open = false
     focus.request()

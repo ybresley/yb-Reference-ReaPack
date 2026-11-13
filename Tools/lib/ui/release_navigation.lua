@@ -5,10 +5,12 @@ local layout = require('core.release_layout')
 local T, M = theme.tokens, theme.metrics
 local navigation = {}
 local geometry, geometry_key, text_cache, text_count = nil, nil, {}, 0
+local title_widths, title_count = {}, 0
 local last_width, last_scale, intro_cache
 
 function navigation.reset()
   geometry, geometry_key, text_cache, text_count = nil, nil, {}, 0
+  title_widths, title_count = {}, 0
   last_width, last_scale, intro_cache = nil, nil, nil
 end
 
@@ -17,17 +19,27 @@ local function font(ctx, size, bold)
   return (bold and theme.push_release_bold_font or theme.push_release_font)(ctx, math.floor(size + .5))
 end
 
+-- Titles are measured once per size; this runs for every card on every frame.
 local function title_size(ctx, title, size, width)
-  local pushed = font(ctx, size, true)
-  local measured = reaper.ImGui_CalcTextSize(ctx, title)
-  if pushed then reaper.ImGui_PopFont(ctx) end
+  local by_size = title_widths[title]
+  local measured = by_size and by_size[size]
+  if not measured then
+    local pushed = font(ctx, size, true)
+    measured = reaper.ImGui_CalcTextSize(ctx, title)
+    if pushed then reaper.ImGui_PopFont(ctx) end
+    if title_count >= 64 then title_widths, title_count = {}, 0 end
+    title_widths[title] = title_widths[title] or {}
+    title_widths[title][size] = measured
+    title_count = title_count + 1
+  end
   return size * math.min(1, math.max(1, width) / math.max(1, measured))
 end
 
 local function wrapped_text(ctx, text, width)
   local size = reaper.ImGui_GetFontSize(ctx)
-  local key = text .. ':' .. width .. ':' .. size
-  local cached = text_cache[key]
+  local by_text = text_cache[text]
+  local by_width = by_text and by_text[width]
+  local cached = by_width and by_width[size]
   if cached then return cached.text, cached.height end
   local lines, line = {}, ''
   for word in text:gmatch('%S+') do
@@ -40,7 +52,10 @@ local function wrapped_text(ctx, text, width)
   local value = table.concat(lines, '\n')
   local _, height = reaper.ImGui_CalcTextSize(ctx, value)
   if text_count >= 64 then text_cache, text_count = {}, 0 end
-  text_cache[key], text_count = { text = value, height = height }, text_count + 1
+  text_cache[text] = text_cache[text] or {}
+  text_cache[text][width] = text_cache[text][width] or {}
+  text_cache[text][width][size] = { text = value, height = height }
+  text_count = text_count + 1
   return value, height
 end
 

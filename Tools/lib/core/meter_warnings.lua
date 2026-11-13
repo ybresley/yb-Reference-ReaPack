@@ -7,7 +7,7 @@ local fields = {
 
 local function exceeds(key, value, target, peak_mode)
   if value == nil or value ~= value then return false end
-  if key == 'l' or key == 'r' then
+  if type(key)=='number' or key == 'l' or key == 'r' then
     if peak_mode=='True Peak' then return value>0 end
     return value>=0
   end
@@ -29,7 +29,7 @@ function warnings.update(state, values, opts, dt)
   dt = type(dt)=='number' and dt==dt and dt>=0 and dt<math.huge and dt or 0
   local target_changed = state.target ~= opts.target
   local ceiling_changed = state.ceiling ~= opts.ceiling
-  local peak_mode = opts.peak_measurement or 'True Peak'
+  local peak_mode = values.peak_measurement or opts.peak_measurement or 'True Peak'
   local peak_changed = state.peak_measurement ~= peak_mode
 
   for key, field in pairs(fields) do
@@ -57,6 +57,30 @@ function warnings.update(state, values, opts, dt)
     if over and (key=='l' or key=='r') then state.clip_below[key]=0 end
   end
 
+  state.channel_values=state.channel_values or {}
+  local channel_count=#(values.channels or {})
+  for index=#state.channel_values,channel_count+1,-1 do
+    state.flags[index],state.suppressed[index],state.clip_below[index]=nil,nil,nil
+    state.channel_values[index]=nil
+  end
+  for index,channel in ipairs(values.channels or {}) do
+    local value=channel.warning_peak or channel.peak
+    state.channel_values[index]=value or false
+    local over=exceeds(index,value,nil,peak_mode)
+    if peak_changed then
+      state.flags[index],state.suppressed[index],state.clip_below[index]=over,over,0
+    elseif not over then
+      if state.flags[index] and opts.clip_hold and opts.clip_hold>0 then
+        state.clip_below[index]=(state.clip_below[index] or 0)+dt
+        if state.clip_below[index]>=opts.clip_hold then state.flags[index]=false end
+      end
+      state.suppressed[index]=false
+    elseif not state.suppressed[index] then
+      state.flags[index],state.suppressed[index]=true,true
+    end
+    if over then state.clip_below[index]=0 end
+  end
+
   local tp = values.tp_max
   state.values.tp_max = tp
   local tp_over = tp ~= nil and tp == tp and opts.ceiling ~= nil and tp > opts.ceiling
@@ -77,6 +101,11 @@ function warnings.clear(state)
     state.flags[key] = false
     state.suppressed[key] = exceeds(key, state.values[field], state.target, state.peak_measurement)
     if key=='l' or key=='r' then state.clip_below[key]=0 end
+  end
+  for index,value in ipairs(state.channel_values or {}) do
+    state.flags[index]=false
+    state.suppressed[index]=exceeds(index,value~=false and value or nil,nil,state.peak_measurement)
+    state.clip_below[index]=0
   end
   state.flags.tp = false
   state.tp_clear_max = state.values.tp_max

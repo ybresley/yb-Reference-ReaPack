@@ -79,6 +79,14 @@ function anchored_panel.available_width(work, margin)
   return width >= margin * 2 and width - margin * 2 or width
 end
 
+-- A fixed-size window kept inside the monitor, so a large UI Size on a small
+-- screen never pushes its edges out of reach.
+function anchored_panel.fit_size(work, width, height, margin)
+  margin = math.max(0, margin or 0)
+  return math.min(width, anchored_panel.available_width(work, margin)),
+    math.min(height, math.max(0, work.bottom - work.top - margin * 2))
+end
+
 -- Auto-sized content can grow after the opening measurement. Keep that growth
 -- reachable while limiting the window to the remaining monitor area below its
 -- opening top edge, or the contained top edge after a UI size change.

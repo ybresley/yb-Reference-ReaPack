@@ -5,6 +5,7 @@ local loudness = require("loudness")
 local pins_service = require("pins_service")
 local copies = require("analysis_copies")
 local api = require("reaper_api")
+local status_message = require("core.status_message")
 
 local service = {}
 local target
@@ -32,12 +33,14 @@ function service.library_loaded(state)
   return available
 end
 
--- Imports rebuild in Library order, including previous failures. A deduplicated
--- import still retries unfinished work but does not claim the progress panel.
+-- Imports rebuild in Library order. Sounds that already failed wait for the next
+-- launch (library_loaded): retrying a missing file after every import only
+-- repeats the failure. A deduplicated import still continues unfinished work but
+-- does not claim the progress panel.
 function service.library_changed(state, view)
   if view then set_progress_view(state, view) end
   if loudness.available() then
-    state.analysis_queue = analysis.queue(state.library, loudness.current())
+    state.analysis_queue = analysis.queue(state.library, loudness.current(), true)
   end
 end
 
@@ -76,14 +79,19 @@ end
 local function finish(state, callbacks, job, result)
   if not valid(state, callbacks, job) then return end
   if job.pin then
+    -- A pin that already failed and fails again is old news: no new status.
+    local repeat_failure = not result and job.record.analysis == "failed"
     local ok, message = pins_service.complete_analysis(state, job.record, result)
-    if message then state.status = message end
-    if ok and not result then
-      state.status = string.format('"%s" couldn\'t be measured. Reopen the project or yb-Reference to retry.',
-        job.record.name)
+    if message then status_message.report(state, ok, message) end
+    if ok and not result and not repeat_failure then
+      status_message.problem(state, string.format('"%s" couldn\'t be measured. Reopen the project or yb-Reference to retry.',
+        job.record.name))
     end
-    return ok
+    return ok and not repeat_failure
   elseif analysis.needs(job.record) then
+    -- A failure repeated on launch changes nothing on disk; a full Library save
+    -- per broken sound would only cost time.
+    if analysis.fails_again(job.record, result) then return true end
     if result then analysis.apply(job.record, result) else analysis.mark_failed(job.record) end
     local saved = callbacks.save_library()
     if state.sort.col == "loud" then callbacks.refresh_view() end
@@ -139,8 +147,8 @@ local function complete(state, callbacks, job, result)
   -- engine and its existing rounding; never publish a detected stale result.
   if job.size == nil or api.file_size(job.path) ~= job.size then
     if finish(state, callbacks, job, nil) then
-      state.status = string.format('"%s" changed or became unavailable while measuring. Reopen yb-Reference to retry.',
-        job.record.name)
+      status_message.problem(state, string.format('"%s" changed or became unavailable while measuring. Reopen yb-Reference to retry.',
+        job.record.name))
     end
     return
   end
@@ -163,6 +171,9 @@ function service.advance(state, callbacks)
     -- A cancellation may already have released the source through holders.lua.
     if loudness.current() == target.record.id then loudness.cancel() end
     copies.forget(state, function(id) return id == target.record.id end)
+    -- An interrupted pass never measured the pin. Save As keeps the same pin
+    -- records under a new folder, so let the queue try it again at its new path.
+    if target.pin then attempted[target.record] = nil end
     target = nil
   end
   local ps = state.pins

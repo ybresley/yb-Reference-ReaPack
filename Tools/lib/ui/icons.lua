@@ -43,11 +43,10 @@ end
 -- Lucide name -> Private-Use-Area codepoint. Only the ones we actually use.
 icons.NAMES = {
   ["folder"]           = 0xE0D7,
-  ["folder-open"]      = 0xE247,
-  ["trash-2"]          = 0xE18E,
+  ["external-link"]    = 0xE0B9,
+  ["panel-left"]       = 0xE12A,
   ["settings"]         = 0xE154,
   ["search"]           = 0xE151,
-  ["file-text"]        = 0xE0CC,
   ["plus"]             = 0xE13D,
   ["play"]             = 0xE13C,
   ["pause"]            = 0xE12E,
@@ -58,15 +57,13 @@ icons.NAMES = {
   ["music-2"]          = 0xE34A, -- natural pitch audition
   ["library"]          = 0xE100, -- the Reference View's Library button (opens the browser popup)
   ["pin"]              = 0xE259, -- the sound table's pinned-to-project column (2026-07-29 redesign)
-  -- The reference picker in the Reference View's control bar (2026-08-06).
+  -- The reference picker on the Reference card's top row.
   ["chevron-down"]  = 0xE06D, -- the name slot's "this opens a list" mark
   ["chevron-left"]  = 0xE06E, -- previous reference
   ["chevron-right"] = 0xE06F, -- next reference
-  ["grip-vertical"] = 0xE0EB, -- edit mode's drag handle (reorder)
   ["pencil"]        = 0xE1F9, -- edit mode's rename (opens the shared Label dialog)
   ["x"]             = 0xE1B2, -- edit mode's unpin
   ["target"]        = 0xE180, -- the match window's button (loudness tools, 2026-08-06)
-  ["activity"] = 0xE038,
   ["audio-waveform"] = 0xE55B,
   ["diamond"] = 0xE2D2,
   ["gauge"] = 0xE1BF,
@@ -74,6 +71,7 @@ icons.NAMES = {
   ["rotate-ccw"] = 0xE148,
   ["sliders-horizontal"] = 0xE29A,
   ["arrow-left-right"] = 0xE24A,
+  ["arrow-left"] = 0xE048,
   ["arrow-up-down"] = 0xE37D,
 }
 
@@ -107,49 +105,6 @@ function icons.draw_pencil(dl, cx, cy, col)
   reaper.ImGui_DrawList_AddQuad(dl, cx - 5, cy + 3, cx + 3, cy - 5,
     cx + 5, cy - 3, cx - 3, cy + 5, col, STROKE)
   reaper.ImGui_DrawList_AddLine(dl, cx - 5, cy + 3, cx - 6, cy + 6, col, STROKE)
-end
-
-function icons.draw_wave(dl, cx, cy, col)
-  local s = theme.scale
-  local last_x, last_y = cx - 7 * s, cy
-  for i = 1, 5 do
-    local x = cx + (-7 + i * 2.8) * s
-    local y = cy + (i == 5 and 0 or (i % 2 == 0 and 5 or -5) * s)
-    reaper.ImGui_DrawList_AddLine(dl, last_x, last_y, x, y, col, s)
-    last_x, last_y = x, y
-  end
-end
-
-function icons.draw_spectrum(dl, cx, cy, col)
-  local s = theme.scale
-  for i = 0, 4 do
-    local x = cx + (i * 3 - 6) * s
-    reaper.ImGui_DrawList_AddLine(dl, x, cy + 5 * s, x,
-      cy - (5 - i * 1.5) * s, col, s)
-  end
-end
-
-local function draw_swap(dl, cx, cy, col, vertical)
-  local s = theme.scale
-  local function line(x0, y0, x1, y1)
-    if vertical then x0, y0, x1, y1 = y0, x0, y1, x1 end
-    reaper.ImGui_DrawList_AddLine(dl, cx + x0 * s, cy + y0 * s,
-      cx + x1 * s, cy + y1 * s, col, s)
-  end
-  line(-5, -2, 5, -2)
-  line(2, -5, 5, -2)
-  line(2, 1, 5, -2)
-  line(5, 2, -5, 2)
-  line(-2, -1, -5, 2)
-  line(-2, 5, -5, 2)
-end
-
-function icons.draw_swap_horizontal(dl, cx, cy, col)
-  draw_swap(dl, cx, cy, col, false)
-end
-
-function icons.draw_swap_vertical(dl, cx, cy, col)
-  draw_swap(dl, cx, cy, col, true)
 end
 
 function icons.draw_reset(dl, cx, cy, col)
@@ -196,6 +151,13 @@ function icons.draw_gear(dl, cx, cy, col)
   end
 end
 
+-- Use the same measured font cell for every icon. The bundled glyphs already
+-- contain their visual inset; offsets based on raw outline bounds double it.
+local function glyph_origin(cx, cy, tw, th)
+  return math.floor(cx - tw * 0.5 + 0.5),
+    math.floor(cy - th * 0.5 + 0.5)
+end
+
 -- Paints the named glyph centred on an arbitrary point — for a glyph that isn't
 -- a whole item of its own (the reference picker's chevron, which lives inside
 -- the name slot's right edge). Returns false when the font is missing or the
@@ -218,8 +180,8 @@ function icons.paint_glyph(ctx, font, name, cx, cy, color, glyph_size)
   -- dimming never reaches it on its own (see theme.fade) — every glyph this module
   -- paints must read its own alpha or it stays bright while its button is disabled.
   local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
-  reaper.ImGui_DrawList_AddTextEx(reaper.ImGui_GetWindowDrawList(ctx), font, gs,
-    math.floor(cx - tw * 0.5 + 0.5), math.floor(cy - th * 0.5 + 0.5),
+  local x, y = glyph_origin(cx, cy, tw, th)
+  reaper.ImGui_DrawList_AddTextEx(reaper.ImGui_GetWindowDrawList(ctx), font, gs, x, y,
     theme.fade(color or T.TEXT_SECONDARY, alpha), glyph)
   return true
 end
@@ -250,8 +212,8 @@ function icons.paint_over_item(ctx, font, name, opts)
   -- renders soft, and a DrawList call ignores BeginDisabled's dimming on its own
   -- (see theme.fade). The two painters disagreeing was itself a bug (2026-08-12).
   local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
-  reaper.ImGui_DrawList_AddTextEx(dl, font, gs,
-    math.floor((x0 + x1) * 0.5 - tw * 0.5 + 0.5), math.floor((y0 + y1) * 0.5 - th * 0.5 + 0.5),
+  local x, y = glyph_origin((x0 + x1) * 0.5, (y0 + y1) * 0.5, tw, th)
+  reaper.ImGui_DrawList_AddTextEx(dl, font, gs, x, y,
     theme.fade(opts.color or T.TEXT_SECONDARY, alpha), glyph)
   return true
 end

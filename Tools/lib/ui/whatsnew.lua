@@ -192,7 +192,7 @@ function whatsnew.draw_release(ctx, release, opts)
     if release.date then
       reaper.ImGui_SameLine(ctx, 0, M.ITEM_SPACING_X)
       local small = theme.push_small_font(ctx)
-      reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, whatsnew.human_date(release.date))
+      reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, whatsnew.human_date(release.date))
       if small then reaper.ImGui_PopFont(ctx) end
     end
   end

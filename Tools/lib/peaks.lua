@@ -52,6 +52,8 @@ function peaks.pending()
   return job and job.sound_id or nil
 end
 
+local SAMPLE_COUNT_MASK = 0xFFFFF
+
 -- Read the (already-built) envelope from a job's source into plain Lua arrays,
 -- kept PER CHANNEL so the UI can draw one lane each (mono = 1, stereo = 2, ...).
 -- Returns an array of length nch, each entry { mins = {...}, maxs = {...} } of BINS.
@@ -62,7 +64,10 @@ local function extract(j)
   -- nch*n long, samples interleaved by channel (index = sample*nch + channel).
   local buf = reaper.new_array(nch * n * 2)
   buf.clear()
-  local got = reaper.PCM_Source_GetPeaks(j.src, peakrate, 0, nch, n, 0, buf)
+  local packed = reaper.PCM_Source_GetPeaks(j.src, peakrate, 0, nch, n, 0, buf)
+  -- The low bits are the sample count; the rest is the output mode.
+  local got = (type(packed) == "number" and packed >= 0)
+    and (math.floor(packed) & SAMPLE_COUNT_MASK) or 0
   local minbase = nch * n
   local chans = {}
   for c = 1, nch do chans[c] = { mins = {}, maxs = {} } end

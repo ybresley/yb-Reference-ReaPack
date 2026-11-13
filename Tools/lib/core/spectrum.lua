@@ -17,6 +17,7 @@ local HELPER_HISTORY = { off = 0, ["1s"] = 1, ["3s"] = 3, infinite = -1 }
 local FALL = { fast = 0.4, balanced = 0.9, smooth = 1.8 }
 local HISTORY_SECONDS = { ["1s"] = 1, ["3s"] = 3 }
 local FLOOR = -180
+local CAPTURE_FAILURE_DELAY = 1
 
 local function finite(value)
   return type(value) == "number" and value == value and math.abs(value) < math.huge
@@ -90,6 +91,9 @@ function spectrum.new(prefs)
     history_signal = false, has_signal = false,
     playing = false, draining = false,
     history_epoch = 1, history_idle_seconds = 0,
+    -- Play and source changes start a new measurement. Resume keeps it under a
+    -- new capture epoch, so Stereo can keep its picture across a pause.
+    measurement = 1,
     stop = nil,
     context_ready = false, target = nil }
   refresh_flags(state)
@@ -108,6 +112,7 @@ function spectrum.reset_history(state)
 end
 
 local function fresh_window(state, clear_history)
+  state.capture_failure_since, state.capture_failed = nil, false
   if clear_history then spectrum.reset_history(state) end
   state.epoch = state.epoch + 1
   state.math.ready, state.target, state.fresh, state.has_signal = false, nil, false, false
@@ -156,8 +161,16 @@ end
 
 local function begin_stopped_display(state, now)
   local stop = { started_at = finite(now) and now or nil, elapsed = 0,
-    live = {}, average = {}, average_ready = state.math.average_ready }
-  copy(state.live, stop.live, state.count)
+    live = {}, average = {}, average_ready = state.math.average_ready,
+    smoothing = state.prefs.smoothing }
+  -- Until this capture's first frame arrives, Live still holds the previous
+  -- sound. A sound too short for a live frame must start from silence so only
+  -- its own final frame appears.
+  if state.math.ready then
+    copy(state.live, stop.live, state.count)
+  else
+    for index = 1, state.count do stop.live[index] = FLOOR end
+  end
   copy(state.average, stop.average, state.count)
   state.stop = stop
 end
@@ -174,6 +187,7 @@ function spectrum.set_context(state, source_key, playing, now, restart)
     state.draining = false
     state.stop = nil
     fresh_window(state, true)
+    state.measurement = state.measurement + 1
   elseif stopped then
     if not state.stop then begin_stopped_display(state, now) end
   elseif resumed then
@@ -315,15 +329,34 @@ function spectrum.update(state, frame, dt, context)
 
       if state.stop and frame.final and frame.sequence ~= state.stop.final_sequence then
         state.stop.final_sequence = frame.sequence
+        -- A final re-smoothed for a new Smoothing choice replaces the trace;
+        -- keeping the louder of two widths would match neither setting.
+        local resmoothed = state.stop.smoothing ~= state.prefs.smoothing
+        state.stop.smoothing = state.prefs.smoothing
         for index = 1, frame.count do
-          state.stop.live[index] = math.max(state.stop.live[index] or FLOOR,
-            frame.raw[index])
+          state.stop.live[index] = resmoothed and frame.raw[index]
+            or math.max(state.stop.live[index] or FLOOR, frame.raw[index])
           state.stop.average[index] = frame.average[index]
         end
         state.stop.average_ready = frame.average_ready == true
       end
     end
   end
+  local awaiting = status == 'waiting' and context.expecting_capture ~= false
+    and (context.expecting_capture or state.math.ready)
+  if not state.playing or status == 'ready' or status == 'unavailable'
+      or (status == 'waiting' and not awaiting) then
+    state.capture_failure_since, state.capture_failed = nil, false
+  elseif status == 'invalid' or status == 'stale'
+      or awaiting then
+    -- The first FFT can take longer than an ordinary update.
+    state.capture_failure_since = state.capture_failure_since or context.now
+  end
+  local delay = awaiting and not state.math.ready
+    and (context.first_capture_delay or CAPTURE_FAILURE_DELAY) or CAPTURE_FAILURE_DELAY
+  state.capture_failed = state.capture_failure_since ~= nil and finite(context.now)
+    and (state.capture_failed or context.now - state.capture_failure_since >= delay)
+  if status == 'waiting' and state.capture_failed then status = 'stale' end
   if status == "stale" or status == "unavailable" or status == "invalid" then
     state.fresh, state.target, state.has_signal = false, nil, false
   end
@@ -334,7 +367,6 @@ function spectrum.update(state, frame, dt, context)
     maths.update(state.math, state.target, dt, {
       motion_mode = "power", attack_seconds = 0.012,
       release_seconds = maths.power_release_seconds(20, FALL[state.prefs.speed]),
-      average_seconds = nil, peak_hold_seconds = nil,
     })
     if frame then
       local history_maximum = FLOOR

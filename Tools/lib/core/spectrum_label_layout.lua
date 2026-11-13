@@ -43,4 +43,18 @@ function layout.fits(state, rect, owner)
   return true
 end
 
+-- Tags sit centred above their summit. A summit too close to the top of the
+-- plot gets its tag below instead, so the loudest peaks don't go unlabelled
+-- while still using up a tag slot. Fills rect and reports whether it fits.
+function layout.place(state, rect, owner, x, y, width, height, gap)
+  local bounds = state.bounds
+  rect.x0 = math.max(bounds.x0, math.min(bounds.x1 - width, x - width / 2))
+  rect.x1 = rect.x0 + width
+  rect.y0, rect.y1 = y - height - gap, y - gap
+  if rect.y0 < bounds.y0 then
+    rect.y0, rect.y1 = y + gap, y + gap + height
+  end
+  return layout.fits(state, rect, owner)
+end
+
 return layout

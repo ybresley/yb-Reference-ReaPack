@@ -48,6 +48,18 @@ function location.classify(path, folder_empty)
   return folder_empty == true and "empty" or "occupied"
 end
 
+-- What startup does when the folder is there but holds no library.json:
+-- "create" a starter Library, or "recover" (open the recovery window). Only a
+-- folder never used before, and proved empty, may become a new Library. A
+-- remembered folder always held a library.json, so an empty one means its
+-- contents are missing (a sync service still downloading, an offline drive's
+-- mount point, a move in progress), and silently starting afresh there would
+-- later clash with the real file.
+function location.when_missing(remembered, folder_empty)
+  if remembered or folder_empty ~= true then return "recover" end
+  return "create"
+end
+
 -- Create only after the caller has proved the destination folder is empty.
 -- Never mix a new library into unrelated files or overwrite recovery data.
 function location.create_new(path, folder_empty)

@@ -13,9 +13,11 @@ end
 
 -- Called with this frame's actual popup owner, independently of UI actions.
 -- A close, edit mode, hidden window or project switch must always release audio.
+-- The owner is the pin set's session, not the project pointer: REAPER may keep
+-- the pointer while another file opens into the same tab.
 function picker_preview.set_context(state, owner)
   local ps = state.pins
-  if not ps or ps.load_error or owner ~= ps.proj then owner = nil end
+  if not ps or ps.load_error or owner ~= ps.session then owner = nil end
   if owner == nil or owner ~= state.picker_preview_owner then
     picker_preview.stop(state)
   end
@@ -33,7 +35,7 @@ end
 function picker_preview.play(state, id, owner, play)
   local ps = state.pins
   if owner == nil or owner ~= state.picker_preview_owner
-    or not ps or owner ~= ps.proj or ps.load_error then return false end
+    or not ps or owner ~= ps.session or ps.load_error then return false end
   if state.drag then return false end
   if state.picker_preview_blocked or state.reference.active then
     return false, "Reference mode is playing. Stop the Reaper timeline to preview here."

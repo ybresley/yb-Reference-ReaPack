@@ -5,7 +5,11 @@ local reference = require('core.reference_layout')
 local preferences = {}
 local VARIANTS = {'automatic', 'map', 'direct'}
 local VARIANT = {automatic=true, map=true, direct=true}
-local PANELS = {waveform=true, spectrum=true, stereo=true, loudness=true}
+local PANELS = {spectrum=true, stereo=true, loudness=true}
+-- Version 1 also arranged a Waveform panel. The waveform now lives in the
+-- Reference card, so reading a version 1 record drops that panel.
+local VERSION = 2
+local RETIRED = 'waveform'
 local MODES = {auto=true, row=true, stack=true, grid=true,
   top=true, bottom=true, left=true, right=true}
 local METER_ORDER = {'loudness', 'lr', 'readings', 'history'}
@@ -91,7 +95,39 @@ function preferences.encode(model, meter_splits)
   local clean, meters, err = normalize(model, meter_splits)
   if not clean then return nil, err end
   clean.editing = nil
-  return json.encode({version=1, layout=clean, meter_splits=meters})
+  return json.encode({version=VERSION, layout=clean, meter_splits=meters})
+end
+
+-- A list without the retired panel, or the value unchanged when it is not a
+-- list, so normalize still rejects it. Copies, so the stored table is untouched.
+local function without_retired(list)
+  if type(list) ~= 'table' then return list end
+  local count = #list
+  for key in pairs(list) do
+    if type(key) ~= 'number' or key % 1 ~= 0 or key < 1 or key > count then return list end
+  end
+  local result = {}
+  for _, id in ipairs(list) do
+    if id ~= RETIRED then result[#result+1] = id end
+  end
+  return result
+end
+
+-- Version 1 records: drop the Waveform panel from each arrangement. One that
+-- showed only the waveform shows every remaining panel instead.
+local function upgrade_v1(stored_layout)
+  if type(stored_layout) ~= 'table' or type(stored_layout.variants) ~= 'table' then return end
+  for _, name in ipairs(VARIANTS) do
+    local source = stored_layout.variants[name]
+    if type(source) == 'table' then
+      local enabled = without_retired(source.enabled)
+      if type(enabled) == 'table' and #enabled == 0 and type(source.enabled) == 'table'
+          and #source.enabled > 0 then
+        enabled = {'spectrum', 'stereo', 'loudness'}
+      end
+      source.enabled, source.order = enabled, without_retired(source.order)
+    end
+  end
 end
 
 function preferences.decode(text)
@@ -99,9 +135,10 @@ function preferences.decode(text)
   if type(text) ~= 'string' then return nil, nil, INVALID end
   local ok, stored = pcall(json.decode, text)
   if not ok or type(stored) ~= 'table' then return nil, nil, INVALID end
-  if stored.version ~= 1 then
+  if stored.version ~= 1 and stored.version ~= VERSION then
     return nil, nil, 'Saved panel arrangements use an unsupported version.'
   end
+  if stored.version == 1 then upgrade_v1(stored.layout) end
   if not only_keys(stored, {version=true, layout=true, meter_splits=true})
       or type(stored.layout) ~= 'table'
       or not only_keys(stored.layout, {active=true, variants=true})
@@ -156,19 +193,22 @@ function preferences.migrate(reference_prefs, meter_prefs)
   model.active = shape == 'auto' and 'automatic' or 'map'
   local target = model.variants[model.active]
   target.mode = shape == 'horizontal' and 'row' or shape == 'vertical' and 'stack' or shape
-  local order = legacy and legacy.orders[shape == 'auto' and 'horizontal' or shape]
-    or {'waveform', 'spectrum', 'stereo'}
-  target.order = {order[1], order[2], order[3], 'loudness'}
+  -- The older records also arranged the waveform, which now lives in the card.
+  local order = without_retired(legacy and legacy.orders[shape == 'auto' and 'horizontal' or shape]
+    or {'spectrum', 'stereo'})
+  target.order = {order[1], order[2], 'loudness'}
   local view = meter_prefs and meter_prefs.view or 'all'
   local show_meter = view ~= 'pictures' and not (meter_prefs and meter_prefs.visible == false)
   local show_pictures = view ~= 'meters' or not show_meter
   target.enabled = {}
   if show_pictures then
-    for _, id in ipairs(legacy and legacy.enabled or {'waveform', 'spectrum', 'stereo'}) do
+    for _, id in ipairs(without_retired(legacy and legacy.enabled or {'spectrum', 'stereo'})) do
       target.enabled[#target.enabled+1] = id
     end
   end
   if show_meter then target.enabled[#target.enabled+1] = 'loudness' end
+  -- Only the waveform was showing: show the loudness meters rather than nothing.
+  if #target.enabled == 0 then target.enabled[1] = 'loudness' end
   if legacy then import_shares(target.shares, legacy) end
   return normalize(model, meters)
 end

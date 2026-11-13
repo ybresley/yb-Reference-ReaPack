@@ -3,10 +3,22 @@
 local colours = {}
 local scale = require('core.meter_scale')
 colours.names = { 'Accent Fade' }
-colours.accent_offset = -5
 local yellow, red = 0xE8C668FF, 0xFC6B83FF
 
 function colours.has(name) return name=='Accent Fade' end
+
+local LAVENDER, AMBER = 0xAF95DFFF, 0xD9A06AFF
+
+-- The Integrated history line is lavender unless the accent is close enough
+-- (Purple and Magenta) that it could not be told apart from the Short-Term
+-- line, which uses the accent itself.
+function colours.integrated(accent)
+  local distance=0
+  for shift=8,24,8 do
+    distance=distance+math.abs(((accent>>shift)&255)-((LAVENDER>>shift)&255))
+  end
+  return distance<80 and AMBER or LAVENDER
+end
 
 local function landmark(index,accent)
   if index==1 then

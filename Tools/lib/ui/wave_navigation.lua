@@ -73,6 +73,13 @@ local function classify(v, mx, my, g)
   end
 end
 
+-- True when the pointer is on a visible scroll rail, so a start/end handle
+-- lying beneath the rail does not take its clicks.
+function navigation.on_rail(v, x, y, w, h, mx, my)
+  local part = classify(v, mx, my, geometry(x, y, w, h, 0))
+  return part ~= nil
+end
+
 function navigation.draw_rails(dl, v, x, y, w, h, ruler_h, hot, ruler_hovered)
   local g = geometry(x, y, w, h, ruler_h)
   if zoomed_amp(v) then
@@ -118,8 +125,14 @@ local function drag_view(g, mx, my)
       (time_pointer_x - g.time_x) / g.time_w, M.WAVE_TIME_THUMB_MIN_W / g.time_w)
   elseif drag.mode == "middle_pan" then
     viewport.pan_time(v, -dx / g.w * (drag.view.t1 - drag.view.t0))
-  elseif drag.mode == "time_left" then viewport.set_time(v, drag.view.t0 + dx / g.time_w, drag.view.t1)
-  elseif drag.mode == "time_right" then viewport.set_time(v, drag.view.t0, drag.view.t1 + dx / g.time_w)
+  elseif drag.mode == "time_left" then
+    -- The dragged end stops one minimum span short of the other end instead of
+    -- crossing it, which would re-centre the view at maximum zoom.
+    local limit = drag.view.t1 - (v.min_time_span or 0)
+    viewport.set_time(v, math.min(drag.view.t0 + dx / g.time_w, limit), drag.view.t1)
+  elseif drag.mode == "time_right" then
+    local limit = drag.view.t0 + (v.min_time_span or 0)
+    viewport.set_time(v, drag.view.t0, math.max(drag.view.t1 + dx / g.time_w, limit))
   elseif drag.mode == "amp_body" then
     viewport.set_amp_span(v, (drag.view.a1 - drag.view.a0) * math.exp(dy * 0.012))
   elseif drag.mode == "amp_top" then
@@ -170,6 +183,9 @@ function navigation.handle(ctx, id, v, x, y, w, h, ruler_h, blocked, physical_mo
       if drag.mode == "ruler" and not drag.moved then
         result = { type = "seek", fraction = viewport.time_at(v, (mx - x) / w) }
       end
+      drag = {}
+    elseif not reaper.ImGui_IsMouseDown(ctx, 0) then
+      -- The button came up on a frame this panel was not drawn.
       drag = {}
     end
   end

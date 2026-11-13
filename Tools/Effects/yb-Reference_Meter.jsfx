@@ -1,13 +1,9 @@
-// Original stereo analysis helper. Samples pass through unchanged.
+// Original one-to-eight-channel analysis helper. Samples pass through unchanged.
 // RMS and crest peak share 80 complete 5 ms slices per channel.
-// Stereo Crest Factor accumulates unweighted energy and sample peak per run.
+// Crest Factor uses mean channel power and the highest sample peak per run.
 desc:yb-Reference Meter
 tags:analysis meter
 options:no_meter gmem=yb_reference_monitor_filter_v1
-in_pin:Left
-in_pin:Right
-out_pin:Left
-out_pin:Right
 
 slider1:rms_l=-150<-150,24,0.01>-RMS Left (output)
 slider2:rms_r=-150<-150,24,0.01>-RMS Right (output)
@@ -22,7 +18,7 @@ slider10:live_peak_r=-150<-150,24,0.01>-Live Peak Right (output)
 slider11:lra=0<0,120,0.01>-LRA (output)
 slider12:lra_low=-150<-150,50,0.01>-LRA low (output)
 slider13:lra_high=-150<-150,50,0.01>-LRA high (output)
-slider14:lra_valid=0<-1,1,1>-LRA valid (output)
+slider14:lra_valid=0<-2,1,1>-LRA valid (output)
 slider15:lra_seconds=0<0,1000000000,0.01>-LRA seconds (output)
 slider16:lra_revision=0<0,1000000000,1>-LRA revision (output)
 slider17:live_m=-150<-150,50,0.01>-Momentary L/R (output)
@@ -45,9 +41,267 @@ slider32:live_true_peak_r=-150<-150,50,0.01>-Live True Peak Right (output)
 slider33:true_peak_age_l=0<0,1,0.000001>-True Peak Age Left (output)
 slider34:true_peak_age_r=0<0,1,0.000001>-True Peak Age Right (output)
 slider35:true_peak_max=-150<-150,50,0.01>-True Peak Max (output)
-slider36:control_protocol=2<2,2,1>-Control protocol (output)
+slider36:control_protocol=4<4,4,1>-Control protocol (output)
 slider37:instance_token=0<0,1000000000,1>-Instance token (output)
 slider38:control_session=0<0,1000000000,1>-Control session (output)
+slider39:stopped_monitoring=1<1,1,1>-Monitor while stopped (output)
+
+in_pin:Channel 1
+in_pin:Channel 2
+in_pin:Channel 3
+in_pin:Channel 4
+in_pin:Channel 5
+in_pin:Channel 6
+in_pin:Channel 7
+in_pin:Channel 8
+in_pin:Channel 9
+in_pin:Channel 10
+in_pin:Channel 11
+in_pin:Channel 12
+in_pin:Channel 13
+in_pin:Channel 14
+in_pin:Channel 15
+in_pin:Channel 16
+in_pin:Channel 17
+in_pin:Channel 18
+in_pin:Channel 19
+in_pin:Channel 20
+in_pin:Channel 21
+in_pin:Channel 22
+in_pin:Channel 23
+in_pin:Channel 24
+in_pin:Channel 25
+in_pin:Channel 26
+in_pin:Channel 27
+in_pin:Channel 28
+in_pin:Channel 29
+in_pin:Channel 30
+in_pin:Channel 31
+in_pin:Channel 32
+in_pin:Channel 33
+in_pin:Channel 34
+in_pin:Channel 35
+in_pin:Channel 36
+in_pin:Channel 37
+in_pin:Channel 38
+in_pin:Channel 39
+in_pin:Channel 40
+in_pin:Channel 41
+in_pin:Channel 42
+in_pin:Channel 43
+in_pin:Channel 44
+in_pin:Channel 45
+in_pin:Channel 46
+in_pin:Channel 47
+in_pin:Channel 48
+in_pin:Channel 49
+in_pin:Channel 50
+in_pin:Channel 51
+in_pin:Channel 52
+in_pin:Channel 53
+in_pin:Channel 54
+in_pin:Channel 55
+in_pin:Channel 56
+in_pin:Channel 57
+in_pin:Channel 58
+in_pin:Channel 59
+in_pin:Channel 60
+in_pin:Channel 61
+in_pin:Channel 62
+in_pin:Channel 63
+in_pin:Channel 64
+in_pin:Channel 65
+in_pin:Channel 66
+in_pin:Channel 67
+in_pin:Channel 68
+in_pin:Channel 69
+in_pin:Channel 70
+in_pin:Channel 71
+in_pin:Channel 72
+in_pin:Channel 73
+in_pin:Channel 74
+in_pin:Channel 75
+in_pin:Channel 76
+in_pin:Channel 77
+in_pin:Channel 78
+in_pin:Channel 79
+in_pin:Channel 80
+in_pin:Channel 81
+in_pin:Channel 82
+in_pin:Channel 83
+in_pin:Channel 84
+in_pin:Channel 85
+in_pin:Channel 86
+in_pin:Channel 87
+in_pin:Channel 88
+in_pin:Channel 89
+in_pin:Channel 90
+in_pin:Channel 91
+in_pin:Channel 92
+in_pin:Channel 93
+in_pin:Channel 94
+in_pin:Channel 95
+in_pin:Channel 96
+in_pin:Channel 97
+in_pin:Channel 98
+in_pin:Channel 99
+in_pin:Channel 100
+in_pin:Channel 101
+in_pin:Channel 102
+in_pin:Channel 103
+in_pin:Channel 104
+in_pin:Channel 105
+in_pin:Channel 106
+in_pin:Channel 107
+in_pin:Channel 108
+in_pin:Channel 109
+in_pin:Channel 110
+in_pin:Channel 111
+in_pin:Channel 112
+in_pin:Channel 113
+in_pin:Channel 114
+in_pin:Channel 115
+in_pin:Channel 116
+in_pin:Channel 117
+in_pin:Channel 118
+in_pin:Channel 119
+in_pin:Channel 120
+in_pin:Channel 121
+in_pin:Channel 122
+in_pin:Channel 123
+in_pin:Channel 124
+in_pin:Channel 125
+in_pin:Channel 126
+in_pin:Channel 127
+in_pin:Channel 128
+out_pin:Channel 1
+out_pin:Channel 2
+out_pin:Channel 3
+out_pin:Channel 4
+out_pin:Channel 5
+out_pin:Channel 6
+out_pin:Channel 7
+out_pin:Channel 8
+out_pin:Channel 9
+out_pin:Channel 10
+out_pin:Channel 11
+out_pin:Channel 12
+out_pin:Channel 13
+out_pin:Channel 14
+out_pin:Channel 15
+out_pin:Channel 16
+out_pin:Channel 17
+out_pin:Channel 18
+out_pin:Channel 19
+out_pin:Channel 20
+out_pin:Channel 21
+out_pin:Channel 22
+out_pin:Channel 23
+out_pin:Channel 24
+out_pin:Channel 25
+out_pin:Channel 26
+out_pin:Channel 27
+out_pin:Channel 28
+out_pin:Channel 29
+out_pin:Channel 30
+out_pin:Channel 31
+out_pin:Channel 32
+out_pin:Channel 33
+out_pin:Channel 34
+out_pin:Channel 35
+out_pin:Channel 36
+out_pin:Channel 37
+out_pin:Channel 38
+out_pin:Channel 39
+out_pin:Channel 40
+out_pin:Channel 41
+out_pin:Channel 42
+out_pin:Channel 43
+out_pin:Channel 44
+out_pin:Channel 45
+out_pin:Channel 46
+out_pin:Channel 47
+out_pin:Channel 48
+out_pin:Channel 49
+out_pin:Channel 50
+out_pin:Channel 51
+out_pin:Channel 52
+out_pin:Channel 53
+out_pin:Channel 54
+out_pin:Channel 55
+out_pin:Channel 56
+out_pin:Channel 57
+out_pin:Channel 58
+out_pin:Channel 59
+out_pin:Channel 60
+out_pin:Channel 61
+out_pin:Channel 62
+out_pin:Channel 63
+out_pin:Channel 64
+out_pin:Channel 65
+out_pin:Channel 66
+out_pin:Channel 67
+out_pin:Channel 68
+out_pin:Channel 69
+out_pin:Channel 70
+out_pin:Channel 71
+out_pin:Channel 72
+out_pin:Channel 73
+out_pin:Channel 74
+out_pin:Channel 75
+out_pin:Channel 76
+out_pin:Channel 77
+out_pin:Channel 78
+out_pin:Channel 79
+out_pin:Channel 80
+out_pin:Channel 81
+out_pin:Channel 82
+out_pin:Channel 83
+out_pin:Channel 84
+out_pin:Channel 85
+out_pin:Channel 86
+out_pin:Channel 87
+out_pin:Channel 88
+out_pin:Channel 89
+out_pin:Channel 90
+out_pin:Channel 91
+out_pin:Channel 92
+out_pin:Channel 93
+out_pin:Channel 94
+out_pin:Channel 95
+out_pin:Channel 96
+out_pin:Channel 97
+out_pin:Channel 98
+out_pin:Channel 99
+out_pin:Channel 100
+out_pin:Channel 101
+out_pin:Channel 102
+out_pin:Channel 103
+out_pin:Channel 104
+out_pin:Channel 105
+out_pin:Channel 106
+out_pin:Channel 107
+out_pin:Channel 108
+out_pin:Channel 109
+out_pin:Channel 110
+out_pin:Channel 111
+out_pin:Channel 112
+out_pin:Channel 113
+out_pin:Channel 114
+out_pin:Channel 115
+out_pin:Channel 116
+out_pin:Channel 117
+out_pin:Channel 118
+out_pin:Channel 119
+out_pin:Channel 120
+out_pin:Channel 121
+out_pin:Channel 122
+out_pin:Channel 123
+out_pin:Channel 124
+out_pin:Channel 125
+out_pin:Channel 126
+out_pin:Channel 127
+out_pin:Channel 128
 
 @init
 ext_noinit=1;
@@ -57,6 +311,115 @@ function valid_counter(x) (valid_number(x) && x >= 0 && x < 1000000000 && x == f
 HISTORY_BASE=150000;
 HISTORY_DATA=150032;
 HISTORY_CAPACITY=1000;
+CHANNEL_BASE=40000;
+CHANNEL_STRIDE=1024;
+WEIGHTS=49000;
+NEXT_WEIGHTS=49016;
+OUTPUTS=49032;
+NEXT_OUTPUTS=49048;
+ch=0; loop(8, OUTPUTS[ch]=ch; ch+=1;);
+max_output=2;
+CHANNEL_PACKET=156000;
+// Pair correlation for the Surround Field. Each channel pair sums its sample
+// products over the same 80 slices as the field RMS, so the two can be divided
+// directly. Pairs follow (1,2), (1,3) ... (1,n), (2,3) ...; eight channels make 28.
+PAIR_PACKET=156100;
+PAIR_BASE=50000;
+// Per pair: [0..79] slice ring, [80] current slice, [81] window sum, [82] correlation.
+PAIR_STRIDE=96;
+PAIR_SAMPLES=52800;
+// The controller names the pairs its display draws as a bit mask (bit p for
+// pair p). Only those pairs are measured; the rest publish -2. A controller
+// that predates the mask never writes its slot; the current one clears it on close.
+PAIR_LIST=52816; PAIR_A=52848; PAIR_B=52880;
+pair_mask=0; pair_used=0;
+channel_count=2;
+layout_known=1;
+layout_revision=0;
+WEIGHTS[0]=WEIGHTS[1]=1;
+// The fixed channel packet shares the slider publication guard and has its own
+// seal, so a controller can reject a partial packet without accepting old lanes.
+function channel_publish() local(ch b row p) (
+  accepted_session>0 && gmem[140004]==owned_token && gmem[140002]==accepted_session ? (
+    gmem[CHANNEL_PACKET+8]=lra_revision;
+    gmem[CHANNEL_PACKET]=4;
+    gmem[CHANNEL_PACKET+1]=owned_token;
+    gmem[CHANNEL_PACKET+2]=accepted_session;
+    gmem[CHANNEL_PACKET+3]=capture_epoch;
+    gmem[CHANNEL_PACKET+4]=sequence;
+    gmem[CHANNEL_PACKET+5]=channel_count;
+    gmem[CHANNEL_PACKET+6]=layout_known;
+    gmem[CHANNEL_PACKET+7]=layout_revision;
+    gmem[CHANNEL_PACKET+9]=measurement_inputs;
+    ch=0;
+    loop(channel_count,
+      b=CHANNEL_BASE+ch*CHANNEL_STRIDE;
+      row=CHANNEL_PACKET+16+ch*9;
+      gmem[row]=b[440]; gmem[row+1]=b[441];
+      gmem[row+2]=b[442]; gmem[row+3]=b[443];
+      gmem[row+4]=b[444]; gmem[row+5]=b[445];
+      gmem[row+6]=b[446]; gmem[row+7]=b[447];
+      gmem[row+8]=b[448];
+      ch+=1;
+    );
+    // Written inside the channel packet's seal, so a reader takes both or neither.
+    // Older controllers never read these slots; older helpers never write them.
+    gmem[PAIR_PACKET]=1;
+    gmem[PAIR_PACKET+1]=owned_token;
+    gmem[PAIR_PACKET+2]=accepted_session;
+    gmem[PAIR_PACKET+3]=sequence;
+    gmem[PAIR_PACKET+4]=channel_count;
+    p=0;
+    loop(channel_count*(channel_count-1)/2,
+      gmem[PAIR_PACKET+8+p]=PAIR_BASE[p*PAIR_STRIDE+82];
+      p+=1;
+    );
+    gmem[CHANNEL_PACKET+8]=(lra_revision+1)%1000000000;
+  );
+);
+function channel_aliases() local(b) (
+  b=CHANNEL_BASE;
+  rms_l=b[440]; peak_l=b[441]; peak_age_l=b[442]; live_peak_l=b[443];
+  true_peak_l=b[444]; true_peak_age_l=b[445]; live_true_peak_l=b[446]; crest_l=b[447];
+  b=CHANNEL_BASE+CHANNEL_STRIDE;
+  rms_r=b[440]; peak_r=b[441]; peak_age_r=b[442]; live_peak_r=b[443];
+  true_peak_r=b[444]; true_peak_age_r=b[445]; live_true_peak_r=b[446]; crest_r=b[447];
+);
+function pair_select() local(i j p) (
+  pair_used=0; p=0; i=0;
+  loop(channel_count-1,
+    j=i+1;
+    loop(channel_count-1-i,
+      pair_mask & (1<<p) ? (
+        PAIR_LIST[pair_used]=p; PAIR_A[pair_used]=i; PAIR_B[pair_used]=j;
+        pair_used+=1;
+      );
+      j+=1; p+=1;
+    );
+    i+=1;
+  );
+);
+// Runs after the channel energies are current. A completed slice enters the
+// ring; a final partial slice is added without entering it, matching the field RMS.
+// -2 marks a pair with a silent channel, which has no correlation. Pairs the
+// controller did not request keep the -2 written by the window reset.
+function pair_window(partial) local(n q k sum ea eb ba bb) (
+  n=0;
+  loop(pair_used,
+    q=PAIR_BASE+PAIR_LIST[n]*PAIR_STRIDE;
+    ba=CHANNEL_BASE+PAIR_A[n]*CHANNEL_STRIDE; bb=CHANNEL_BASE+PAIR_B[n]*CHANNEL_STRIDE;
+    partial ? (
+      sum=q[81]+q[80]; ea=ba[449]+ba[400]; eb=bb[449]+bb[400];
+      filled==80 ? (sum-=q[slot]; ea-=ba[slot]; eb-=bb[slot];);
+    ) : (
+      q[slot]=q[80]; q[80]=0;
+      sum=0; k=0; loop(filled, sum+=q[k]; k+=1;);
+      q[81]=sum; ea=ba[449]; eb=bb[449];
+    );
+    q[82]=ea>0 && eb>0 ? max(-1,min(1,sum/sqrt(ea*eb))) : -2;
+    n+=1;
+  );
+);
 // Only the addressed owner publishes here. Unclaimed Monitor FX instances must
 // not erase another instance's history when REAPER initializes them.
 function history_owned() (
@@ -269,7 +632,7 @@ function integrated_slice()
   );
 );
 function lra_slice()
-  local(i window_power loudness bin)
+  local(i window_power loudness bin ch b)
 (
   (320+slice_slot)[0]=slice_power;
   slice_slot=(slice_slot+1)%30;
@@ -277,10 +640,13 @@ function lra_slice()
   slice_count=0; slice_power=0;
   integrated_slice();
   // Silence can leave decaying filter state at denormal magnitudes.
-  abs(shelf_l.z1)+abs(shelf_l.z2)<denorm_floor ? shelf_l.z1=shelf_l.z2=0;
-  abs(shelf_r.z1)+abs(shelf_r.z2)<denorm_floor ? shelf_r.z1=shelf_r.z2=0;
-  abs(hp_l.z1)+abs(hp_l.z2)<denorm_floor ? hp_l.z1=hp_l.z2=0;
-  abs(hp_r.z1)+abs(hp_r.z2)<denorm_floor ? hp_r.z1=hp_r.z2=0;
+  ch=0;
+  loop(channel_count,
+    b=CHANNEL_BASE+ch*CHANNEL_STRIDE;
+    abs(b[410])+abs(b[411])<denorm_floor ? b[410]=b[411]=0;
+    abs(b[412])+abs(b[413])<denorm_floor ? b[412]=b[413]=0;
+    ch+=1;
+  );
   slice_filled == 30 ? (
     i=0; window_power=0;
     loop(30,
@@ -329,15 +695,25 @@ function reset_lra() (
       -1.69065929318241,0.73248077421585,srate/48000);
     hp.map_coeffs(1,-2,1,-1.99004745483398,0.99007225036621,srate/48000);
     clear_loudness(0,0);
-  ) : clear_loudness(-1,0);
+  ) : clear_loudness(-2,0);
 );
-function reset_window() (
+function reset_window() local(ch b p) (
   // Keep every output, including peak ages and the epoch, under one reset guard.
   lra_revision=(lra_revision+1)%1000000000;
   memset(0,0,320);
   memset(13300,0,160);
   memset(38064,0,48);
   memset(38160,0,320);
+  memset(CHANNEL_BASE,0,8*CHANNEL_STRIDE);
+  memset(PAIR_BASE,0,28*PAIR_STRIDE);
+  p=0; loop(28, PAIR_BASE[p*PAIR_STRIDE+82]=-2; p+=1;);
+  ch=0;
+  loop(8,
+    b=CHANNEL_BASE+ch*CHANNEL_STRIDE;
+    b[440]=b[441]=b[443]=b[444]=b[446]=b[448]=-150;
+    b[447]=-1;
+    ch+=1;
+  );
   count=0; filled=0; slot=0;
   sum_l=0; sum_r=0; max_l=0; max_r=0;
   max_tp_l=max_tp_r=0;
@@ -366,15 +742,16 @@ function reset_window() (
   history_sequence=0;
   momentary_max=short_term_max=-150;
   history_owned() ? history_header();
+  channel_publish();
   lra_revision=(lra_revision+1)%1000000000;
 );
-// The caller holds the publication guard. Stereo power is averaged before
+// The caller holds the publication guard. Channel power is averaged before
 // accumulation; silence during playback counts, while stopped time does not.
 function update_crest() (
   crest=crest_samples>0 && crest_energy>0 && lra_valid!=-1
     ? max(0,db_per_log*(log(crest_peak)-0.5*log(crest_energy/crest_samples))) : -1;
 );
-control_protocol=2;
+control_protocol=4;
 owned_token=(atomic_add(gmem[140013],1)-1)%999999999+1;
 instance_token=owned_token;
 accepted_session=0;
@@ -385,12 +762,123 @@ meter_active=0;
 reset_required=1;
 requires_fresh=1;
 reset_window();
-was_playing=0;
+was_playing=was_project_playing=0;
 expected_position=play_position;
 last_reset_request=reset_request;
 
+// BEGIN VIRTUAL MASTER INPUT v1 (identical transport in both consumers).
+VM_B=1400000; VM_P=600000; VM_STRIDE=65552; VM_QUEUE=8; VM_RESERVE=3;
+vm_last=0; vm_session=0; vm_token=0; vm_instance=0; vm_width=0; vm_rate=0;
+vm_previous_request=0; vm_previous_ready=0; vm_failed=0; vm_ack_serial=0; vm_force_reset=0;
+memset(VM_P,0,65536);
+function vm_acknowledge(ready_value,error_value) local(k) (
+  vm_ack_serial+=2;
+  gmem[vm_ack+15]=vm_ack_serial-1;
+  gmem[vm_ack]=1; gmem[vm_ack+1]=ready_value;
+  k=2; loop(12,gmem[vm_ack+k]=0; k+=1;);
+  ready_value || (error_value>=4 && error_value<=9) ? (
+    gmem[vm_ack+2]=vm_token; gmem[vm_ack+3]=vm_session;
+    gmem[vm_ack+4]=vm_last; gmem[vm_ack+5]=vm_width;
+    gmem[vm_ack+6]=vm_rate; gmem[vm_ack+7]=vm_instance;
+    gmem[vm_ack+9]=samplesblock; gmem[vm_ack+10]=time_precise();
+    gmem[vm_ack+11]=vm_revision; gmem[vm_ack+12]=vm_consumer_instance;
+    gmem[vm_ack+13]=vm_block_started_at;
+  );
+  gmem[vm_ack+8]=error_value; gmem[vm_ack+15]=vm_ack_serial;
+);
+function vm_identity_current() (
+  gmem[VM_B+1]==1 && gmem[VM_B+10]==1 && gmem[VM_B+vm_request_slot]==1
+    && gmem[VM_B+2]==vm_token && gmem[VM_B+3]==vm_session
+    && gmem[VM_B+4]==vm_width && gmem[VM_B+5]==vm_rate
+    && gmem[VM_B+9]==vm_instance;
+);
+function vm_bridge_begin(ack_base,request_slot,consumer_instance)
+  local(rev,valid_control,tok,sess,width,rate,inst,latest,wanted,bank,seal,
+    age,block_at,fr,ch,pos,copy_ok,error_value,changed_owner,sender_session,sender_error,sender_matches) (
+  vm_ack=ack_base; vm_request_slot=request_slot; vm_consumer_instance=consumer_instance;
+  vm_requested=gmem[VM_B+request_slot]!=0;
+  vm_changed=vm_requested!=vm_previous_request || vm_force_reset; vm_force_reset=0;
+  vm_ready=0; vm_frame=0; error_value=0;
+  vm_requested ? (
+    rev=gmem[VM_B]; tok=gmem[VM_B+2]; sess=gmem[VM_B+3];
+    width=gmem[VM_B+4]; rate=gmem[VM_B+5]; inst=gmem[VM_B+9];
+    valid_control=rev>=0 && rev==floor(rev) && rev%2==0 && gmem[VM_B+1]==1
+      && tok>0 && tok<=999999999 && tok==floor(tok)
+      && sess>0 && sess<=999999999 && sess==floor(sess)
+      && width>=1 && width<=8 && width==floor(width) && rate==srate
+      && inst>0 && inst<=999999999 && inst==floor(inst)
+      && gmem[VM_B+10]==1 && gmem[VM_B+request_slot]==1 && rev==gmem[VM_B];
+    // A heartbeat can begin or finish during this read. Keep the complete
+    // grant only while every identity field still matches; no new lease is earned.
+    !valid_control && vm_identity_current() && vm_session>0 && vm_rate==srate ? (
+      valid_control=1; tok=vm_token; sess=vm_session; width=vm_width;
+      rate=vm_rate; inst=vm_instance; rev=vm_revision;
+    );
+    valid_control ? (
+      changed_owner=tok!=vm_token || sess!=vm_session || width!=vm_width
+        || rate!=vm_rate || inst!=vm_instance;
+      changed_owner ? (vm_last=0; vm_failed=0; vm_changed=1;);
+      vm_token=tok; vm_session=sess; vm_width=width; vm_rate=rate;
+      vm_instance=inst; vm_revision=rev;
+      sender_session=gmem[VM_B+19]; sender_error=gmem[VM_B+24];
+      sender_matches=sender_session==sess && gmem[VM_B+16]==2601104.1 && gmem[VM_B+17]==1
+        && gmem[VM_B+20]==tok && gmem[VM_B+21]==width && gmem[VM_B+22]==rate
+        && gmem[VM_B+23]==inst && gmem[VM_B+19]==sender_session;
+      latest=gmem[VM_B+18];
+      !vm_failed && sender_matches && sender_error==0 && gmem[VM_B+27]==1
+          && latest>=VM_RESERVE+1 && latest==floor(latest) ? (
+        // Leave three complete banks between reader and writer at startup.
+        wanted=vm_last>0 ? vm_last+1 : latest-VM_RESERVE;
+        latest-wanted>=VM_QUEUE-1 ? (vm_failed=6; error_value=6;) : wanted<=latest ? (
+          bank=VM_B+64+((wanted-1)%VM_QUEUE)*VM_STRIDE;
+          seal=gmem[bank]; block_at=gmem[bank+7]; age=time_precise()-block_at;
+          seal==wanted*2 && gmem[bank+1]==tok && gmem[bank+2]==sess
+              && gmem[bank+3]==inst && gmem[bank+4]==width && gmem[bank+5]==rate
+              && gmem[bank+6]==samplesblock && samplesblock>=1 && samplesblock<=8192
+              && age>=0 && age<=max(.25,4*samplesblock/srate) ? (
+            copy_ok=1; fr=0;
+            loop(samplesblock,
+              ch=0; loop(width,
+                pos=bank+16+fr*8+ch;
+                !(gmem[pos]>=-1000000 && gmem[pos]<=1000000) ? copy_ok=0;
+                VM_P[fr*8+ch]=gmem[pos]; ch+=1;
+              ); fr+=1;
+            );
+            copy_ok && seal==gmem[bank] && vm_identity_current() ? (
+              vm_last=wanted; vm_ready=1; vm_block_started_at=block_at;
+            ) : (vm_failed=copy_ok ? 4 : 7; error_value=vm_failed;);
+          ) : (error_value=gmem[bank+6]!=samplesblock ? 8 : age<0 || age>max(.25,4*samplesblock/srate) ? 5 : 4;);
+        ) : (
+          error_value=time_precise()-gmem[VM_B+25]>max(.25,4*samplesblock/srate) ? 5 : 3;
+        );
+      ) : (
+        // The sender may still be reporting the grant that stopped.
+        error_value=vm_failed ? vm_failed : sender_matches
+          && sender_error>=4 && sender_error<=9 && sender_error==floor(sender_error) ? sender_error : 3;
+      );
+    ) : error_value=2;
+    // Waiting never advances the sample clock or erases measured samples. A
+    // genuine discontinuity remains visible until a new source generation.
+    !vm_ready && error_value!=3 ? (
+      !vm_failed ? vm_changed=1;
+      vm_failed=error_value;
+    );
+    vm_acknowledge(vm_ready,error_value);
+  ) : (
+    vm_previous_request ? vm_acknowledge(0,1);
+    vm_last=0; vm_session=0; vm_token=0; vm_failed=0;
+  );
+  vm_previous_ready=vm_ready; vm_previous_request=vm_requested;
+);
+// END VIRTUAL MASTER INPUT v1.
+
+vm_ack=VM_B+32; vm_acknowledge(0,1);
+
 @block
-control_protocol=2;
+vm_bridge_begin(VM_B+32,6,owned_token);
+measurement_inputs=vm_requested ? (vm_ready ? vm_width : 0) : num_ch;
+vm_changed ? (reset_window(); reset_required=1;);
+control_protocol=4;
 instance_token=owned_token;
 // An inactive or foreign command silences analysis even during a partial write.
 raw_active=gmem[140001];
@@ -417,19 +905,43 @@ raw_active != 1 ? (
     next_loop_start=gmem[140009];
     next_loop_end=gmem[140010];
     next_loop_enabled=gmem[140011];
+    next_channel_count=gmem[140014];
+    next_layout_known=gmem[140015];
+    next_layout_revision=gmem[140016];
+    // Phase is optional: an unreadable mask measures no pairs instead of
+    // refusing the whole command.
+    next_pair_mask=gmem[140033];
+    !(valid_counter(next_pair_mask) && next_pair_mask<268435456) ? next_pair_mask=0;
+    weights_valid=1; outputs_valid=1; next_max_output=0; ch=0;
+    loop(8,
+      next_weight=gmem[140017+ch];
+      NEXT_WEIGHTS[ch]=next_weight;
+      next_output=gmem[140025+ch];
+      NEXT_OUTPUTS[ch]=next_output-1;
+      !(valid_counter(next_output) && next_output>=1 && next_output<=128) ? outputs_valid=0;
+      ch<next_channel_count ? (
+        next_max_output=max(next_max_output,next_output);
+        prior=0; loop(ch, NEXT_OUTPUTS[prior]==next_output-1 ? outputs_valid=0; prior+=1;);
+      );
+      !(next_weight==0 || next_weight==1 || next_weight==1.41) ? weights_valid=0;
+      ch+=1;
+    );
     command_revision == gmem[140005]
-        && next_protocol == 2 && next_active == 1
+        && next_protocol == 4 && next_active == 1
         && next_target == owned_token
         && valid_counter(next_session) && next_session > 0
         && valid_counter(next_heartbeat)
-        && valid_counter(next_mode) && next_mode <= 2
+        && valid_counter(next_mode) && next_mode <= 3
         && valid_counter(next_reset)
         && valid_counter(next_policy) && next_policy <= 7
         && valid_number(next_loop_start) && next_loop_start >= 0
         && next_loop_start <= 1000000000
         && valid_number(next_loop_end) && next_loop_end >= 0
         && next_loop_end <= 1000000000
-        && valid_counter(next_loop_enabled) && next_loop_enabled <= 1 ? (
+        && valid_counter(next_loop_enabled) && next_loop_enabled <= 1
+        && valid_counter(next_channel_count) && next_channel_count>=1 && next_channel_count<=8
+        && valid_counter(next_layout_known) && next_layout_known<=1
+        && valid_counter(next_layout_revision) && weights_valid && outputs_valid ? (
       fresh_heartbeat=next_heartbeat != seen_heartbeat
         && next_heartbeat != foreign_heartbeat;
       fresh_heartbeat ? (
@@ -444,17 +956,29 @@ raw_active != 1 ? (
           reset_required=1;
           requires_fresh=1;
         ) : (
+          layout_changed=channel_count!=next_channel_count || layout_known!=next_layout_known
+            || layout_revision!=next_layout_revision || pair_mask!=next_pair_mask;
+          ch=0; loop(next_channel_count, OUTPUTS[ch]!=NEXT_OUTPUTS[ch] ? layout_changed=1; ch+=1;);
+          memcpy(OUTPUTS,NEXT_OUTPUTS,8);
+          max_output=next_max_output;
+          channel_count=next_channel_count;
+          layout_known=next_layout_known;
+          layout_revision=next_layout_revision;
+          pair_mask=next_pair_mask;
+          pair_select();
+          memcpy(WEIGHTS,NEXT_WEIGHTS,8);
           capture_mode=next_mode;
           reset_request=next_reset;
           reset_policy=next_policy;
           loop_start=next_loop_start;
           loop_end=next_loop_end;
           loop_enabled=next_loop_enabled;
-          next_session != accepted_session || reset_required ? (
+          next_session != accepted_session || reset_required || layout_changed ? (
             accepted_session=next_session;
             reset_window();
             last_reset_request=reset_request;
-            was_playing=capture_mode==1 || (capture_mode==0 && (play_state&1)!=0);
+            was_project_playing=(capture_mode==0 || capture_mode==3) && (play_state&5)!=0;
+            was_playing=capture_mode==1 || capture_mode==3 || was_project_playing;
             expected_position=play_position;
           );
           meter_active=1;
@@ -473,127 +997,182 @@ raw_active != 1 ? (
     );
   );
 );
+vm_requested && !vm_ready ? (
+  meter_active=0; channel_publish();
+  vm_failed ? reset_required=1;
+  // A queued raw block still belongs to the same running transport.
+  !vm_failed && (capture_mode==0 || capture_mode==3) ? expected_position=play_position+samplesblock/srate;
+);
 meter_active ? (
+measurement_inputs<(vm_requested ? channel_count : max_output) ? lra_error();
 // Include the final partial meter slice when transport stops between updates.
 lra_revision=(lra_revision+1)%1000000000;
 update_crest();
 true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
 lra_revision=(lra_revision+1)%1000000000;
-is_playing=capture_mode==1 || (capture_mode==0 && (play_state&1)!=0);
+count>0 ? (
+  // A short sound can end before one 5 ms slice. Publish its actual partial
+  // energy for the field display without warming the 400 ms numeric RMS.
+  lra_revision=(lra_revision+1)%1000000000;
+  ch=0;
+  loop(channel_count,
+    b=CHANNEL_BASE+ch*CHANNEL_STRIDE;
+    energy=b[449]+b[400];
+    field_samples=filled*block_length+count;
+    filled==80 ? (energy-=b[slot]; field_samples-=block_length;);
+    b[448]=energy>0 ? db_per_log*.5*log(energy/field_samples) : -150;
+    // Include a final attack even when the sound ends before its first slice.
+    p=max(b[452],b[401]); tp=max(b[453],b[403]);
+    p_sample=b[401]>=b[452] ? b[402] : b[450];
+    tp_sample=b[403]>=b[453] ? b[404] : b[451];
+    b[441]=p>0 ? db_per_log*log(p) : -150;
+    b[442]=p>0 ? (meter_samples-p_sample)/srate : 0;
+    b[444]=tp>0 ? db_per_log*log(tp) : -150;
+    b[445]=tp>0 ? (meter_samples-tp_sample)/srate : 0;
+    b[443]=b[405]>0 ? max(-150,db_per_log*log(b[405])) : -150;
+    b[446]=b[406]>0 ? max(-150,db_per_log*log(b[406])) : -150;
+    ch+=1;
+  );
+  pair_window(1);
+  channel_aliases();
+  sequence=(sequence+1)%1000000000;
+  channel_publish();
+  lra_revision=(lra_revision+1)%1000000000;
+);
+project_playing=(capture_mode==0 || capture_mode==3) && (play_state&5)!=0;
+is_playing=capture_mode==1 || capture_mode==3 || project_playing;
 // Project transport edges are handled before processing their first audio block.
-jumped=capture_mode==0 && was_playing && abs(play_position-expected_position)>0.1;
-looped=capture_mode==0 && was_playing && loop_enabled && loop_end>loop_start
+jumped=project_playing && was_project_playing && abs(play_position-expected_position)>0.1;
+looped=project_playing && was_project_playing && loop_enabled && loop_end>loop_start
   && expected_position>=loop_end-0.1 && play_position<expected_position-0.001
   && abs(play_position-loop_start)<0.1;
-restart=is_playing && ((!was_playing && (reset_policy&1))
+restart=is_playing && (((project_playing ? !was_project_playing : !was_playing) && (reset_policy&1))
   || (looped ? (reset_policy&4) : (jumped && (reset_policy&2))));
 srate != last_sr || restart || reset_request != last_reset_request ? reset_window();
 last_reset_request=reset_request;
-is_playing ? expected_position=play_position+samplesblock/srate;
+project_playing ? expected_position=play_position+samplesblock/srate;
 was_playing=is_playing;
+was_project_playing=project_playing;
 );
 
 @sample
+vm_requested && vm_ready && !vm_identity_current() ? (
+  vm_ready=0; vm_force_reset=1; vm_acknowledge(0,1); meter_active=0; reset_required=1;
+);
 meter_active ? (
-// Attack follows each sample; release falls by 20 dB per second.
-live_l=max(abs(spl0),live_l*live_decay);
-live_r=max(abs(spl1),live_r*live_decay);
-tp_head=(tp_head+1)%12;
-sample_tp_l=true_peak_sample(spl0,38064);
-sample_tp_r=true_peak_sample(spl1,38088);
-live_tp_l=max(sample_tp_l,live_tp_l*live_decay);
-live_tp_r=max(sample_tp_r,live_tp_r*live_decay);
-is_playing && rate_ok && lra_valid != -1 ? (
-  !(spl0 >= -input_limit && spl0 <= input_limit
-    && spl1 >= -input_limit && spl1 <= input_limit) ? lra_error() : (
-    tp_max=max(tp_max,max(sample_tp_l,sample_tp_r));
-    crest_energy+=(spl0*spl0+spl1*spl1)*0.5;
-    crest_samples+=1;
-    crest_peak=max(crest_peak,max(abs(spl0),abs(spl1)));
-    // All four filter memories are independent; the audio samples are untouched.
-    k_l=shelf_l.biquad(spl0,shelf.b0,shelf.b1,shelf.b2,shelf.a1,shelf.a2);
-    k_l=hp_l.biquad(k_l,hp.b0,hp.b1,hp.b2,hp.a1,hp.a2);
-    k_r=shelf_r.biquad(spl1,shelf.b0,shelf.b1,shelf.b2,shelf.a1,shelf.a2);
-    k_r=hp_r.biquad(k_r,hp.b0,hp.b1,hp.b2,hp.a1,hp.a2);
-    power=k_l*k_l+k_r*k_r;
-    !(power >= 0 && power <= power_limit) ? lra_error() : (
-      slice_power+=power;
-      live_slice_power+=power;
+  tp_head=(tp_head+1)%12;
+  sample_energy=sample_peak=power=0;
+  sample_valid=1;
+  ch=0;
+  loop(channel_count,
+    b=CHANNEL_BASE+ch*CHANNEL_STRIDE;
+    // Check the input before assignment, which can normalise NaN in EEL.
+    channel_valid=vm_requested
+      ? VM_P[vm_frame*8+ch]>=-input_limit && VM_P[vm_frame*8+ch]<=input_limit
+      : spl(OUTPUTS[ch])>=-input_limit && spl(OUTPUTS[ch])<=input_limit;
+    !channel_valid ? sample_valid=0;
+    x=channel_valid ? (vm_requested ? VM_P[vm_frame*8+ch] : spl(OUTPUTS[ch])) : 0;
+    amplitude=abs(x);
+    b[405]=max(amplitude,b[405]*live_decay);
+    sample_tp=true_peak_sample(x,b+416);
+    b[406]=max(sample_tp,b[406]*live_decay);
+    b[400]+=x*x;
+    PAIR_SAMPLES[ch]=x;
+    amplitude>=b[401] ? (b[401]=amplitude; b[402]=meter_samples+1;);
+    sample_tp>=b[403] ? (b[403]=sample_tp; b[404]=meter_samples+1;);
+    is_playing && rate_ok && lra_valid!=-1 ? (
+      tp_max=max(tp_max,sample_tp);
+      sample_energy+=x*x;
+      sample_peak=max(sample_peak,amplitude);
+      layout_known && WEIGHTS[ch]>0 ? (
+        filtered=shelf.b0*x+b[410];
+        b[410]=shelf.b1*x-shelf.a1*filtered+b[411];
+        b[411]=shelf.b2*x-shelf.a2*filtered;
+        weighted=hp.b0*filtered+b[412];
+        b[412]=hp.b1*filtered-hp.a1*weighted+b[413];
+        b[413]=hp.b2*filtered-hp.a2*weighted;
+        power+=WEIGHTS[ch]*weighted*weighted;
+      );
+    );
+    ch+=1;
+  );
+  // Each measured pair's sample product joins its current 5 ms slice.
+  pair=0;
+  loop(pair_used,
+    PAIR_BASE[PAIR_LIST[pair]*PAIR_STRIDE+80]+=PAIR_SAMPLES[PAIR_A[pair]]*PAIR_SAMPLES[PAIR_B[pair]];
+    pair+=1;
+  );
+  // Invalid audio must remain a failure even when only basic meters are available.
+  is_playing && !sample_valid ? lra_error();
+  is_playing && rate_ok && lra_valid!=-1 ? (
+    !(power>=0 && power<=power_limit) ? lra_error() : (
+      crest_energy+=sample_energy/channel_count;
+      crest_samples+=1;
+      crest_peak=max(crest_peak,sample_peak);
       lra_samples+=1;
-      slice_count+=1;
-      live_slice_count+=1;
-      history_due=live_slice_count >= live_slice_length;
-      history_due ? live_loudness_slice();
-      slice_count >= slice_length ? lra_slice();
-      history_due ? history_publish();
+      slice_count+=1; live_slice_count+=1;
+      layout_known ? (
+        slice_power+=power; live_slice_power+=power;
+        history_due=live_slice_count>=live_slice_length;
+        history_due ? live_loudness_slice();
+        slice_count>=slice_length ? lra_slice();
+        history_due ? history_publish();
+      ) : live_slice_count>=live_slice_length ? (
+        live_slice_count=0; slice_count=0;
+        // Unknown speaker roles withhold loudness while preserving the audio clock.
+        live_publish(-150,-150);
+      );
     );
   );
-);
-sum_l += spl0*spl0;
-sum_r += spl1*spl1;
-meter_samples+=1;
-abs(spl0)>=max_l ? (max_l=abs(spl0); max_sample_l=meter_samples;);
-abs(spl1)>=max_r ? (max_r=abs(spl1); max_sample_r=meter_samples;);
-sample_tp_l>=max_tp_l ? (max_tp_l=sample_tp_l; max_tp_sample_l=meter_samples;);
-sample_tp_r>=max_tp_r ? (max_tp_r=sample_tp_r; max_tp_sample_r=meter_samples;);
-count += 1;
-count >= block_length ? (
-  // The peak and its age must belong to the same audio publication.
-  lra_revision=(lra_revision+1)%1000000000;
-  slot[0]=sum_l;
-  (slot+80)[0]=sum_r;
-  (slot+160)[0]=max_l;
-  (slot+240)[0]=max_r;
-  (slot+13300)[0]=max_sample_l;
-  (slot+13380)[0]=max_sample_r;
-  (slot+38160)[0]=max_tp_l;
-  (slot+38240)[0]=max_tp_r;
-  (slot+38320)[0]=max_tp_sample_l;
-  (slot+38400)[0]=max_tp_sample_r;
-  slot=(slot+1)%80;
-  filled=min(80,filled+1);
-  energy_l=energy_r=0; p_l=p_r=tp_l=tp_r=0;
-  p_sample_l=p_sample_r=tp_sample_l=tp_sample_r=0; k=0;
-  loop(filled,
-    energy_l+=k[0]; energy_r+=(k+80)[0];
-    (k+160)[0]>p_l ? (p_l=(k+160)[0]; p_sample_l=(k+13300)[0];)
-      : (k+160)[0]==p_l ? p_sample_l=max(p_sample_l,(k+13300)[0]);
-    (k+240)[0]>p_r ? (p_r=(k+240)[0]; p_sample_r=(k+13380)[0];)
-      : (k+240)[0]==p_r ? p_sample_r=max(p_sample_r,(k+13380)[0]);
-    (k+38160)[0]>tp_l ? (tp_l=(k+38160)[0]; tp_sample_l=(k+38320)[0];)
-      : (k+38160)[0]==tp_l ? tp_sample_l=max(tp_sample_l,(k+38320)[0]);
-    (k+38240)[0]>tp_r ? (tp_r=(k+38240)[0]; tp_sample_r=(k+38400)[0];)
-      : (k+38240)[0]==tp_r ? tp_sample_r=max(tp_sample_r,(k+38400)[0]);
-    k+=1;
+  meter_samples+=1;
+  count+=1;
+  count>=block_length ? (
+    lra_revision=(lra_revision+1)%1000000000;
+    filled=min(80,filled+1);
+    ch=0;
+    loop(channel_count,
+      b=CHANNEL_BASE+ch*CHANNEL_STRIDE;
+      b[slot]=b[400]; b[80+slot]=b[401]; b[160+slot]=b[402];
+      b[240+slot]=b[403]; b[320+slot]=b[404];
+      energy=p=tp=0; p_sample=tp_sample=0; k=0;
+      loop(filled,
+        energy+=b[k];
+        b[80+k]>p ? (p=b[80+k]; p_sample=b[160+k];)
+          : b[80+k]==p ? p_sample=max(p_sample,b[160+k]);
+        b[240+k]>tp ? (tp=b[240+k]; tp_sample=b[320+k];)
+          : b[240+k]==tp ? tp_sample=max(tp_sample,b[320+k]);
+        k+=1;
+      );
+      b[450]=p_sample; b[451]=tp_sample; b[452]=p; b[453]=tp;
+      b[441]=p>0 ? db_per_log*log(p) : -150;
+      b[442]=p>0 ? (meter_samples-p_sample)/srate : 0;
+      b[444]=tp>0 ? db_per_log*log(tp) : -150;
+      b[445]=tp>0 ? (meter_samples-tp_sample)/srate : 0;
+      b[449]=energy;
+      b[448]=energy>0 ? db_per_log*.5*log(energy/(block_length*filled)) : -150;
+      filled==80 ? (
+        b[440]=energy>0 ? db_per_log*0.5*log(energy/(block_length*80)) : -150;
+        b[447]=energy>0 ? max(0,b[441]-b[440]) : -1;
+      );
+      b[443]=b[405]>0 ? max(-150,db_per_log*log(b[405])) : -150;
+      b[446]=b[406]>0 ? max(-150,db_per_log*log(b[406])) : -150;
+      b[400]=b[401]=b[403]=0;
+      ch+=1;
+    );
+    pair_window(0);
+    slot=(slot+1)%80;
+    channel_aliases();
+    true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
+    update_crest();
+    sequence=(sequence+1)%1000000000;
+    channel_publish();
+    lra_revision=(lra_revision+1)%1000000000;
+    sliderchange(136314879);
+    sliderchange(slider29); sliderchange(slider30);
+    sliderchange(slider31); sliderchange(slider32);
+    sliderchange(slider33); sliderchange(slider34);
+    sliderchange(slider35);
+    count=0;
   );
-  peak_l=p_l>0 ? db_per_log*log(p_l) : -150;
-  peak_r=p_r>0 ? db_per_log*log(p_r) : -150;
-  peak_age_l=p_l>0 ? (meter_samples-p_sample_l)/srate : 0;
-  peak_age_r=p_r>0 ? (meter_samples-p_sample_r)/srate : 0;
-  true_peak_l=tp_l>0 ? db_per_log*log(tp_l) : -150;
-  true_peak_r=tp_r>0 ? db_per_log*log(tp_r) : -150;
-  true_peak_age_l=tp_l>0 ? (meter_samples-tp_sample_l)/srate : 0;
-  true_peak_age_r=tp_r>0 ? (meter_samples-tp_sample_r)/srate : 0;
-  filled == 80 ? (
-    rms_l=energy_l>0 ? db_per_log*0.5*log(energy_l/(block_length*80)) : -150;
-    rms_r=energy_r>0 ? db_per_log*0.5*log(energy_r/(block_length*80)) : -150;
-    crest_l=energy_l>0 ? max(0,peak_l-rms_l) : -1;
-    crest_r=energy_r>0 ? max(0,peak_r-rms_r) : -1;
-  );
-  live_peak_l=live_l>0 ? max(-150,db_per_log*log(live_l)) : -150;
-  live_peak_r=live_r>0 ? max(-150,db_per_log*log(live_r)) : -150;
-  live_true_peak_l=live_tp_l>0 ? max(-150,db_per_log*log(live_tp_l)) : -150;
-  live_true_peak_r=live_tp_r>0 ? max(-150,db_per_log*log(live_tp_r)) : -150;
-  true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
-  update_crest();
-  sequence=(sequence+1)%1000000000;
-  lra_revision=(lra_revision+1)%1000000000;
-  // Notify parameter displays without writing an automation envelope.
-  sliderchange(136314879);
-  sliderchange(slider29); sliderchange(slider30);
-  sliderchange(slider31); sliderchange(slider32);
-  sliderchange(slider33); sliderchange(slider34);
-  sliderchange(slider35);
-  count=0; sum_l=sum_r=max_l=max_r=max_tp_l=max_tp_r=0;
 );
-);
+vm_ready ? vm_frame+=1;

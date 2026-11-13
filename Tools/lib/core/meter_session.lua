@@ -2,6 +2,7 @@
 -- this state for an explicit reset or a different source.
 local session = {}
 local warnings = require('core.meter_warnings')
+local readings = require('core.meter_readings')
 
 -- One minute at the helper's maximum 100 Hz, plus the left-edge predecessor.
 local HISTORY_LIMIT = 6001
@@ -34,6 +35,40 @@ local function reading(value, crest)
   return value
 end
 
+-- Pair correlations for the Surround Field, kept only when they match the
+-- channel count. The meter adapter has already range-checked each value.
+-- An older helper sends none, and the field draws without phase.
+local function pair_values(raw, count)
+  if type(raw)~='table' or count<2 or #raw~=count*(count-1)//2 then return nil end
+  return raw
+end
+
+local function channel_values(snapshot, fields, warm)
+  local channels={}
+  local raw_channels=snapshot.channels
+  if type(raw_channels)~='table' then
+    raw_channels={}
+    for _,side in ipairs({'l','r'}) do
+      local raw={}
+      for _,key in ipairs({'rms','peak','live_peak','peak_age','true_peak','live_true_peak','true_peak_age','crest','field_rms'}) do
+        raw[key]=snapshot[key..'_'..side]
+      end
+      raw_channels[#raw_channels+1]=raw
+    end
+  end
+  local peak_key,live_key,age_key=fields.peak:sub(1,-2),fields.live:sub(1,-2),fields.age:sub(1,-2)
+  for index,raw in ipairs(raw_channels) do
+    channels[index]={
+      rms=warm and reading(raw.rms) or nil,
+      field_rms=reading(raw.field_rms or raw.rms),
+      peak=warm and reading(raw[peak_key]) or nil,
+      warning_peak=reading(raw[peak_key]), live_peak=reading(raw[live_key]),
+      peak_age=raw[age_key], crest=warm and reading(raw.crest,true) or nil,
+    }
+  end
+  return channels
+end
+
 local function higher(current, value)
   if value == nil then return current end
   return current == nil and value or math.max(current, value)
@@ -51,6 +86,7 @@ function session.reset(state)
   state.valid = false
   state.status = nil
   state.values = nil
+  state.field_channels = {}
   state.display = {}
   state.elapsed = 0
   state.view_elapsed = 0
@@ -172,16 +208,32 @@ function session.update(state, snapshot, dt)
   if dt ~= dt or dt < 0 or dt == math.huge then dt = 0 end
   local peak_dt = dt
   dt = math.min(dt, MAX_FRAME_DT)
-  local peak_mode = (state.prefs or {}).peak_measurement or 'True Peak'
+  if snapshot.ready == true then
+    local supported = snapshot.sample_rate_supported ~= false
+    if state.sample_rate_supported ~= nil and state.sample_rate_supported ~= supported then
+      -- A frozen reading must not survive a change in available measurements.
+      session.reset(state)
+    end
+    state.sample_rate_supported = supported
+    state.true_peak_available = snapshot.true_peak_available ~= false
+    if snapshot.loudness_available ~= nil then state.loudness_available = snapshot.loudness_available end
+  end
+  local peak_mode = readings.peak_measurement(state)
   local peak_fields = PEAK_FIELDS[peak_mode]
   if state.peak_measurement ~= peak_mode then
     -- A hold from one measurement type must not be relabelled as the other.
     state.peak_hold = {l=nil,r=nil}
     state.peak_hold_remaining = {l=0,r=0}
     state.display.live_peak_l, state.display.live_peak_r = nil, nil
+    state.display.channels=nil
     state.peak_measurement = peak_mode
     if (state.hold or snapshot.pending_publication) and state.values and state.peak_active and state.peak_snapshot then
       local retained = state.peak_snapshot
+      state.values.peak_measurement=peak_mode
+      state.values.channels=channel_values(retained,peak_fields,state.peak_warm)
+      for index,channel in ipairs(state.values.channels) do
+        update_peak_hold(state,index,channel.warning_peak,0,true,channel.peak_age)
+      end
       for _,ch in ipairs({'l','r'}) do
         state.values['peak_'..ch] = state.peak_warm and reading(retained[peak_fields.peak..ch]) or nil
         state.values['warning_peak_'..ch] = reading(retained[peak_fields.peak..ch])
@@ -199,6 +251,7 @@ function session.update(state, snapshot, dt)
   if snapshot.ready ~= true then
     state.valid = false
     state.values = nil
+    state.field_channels = {}
     state.peak_snapshot, state.peak_active = nil, false
     if (state.prefs or {}).ms_hold ~= -1 then
       state.loudness_peak.m, state.loudness_peak.s = nil, nil
@@ -209,11 +262,16 @@ function session.update(state, snapshot, dt)
   end
 
   if snapshot.playing ~= true then
+    state.field_channels={}
     if not state.hold and state.values then
       -- Integrated and session statistics remain while live readings fall away.
       for key in pairs(LIVE_FIELDS) do state.values[key] = nil end
       state.values.peak_l, state.values.peak_r = nil, nil
       state.values.warning_peak_l, state.values.warning_peak_r = nil, nil
+      for index,channel in ipairs(state.values.channels or {}) do
+        channel.rms,channel.field_rms,channel.peak,channel.warning_peak,channel.live_peak=nil,nil,nil,nil,nil
+        update_peak_hold(state,index,nil,peak_dt,false)
+      end
       state.peak_active = false
       update_peak_hold(state, 'l', nil, peak_dt, false)
       update_peak_hold(state, 'r', nil, peak_dt, false)
@@ -235,22 +293,29 @@ function session.update(state, snapshot, dt)
   local fresh_publication = snapshot.sequence == nil
     or snapshot.sequence ~= state.sequence
   state.sequence = snapshot.sequence
+  -- The surround field owns its own Freeze control. Keep its input current even
+  -- while the Loudness display retains an earlier measurement.
+  local warm_m = state.sample_rate_supported == false or state.elapsed + 1e-9 >= 0.4
+  state.field_channels=channel_values(snapshot,peak_fields,warm_m)
+  state.field_channels.correlations=pair_values(snapshot.correlations,#state.field_channels)
   if state.hold then return state end
   state.peak_snapshot, state.peak_active = snapshot, true
 
-  local warm_m = state.elapsed + 1e-9 >= 0.4
   state.peak_warm = warm_m
-  local short_term = reading(snapshot.s)
+  local loudness_available=snapshot.loudness_available~=false and state.loudness_available~=false
+  state.loudness_available=loudness_available
+  local short_term = loudness_available and reading(snapshot.s) or nil
   local lra_low, lra_high = reading(snapshot.lra_low), reading(snapshot.lra_high)
-  local lra_ready = snapshot.lra_valid == 1 and lra_low and lra_high and lra_high >= lra_low
+  local lra_ready = loudness_available and snapshot.lra_valid == 1 and lra_low and lra_high and lra_high >= lra_low
   local values = {
-    m = reading(snapshot.m),
+    peak_measurement = peak_mode,
+    m = loudness_available and reading(snapshot.m) or nil,
     s = short_term,
     lra = lra_ready and lra_high - lra_low or nil,
     lra_low = lra_ready and lra_low or nil,
     lra_high = lra_ready and lra_high or nil,
-    i = warm_m and reading(snapshot.i) or nil,
-    tp_max = reading(snapshot.tp_max),
+    i = loudness_available and warm_m and reading(snapshot.i) or nil,
+    tp_max = state.true_peak_available ~= false and reading(snapshot.tp_max) or nil,
     rms_l = warm_m and reading(snapshot.rms_l) or nil,
     rms_r = warm_m and reading(snapshot.rms_r) or nil,
     peak_l = warm_m and reading(snapshot[peak_fields.peak..'l']) or nil,
@@ -260,15 +325,19 @@ function session.update(state, snapshot, dt)
     warning_peak_r = reading(snapshot[peak_fields.peak..'r']),
     live_peak_l = reading(snapshot[peak_fields.live..'l']),
     live_peak_r = reading(snapshot[peak_fields.live..'r']),
-    crest = reading(snapshot.crest, true),
-    crest_l = warm_m and reading(snapshot.crest_l, true) or nil,
-    crest_r = warm_m and reading(snapshot.crest_r, true) or nil,
+    crest = state.sample_rate_supported ~= false and reading(snapshot.crest, true) or nil,
+    crest_l = state.sample_rate_supported ~= false and warm_m and reading(snapshot.crest_l, true) or nil,
+    crest_r = state.sample_rate_supported ~= false and warm_m and reading(snapshot.crest_r, true) or nil,
   }
+  values.channels=state.field_channels
+  for index,channel in ipairs(values.channels) do
+    update_peak_hold(state,index,channel.warning_peak,peak_dt,fresh_publication,channel.peak_age)
+  end
   state.values = values
   state.valid = true
-  state.m_max = higher(state.m_max, reading(snapshot.m_max))
+  state.m_max = loudness_available and higher(state.m_max, reading(snapshot.m_max)) or nil
   state.m_max = higher(state.m_max, values.m)
-  state.s_max = higher(state.s_max, reading(snapshot.s_max))
+  state.s_max = loudness_available and higher(state.s_max, reading(snapshot.s_max)) or nil
   state.s_max = higher(state.s_max, values.s)
   state.tp_max = higher(state.tp_max, values.tp_max)
   local publication = snapshot.lra_seconds or snapshot.sequence
@@ -279,7 +348,11 @@ function session.update(state, snapshot, dt)
   update_peak_hold(state, 'l', reading(snapshot[peak_fields.peak..'l']), peak_dt, fresh_publication, snapshot[peak_fields.age..'l'])
   update_peak_hold(state, 'r', reading(snapshot[peak_fields.peak..'r']), peak_dt, fresh_publication, snapshot[peak_fields.age..'r'])
 
-  if type(snapshot.history) == 'table' then
+  if not loudness_available then
+    state.history,state.history_count,state.history_head={},0,1
+    state.loudness_peak,state.loudness_peak_remaining={}, {m=0,s=0}
+    state.last_history_t=state.elapsed
+  elseif type(snapshot.history) == 'table' then
     -- The helper records each measured window. Missing windows remain a gap.
     for _, point in ipairs(snapshot.history) do
       if type(point.t) == 'number' and point.t > state.last_history_t + 1e-9 then
@@ -300,6 +373,7 @@ function session.animate(state, dt, loudness_floor)
   local display = state.display
   if not state.valid or not state.values then
     for _, key in ipairs(MOVING_FIELDS) do display[key] = nil end
+    display.channels={}
     return display
   end
   if state.hold then return display end
@@ -330,6 +404,23 @@ function session.animate(state, dt, loudness_floor)
       display[key] = current + (target - current) * amount
     end
   end
+  display.channels=display.channels or {}
+  for index,channel in ipairs(state.values.channels or {}) do
+    local drawn=display.channels[index] or {}
+    for _,key in ipairs({'rms','live_peak'}) do
+      local target,current=channel[key],drawn[key]
+      if target==nil and current~=nil then
+        local falling=current-SILENCE_FALL_DB_PER_SECOND*dt
+        drawn[key]=falling>PEAK_HOLD_FLOOR and falling or nil
+      elseif target==nil or current==nil or dt>=MAX_FRAME_DT then drawn[key]=target
+      else
+        local amount=key=='live_peak' and 1 or (target>current and rise or fall)
+        drawn[key]=current+(target-current)*amount
+      end
+    end
+    display.channels[index]=drawn
+  end
+  for index=#(state.values.channels or {})+1,#display.channels do display.channels[index]=nil end
   return display
 end
 

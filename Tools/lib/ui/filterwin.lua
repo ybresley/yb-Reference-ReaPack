@@ -10,7 +10,6 @@ local helper_status = require("core.monitor_helper_status")
 local hover_peaks = require("ui.spectrum_hover")
 local tips = require("ui.tips")
 local anchored_panel = require("ui.anchored_panel")
-local release_settings_layout = require("core.release_settings_layout")
 local T, M = theme.tokens, theme.metrics
 local filterwin = {}
 local ui = { open = false, drafts = {}, tab = "spectrum" }
@@ -56,12 +55,13 @@ local LABEL_TIPS = {
 function filterwin.is_open() return ui.open or entry.is_open() end
 function filterwin.panel_is_open() return ui.open end
 function filterwin.close() ui.open, ui.closing = false, nil end
-function filterwin.toggle_at(x, y_top, y_bottom)
+function filterwin.toggle_at(x, y_top, y_bottom, tab)
   if ui.open then ui.closing = true; return end
   entry.close()
   ui.open, ui.opening, ui.x = true, true, x
   ui.y_top, ui.y_bottom = y_top, y_bottom or y_top
-  ui.drafts, ui.error, ui.closing = {}, nil, nil
+  ui.drafts, ui.range_draft, ui.error, ui.closing = {}, nil, nil, nil
+  ui.tab = tab or ui.tab
 end
 
 local function combo(ctx, key, value, width, fixed, targets)
@@ -141,9 +141,11 @@ end
 local function finish_preset_focus(value)
   -- A tab switch stops submitting the old tab's fields. Commit its active
   -- draft here so leaving via a tab has the same meaning as ordinary blur.
+  local rejected = value.system and value.system.rejected_range
   for _, preset in ipairs(filter.PRESETS) do
     local drafts = ui.drafts[preset.id]
-    if drafts and ((drafts.low.active and drafts.low.dirty)
+    if drafts and (not rejected or rejected.preset_id ~= preset.id)
+        and ((drafts.low.active and drafts.low.dirty)
         or (drafts.high.active and drafts.high.dirty)) then
       drafts.low.active, drafts.high.active = false, false
       return commit_preset(value, preset.id, drafts)
@@ -151,7 +153,28 @@ local function finish_preset_focus(value)
   end
 end
 
+local function recovery_controls(ctx, value, drafts)
+  local system = value.system
+  local range, err = filter.validate_range(drafts.low.text, drafts.high.text)
+  local valid = range and range.high_hz <= system.max_filter_hz
+  reaper.ImGui_PushTextWrapPos(ctx, 0)
+  reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY,
+    value.range_save_error or err or system.range_error)
+  reaper.ImGui_PopTextWrapPos(ctx)
+  reaper.ImGui_BeginDisabled(ctx, not (valid and system.available))
+  local clicked = reaper.ImGui_Button(ctx, "Save And Apply")
+  reaper.ImGui_EndDisabled(ctx)
+  if clicked and valid and system.available then
+    return {type = "save_and_apply_filter_range", low_hz = range.low_hz, high_hz = range.high_hz}
+  end
+end
+
 local function filter_tab(ctx, value, draft_store)
+  local rejected = not draft_store and value.system and value.system.rejected_range
+  if rejected and (not ui.range_draft or ui.range_draft.range ~= rejected) then
+    ui.range_draft = {range = rejected, low = {}, high = {}}
+  end
+  local recovery_drafts = rejected and ui.range_draft
   draft_store = draft_store or ui.drafts
   first_group = true
   local action
@@ -179,11 +202,17 @@ local function filter_tab(ctx, value, draft_store)
     for i, preset in ipairs(filter.PRESETS) do
       local row_y = y + heading + (i - 1) * (frame + M.ITEM_SPACING_Y)
       local saved = value.presets[preset.id]
-      local drafts = draft_store[preset.id] or { low = {}, high = {} }
-      draft_store[preset.id] = drafts
+      local recovering = rejected and rejected.preset_id == preset.id
+      local drafts
+      if recovering then
+        drafts = recovery_drafts
+      else
+        drafts = draft_store[preset.id] or { low = {}, high = {} }
+        draft_store[preset.id] = drafts
+      end
       reaper.ImGui_SetCursorPos(ctx, x, row_y + M.FRAME_PAD_Y)
       reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, preset.label)
-      if filter.preset_changed(value, preset.id) then
+      if not recovering and filter.preset_changed(value, preset.id) then
         reaper.ImGui_SetCursorPos(ctx, reset_x, row_y)
         if icons.button(ctx, nil, "restore_preset_" .. preset.id, "rotate-ccw", {
             size = M.FILTER_RESTORE_W, fallback = icons.draw_reset,
@@ -199,14 +228,29 @@ local function filter_tab(ctx, value, draft_store)
       reaper.ImGui_SetCursorPos(ctx, high_x, row_y)
       local high_submit = entry.field(ctx, "preset_" .. preset.id .. "_high",
         drafts.high, saved.high_hz, M.FILTER_FIELD_W)
-      if (low_submit or high_submit) and draft_store[preset.id] then
+      if not recovering and (low_submit or high_submit) and draft_store[preset.id] then
         result = actions.combine(result, commit_preset(value, preset.id, drafts))
       end
     end
-    reaper.ImGui_SetCursorPos(ctx, x,
-      y + heading + #filter.PRESETS * (frame + M.ITEM_SPACING_Y) - M.ITEM_SPACING_Y)
+    if rejected and rejected.preset_id then
+      return actions.combine(result, recovery_controls(ctx, value, recovery_drafts))
+    end
     return result
   end))
+  if rejected and not rejected.preset_id then
+    action = actions.combine(action, settings_group(ctx, "rejected_range", "Filter Range", function()
+      reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, "Low (Hz)")
+      reaper.ImGui_SameLine(ctx, 0, M.ITEM_SPACING_X)
+      entry.field(ctx, "recover_range_low", recovery_drafts.low,
+        rejected.low_hz or value.low_hz, M.FILTER_FIELD_W)
+      reaper.ImGui_SameLine(ctx, 0, M.ITEM_SPACING_X)
+      reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, "High (Hz)")
+      reaper.ImGui_SameLine(ctx, 0, M.ITEM_SPACING_X)
+      entry.field(ctx, "recover_range_high", recovery_drafts.high,
+        rejected.high_hz or value.high_hz, M.FILTER_FIELD_W)
+      return recovery_controls(ctx, value, recovery_drafts)
+    end))
+  end
   action = actions.combine(action, settings_group(ctx, "filter", "Settings", function()
     local width = reaper.ImGui_GetContentRegionAvail(ctx)
     local slope_action = option_row(ctx, "slope", "Slope", value.slope, width,
@@ -249,144 +293,6 @@ local function draw_panel_shell(ctx, width, height, tab)
   return spectrum_clicked, filter_clicked, body_y, closed
 end
 
--- Release demonstrations share the production content in a scaled window inside
--- the canvas. Inputs are disabled while their normal colours are retained.
-local function gallery_flags()
-  local flags = reaper.ImGui_WindowFlags_NoTitleBar() | reaper.ImGui_WindowFlags_NoResize()
-    | reaper.ImGui_WindowFlags_NoCollapse() | reaper.ImGui_WindowFlags_NoSavedSettings()
-    | reaper.ImGui_WindowFlags_NoScrollbar() | reaper.ImGui_WindowFlags_NoScrollWithMouse()
-  if reaper.ImGui_WindowFlags_NoDocking then flags = flags | reaper.ImGui_WindowFlags_NoDocking() end
-  if reaper.ImGui_WindowFlags_NoInputs then flags = flags | reaper.ImGui_WindowFlags_NoInputs() end
-  if reaper.ImGui_WindowFlags_NoNav then flags = flags | reaper.ImGui_WindowFlags_NoNav() end
-  if reaper.ImGui_WindowFlags_NoFocusOnAppearing then
-    flags = flags | reaper.ImGui_WindowFlags_NoFocusOnAppearing()
-  end
-  return flags
-end
-
--- Scale the shared controls together, without changing the application's UI Size.
-local PREVIEW_METRICS = {
-  "BASE_FS", "SETTINGS_TAB_FS", "WINDOW_PAD", "FRAME_PAD_X", "FRAME_PAD_Y",
-  "ITEM_SPACING_X", "ITEM_SPACING_Y", "SPECTRUM_SETTINGS_W", "SPECTRUM_SETTINGS_H",
-  "SPECTRUM_OPTION_W", "SPECTRUM_BAND_GAP", "FILTER_FIELD_W", "FILTER_RESTORE_W",
-}
-
-local function begin_gallery_scale(ctx, preview)
-  local scale = preview.scale or 1
-  preview.saved_metrics = preview.saved_metrics or {}
-  for _, key in ipairs(PREVIEW_METRICS) do
-    preview.saved_metrics[key] = M[key]
-    M[key] = M[key] * scale
-  end
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), M.FRAME_PAD_X, M.FRAME_PAD_Y)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), M.ITEM_SPACING_X, M.ITEM_SPACING_Y)
-  return theme.push_release_font(ctx, M.BASE_FS)
-end
-
-local function end_gallery_scale(ctx, preview, font)
-  if font then reaper.ImGui_PopFont(ctx) end
-  reaper.ImGui_PopStyleVar(ctx, 2)
-  for _, key in ipairs(PREVIEW_METRICS) do M[key] = preview.saved_metrics[key] end
-end
-
-function filterwin.gallery_size()
-  -- Size from the same rows we draw, never from a previous scaled frame.
-  return M.SPECTRUM_SETTINGS_W, release_settings_layout.content_height(SPECTRUM_GROUPS,
-    M.BASE_FS + M.FRAME_PAD_Y * 2, M.BASE_FS, M.WINDOW_PAD, M.ITEM_SPACING_Y)
-end
-
-local function paint_gallery_pointer(ctx, preview)
-  if not (preview.pointer_x and preview.paint_pointer) then return end
-  local x, y = reaper.ImGui_GetWindowPos(ctx)
-  local width, height = reaper.ImGui_GetWindowSize(ctx)
-  local dl = reaper.ImGui_GetForegroundDrawList(ctx)
-  reaper.ImGui_DrawList_PushClipRect(dl, x, y, x + width, y + height, true)
-  preview.paint_pointer(dl, preview.pointer_x, preview.pointer_y, preview.pointer_pulse)
-  reaper.ImGui_DrawList_PopClipRect(dl)
-end
-
-local function gallery_combo_popup(ctx, key, id, preview)
-  local options = OPTIONS[key]
-  local anchor = preview.targets and preview.targets[key]
-  if not (options and anchor and preview.open_combo == key) then return end
-  local row_height = reaper.ImGui_GetTextLineHeight(ctx)
-  local width = math.max(1, anchor.x1 - anchor.x0)
-  local height = M.WINDOW_PAD * 2 + #options * row_height
-    + math.max(0, #options - 1) * M.ITEM_SPACING_Y
-  local x, y = anchor.x0, anchor.y1
-  local work = preview.work
-  if work then
-    x = math.max(work.left, math.min(x, work.right - width))
-    if y + height > work.bottom then y = anchor.y0 - height end
-    y = math.max(work.top, math.min(y, work.bottom - height))
-  end
-  reaper.ImGui_SetNextWindowPos(ctx, x, y, reaper.ImGui_Cond_Always())
-  reaper.ImGui_SetNextWindowSize(ctx, width, height, reaper.ImGui_Cond_Always())
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), T.BG_POPUP)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.STROKE_SECONDARY)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(),
-    M.WINDOW_PAD, M.WINDOW_PAD)
-  local opened = reaper.ImGui_Begin(ctx,
-    "##filterwin_gallery_combo_" .. tostring(id or "preview") .. "_" .. key,
-    nil, gallery_flags())
-  reaper.ImGui_PopStyleVar(ctx)
-  reaper.ImGui_PopStyleColor(ctx, 2)
-  if opened then
-    for index, label in ipairs(options) do
-      local value = options.values[index]
-      local highlighted = value == preview.selected_value
-        or value == preview.highlight_value
-      reaper.ImGui_Selectable(ctx, label .. "##gallery_" .. key .. "_" .. index,
-        highlighted)
-      local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
-      local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
-      local target_key = key .. "_" .. tostring(value)
-      local point = preview.targets[target_key]
-      if not point then point = {}; preview.targets[target_key] = point end
-      point.x, point.y = (x0 + x1) * .5, (y0 + y1) * .5
-    end
-    paint_gallery_pointer(ctx, preview)
-    reaper.ImGui_End(ctx)
-  end
-end
-
-function filterwin.gallery_preview(ctx, state, tab, x, y, id, preview)
-  preview = preview or {}
-  preview.drafts = preview.drafts or {}
-  preview.targets = preview.targets or {}
-  local font = begin_gallery_scale(ctx, preview)
-  local width, height = M.SPECTRUM_SETTINGS_W, preview.height or M.SPECTRUM_SETTINGS_H
-  reaper.ImGui_SetNextWindowPos(ctx, x, y, reaper.ImGui_Cond_Always())
-  reaper.ImGui_SetNextWindowSize(ctx, width, height, reaper.ImGui_Cond_Always())
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.STROKE_SECONDARY)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), T.BG_CHROME)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(),
-    M.WINDOW_PAD, M.WINDOW_PAD)
-  local opened = reaper.ImGui_Begin(ctx,
-    "##filterwin_gallery_" .. tostring(id or "preview"), nil, gallery_flags())
-  reaper.ImGui_PopStyleVar(ctx)
-  reaper.ImGui_PopStyleColor(ctx, 2)
-  if opened then
-    local normal_alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
-    reaper.ImGui_BeginDisabled(ctx, true)
-    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_Alpha(), normal_alpha)
-    local _, _, body_y = draw_panel_shell(ctx, width, height, tab)
-    reaper.ImGui_SetCursorPos(ctx, M.WINDOW_PAD, body_y + M.WINDOW_PAD * 2)
-    if tab == "filter" then
-      filter_tab(ctx, state.monitor_filter, preview.drafts)
-    else
-      spectrum_tab(ctx, state.spectrum.prefs, true, preview.targets)
-    end
-    reaper.ImGui_PopStyleVar(ctx)
-    reaper.ImGui_EndDisabled(ctx)
-    paint_gallery_pointer(ctx, preview)
-    reaper.ImGui_End(ctx)
-  end
-  gallery_combo_popup(ctx, preview.open_combo, id, preview)
-  end_gallery_scale(ctx, preview, font)
-  return width, height
-end
-
 function filterwin.draw(ctx, state, res)
   local action = entry.draw(ctx, state, res)
   if not ui.open then return action end
@@ -396,20 +302,34 @@ function filterwin.draw(ctx, state, res)
     height = ui.spectrum_height or height
   end
   local system = state.monitor_filter.system or {}
-  local recovery = helper_status.describe(system)
+  local recovery = system.phase ~= "settling" and system.phase ~= "recovering"
+    and helper_status.describe(system)
   local preference_error = ui.error or state.spectrum.preference_error
     or state.monitor_filter.preference_error
-  local show_status = preference_error or not system.available or system.range_error
+  local show_status = preference_error or recovery
   local show_recovery = recovery and recovery.button
-  -- Both tabs fit the Spectrum content; only real errors need a footer.
-  if show_status then height = height + M.FILTER_STATUS_H + M.ITEM_SPACING_Y end
-  if show_recovery then
-    height = height + reaper.ImGui_GetFrameHeight(ctx) + M.ITEM_SPACING_Y
+  local rejected = system.rejected_range
+  if rejected then
+    local gap, pad = M.ITEM_SPACING_Y, M.WINDOW_PAD
+    local text_height = reaper.ImGui_GetTextLineHeight(ctx)
+    local rows = #filter.PRESETS + 1
+    -- Window chrome, the two settings groups, and the preset column headings.
+    local filter_height = frame_height + pad * 5 + 2 * (text_height + pad * 2 + gap * 2)
+      + rows * frame_height + math.max(0, rows - 2) * gap + text_height + gap * 2
+    filter_height = filter_height + M.FILTER_STATUS_H + frame_height + gap * 2
+    if not rejected.preset_id then
+      filter_height = filter_height + frame_height + pad * 2 + text_height + gap * 3
+    end
+    height = math.max(height, filter_height)
   end
-  if ui.opening then
+  -- Both tabs share the same height. Helper recovery sits below either tab.
+  if show_status then height = height + M.FILTER_STATUS_H + M.ITEM_SPACING_Y end
+  if show_recovery then height = height + frame_height + M.ITEM_SPACING_Y end
+  if ui.opening or (rejected and not ui.rejected) then
     entry.position(ctx, res, ui.x, ui.y_top, ui.y_bottom, width, height)
     ui.opening = false
   end
+  ui.rejected = rejected
   reaper.ImGui_SetNextWindowSize(ctx, width, height, reaper.ImGui_Cond_Always())
   local flags = reaper.ImGui_WindowFlags_NoTitleBar() | reaper.ImGui_WindowFlags_NoResize()
     | reaper.ImGui_WindowFlags_NoCollapse() | reaper.ImGui_WindowFlags_NoSavedSettings()
@@ -450,7 +370,7 @@ function filterwin.draw(ctx, state, res)
       if child then
         reaper.ImGui_PushTextWrapPos(ctx, 0)
         reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, preference_error
-          or (recovery and (recovery.title .. ". " .. recovery.detail)) or system.range_error or "")
+          or (recovery and (recovery.title .. ". " .. recovery.detail)) or "")
         reaper.ImGui_PopTextWrapPos(ctx)
         reaper.ImGui_EndChild(ctx)
       end

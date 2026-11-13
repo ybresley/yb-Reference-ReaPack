@@ -10,17 +10,28 @@ local history_line=require('ui.meter_history_line')
 local colour_fill=require('ui.meter_history_colour_fill')
 local ramps=require('ui.meter_colours')
 local drawing=require('ui.meter_drawing')
+local pointer=require('ui.meter_hover')
 local T,R=theme.tokens,reaper
 local text,line,rect=drawing.text,drawing.line,drawing.rect
 local loudness_number=drawing.loudness_number
 local time_label=drawing.time_label
 local history={}
-local INTEGRATED_COLOUR=0xAF95DFFF
 -- Reused by each trace; the native drawing buffer belongs to the meter adapter.
 local vertices={}
 local function meter_tooltip(ctx,r,message,id)
-  tips.show(ctx,R.ImGui_IsMouseHoveringRect(ctx,r.x,r.y,r.x+r.w,r.y+r.h),message,id)
+  tips.show(ctx,pointer.rect(ctx,r.x,r.y,r.x+r.w,r.y+r.h),message,id,tips.rect(r.x,r.y,r.w,r.h))
 end
+-- Points are stored in time order, so the first one at or after `t` is found by
+-- halving instead of walking every stored point on each frame.
+function history.first_at_or_after(model,t)
+  local low,high=1,model.history_count+1
+  while low<high do
+    local middle=(low+high)//2
+    if session.history_at(model,middle).t<t then low=middle+1 else high=middle end
+  end
+  return low
+end
+
 local function history_curve(dl,model,key,start,finish,x,y,left,right,colour,thickness,fill_geometry,colour_geometry)
   local points=model.history_points
   local halo=display_curve.radius(right-left)*(finish-start)/math.max(1,right-left)
@@ -58,13 +69,16 @@ local function history_curve(dl,model,key,start,finish,x,y,left,right,colour,thi
     end
     last_t,last_value=t,value
   end
-  for i=1,model.history_count do
+  -- The point before the first visible one still supplies the line's left edge.
+  for i=math.max(1,history.first_at_or_after(model,start-halo)-1),model.history_count do
     local point=session.history_at(model,i)
     local next_point=session.history_at(model,i+1)
     -- Supply neighbouring measurements for the filter window at each plot edge.
     if (point.t<=finish+halo or (i>1 and session.history_at(model,i-1).t<finish+halo))
       and (point.t>=start-halo or (next_point and next_point.t>=start-halo)) then
       add(point.t,point[key])
+    elseif point.t>finish+halo then
+      break
     end
   end
   flush()
@@ -72,6 +86,7 @@ end
 
 function history.draw(ctx,dl,r,model,opts,guide)
   local s=theme.scale
+  local INTEGRATED_COLOUR=ramps.integrated(T.ACCENT)
   local l=r.x+(r.plot_left or style.history_left)*s
   local right=r.x+r.w-style.history_right*s
   local top=r.y+style.plot_top*s
@@ -83,6 +98,7 @@ function history.draw(ctx,dl,r,model,opts,guide)
   if not r.surface_painted then
     drawing.surface(dl,{x=l,y=r.y,w=right-l,h=background_bottom-r.y})
   end
+  local available=model.loudness_available~=false
   local show_m=opts.history_m~=false
   local show_s=opts.history_s~=false
   local show_i=opts.history_integrated==true and (model.playing~=false or opts.keep_integrated~=false or model.hold)
@@ -127,7 +143,7 @@ function history.draw(ctx,dl,r,model,opts,guide)
   local fill_key=opts.history_fill=='Momentary' and show_m and 'm'
     or opts.history_fill=='Short-Term' and show_s and 's'
     or opts.history_fill=='Integrated' and show_i and 'i'
-  if fill_key and (opts.history_opacity or .22)>0 then
+  if available and fill_key and (opts.history_opacity or .22)>0 then
       local fill_colour=fill_key=='m' and T.TEXT_PRIMARY
         or fill_key=='i' and INTEGRATED_COLOUR or T.SPECTRUM_AVERAGE_FILL
       fill_geometry.colour=(fill_colour&0xFFFFFF00)
@@ -161,6 +177,13 @@ function history.draw(ctx,dl,r,model,opts,guide)
     if axis_font then R.ImGui_PopFont(ctx) end
     R.ImGui_DrawList_PopClipRect(dl)
   end
+  -- Keep the scale and ruler without painting or inspecting stale LUFS samples.
+  if not available then
+    if r.layout_hint then
+      drawing.layout_hint(ctx,dl,{x=l,y=r.y,w=right-l,h=background_bottom-r.y},model)
+    end
+    return
+  end
   R.ImGui_DrawList_PushClipRect(dl,l,top,right,bottom,true)
   if show_m then history_curve(dl,model,'m',start,start+duration,x,y,l,right,T.TEXT_PRIMARY,stroke_width) end
   if show_s then history_curve(dl,model,'s',start,start+duration,x,y,l,right,T.ACCENT,stroke_width,nil,colour_geometry) end
@@ -177,14 +200,13 @@ function history.draw(ctx,dl,r,model,opts,guide)
     hover=guide.inspect and mx>=l and mx<=right and my>=top and my<=bottom
   else
     mx,my=R.ImGui_GetMousePos(ctx)
-    hover=R.ImGui_IsMouseHoveringRect(ctx,l,top,right,bottom)
+    hover=pointer.rect(ctx,l,top,right,bottom)
   end
-  for i=1,hover and model.history_count or 0 do
+  for i=hover and history.first_at_or_after(model,start) or model.history_count+1,model.history_count do
     local point=session.history_at(model,i)
-    if point and point.t>=start and point.t<=start+duration then
-      local px=x(point.t)
-      if hover and (not distance or math.abs(px-mx)<distance) then nearest,distance=point,math.abs(px-mx) end
-    end
+    if point.t>start+duration then break end
+    local px=x(point.t)
+    if not distance or math.abs(px-mx)<distance then nearest,distance=point,math.abs(px-mx) end
   end
   R.ImGui_DrawList_PopClipRect(dl)
   if nearest then

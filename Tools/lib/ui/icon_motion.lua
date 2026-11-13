@@ -9,6 +9,25 @@ local shapes = require("ui.icon_shapes")
 local icon_motion = {}
 local tracker = motion.new(128)
 local generation = theme.motion.generation
+-- Release demonstrations draw these controls under the same ids as the live
+-- ones but with their own state. Between begin_private and end_private the
+-- transitions use a second tracker, so a demonstration never restarts or cuts
+-- short a live control's motion, nor the reverse.
+local live_tracker, private_tracker
+
+function icon_motion.begin_private()
+  if live_tracker then return end
+  if generation ~= theme.motion.generation then
+    tracker, private_tracker, generation = motion.new(128), nil, theme.motion.generation
+  end
+  private_tracker = private_tracker or motion.new(128)
+  live_tracker, tracker = tracker, private_tracker
+end
+
+function icon_motion.end_private()
+  if not live_tracker then return end
+  tracker, live_tracker = live_tracker, nil
+end
 local modes = {
   library = "ICON_LIBRARY", settings = "ICON_SETTINGS", ear = "ICON_AUDITION",
   ["arrow-left-right"] = "ICON_SWAP",
@@ -135,7 +154,9 @@ end
 -- Opening the Library reads as a quick browse: the icon pulls slightly left,
 -- settles from the right, and leaves one brief copy travelling ahead of it.
 -- The real Lucide glyph stays in use, so the moving and resting icons match.
-local function paint_library(ctx, font, dl, cx, cy, unit, colour, progress)
+-- `colour` is already faded by the style alpha for the hand-drawn shapes;
+-- `glyph_colour` is the unfaded one, because font glyphs fade themselves.
+local function paint_library(ctx, font, dl, cx, cy, unit, colour, progress, glyph_colour)
   local shift = 0
   if progress < 0.32 then
     shift = -2.7 * ease_out(progress / 0.32)
@@ -151,13 +172,13 @@ local function paint_library(ctx, font, dl, cx, cy, unit, colour, progress)
     local ghost_alpha = math.sin(math.pi * ghost_progress) ^ 1.4 * 0.58
     local ghost_colour = theme.fade(colour, ghost_alpha)
     if not icons.paint_glyph(ctx, font, "library", cx + ghost_shift * unit, cy,
-        ghost_colour, theme.metrics.ICON_FS) then
+        theme.fade(glyph_colour, ghost_alpha), theme.metrics.ICON_FS) then
       icons.draw_folder(dl, cx + ghost_shift * unit, cy, ghost_colour)
     end
   end
 
   if not icons.paint_glyph(ctx, font, "library", cx + shift * unit, cy,
-      colour, theme.metrics.ICON_FS) then
+      glyph_colour, theme.metrics.ICON_FS) then
     icons.draw_folder(dl, cx + shift * unit, cy, colour)
   end
 end
@@ -165,7 +186,8 @@ end
 -- This follows the approved 42 px mockup in button-relative coordinates. Its
 -- waves are elliptical, share one delayed inward movement, and keep their
 -- separate silhouettes until they disappear inside the ear.
-local function paint_audition(ctx, font, dl, cx, cy, button_size, colour, wave_base, progress)
+local function paint_audition(ctx, font, dl, cx, cy, button_size, colour, wave_base, progress,
+    glyph_colour)
   local total_time = 0.585
   local elapsed = progress * total_time
   local ear_progress = math.min(elapsed / 0.56, 1)
@@ -200,7 +222,7 @@ local function paint_audition(ctx, font, dl, cx, cy, button_size, colour, wave_b
   else
     response = audition_keyframe(ear_progress, 0.72, 1, 0.98, 1)
   end
-  icons.paint_glyph(ctx, font, "ear", cx, cy, colour, theme.metrics.ICON_FS * response)
+  icons.paint_glyph(ctx, font, "ear", cx, cy, glyph_colour, theme.metrics.ICON_FS * response)
 end
 
 -- Pitch needs whole-icon travel to remain legible at 14 px. The note jumps one
@@ -266,14 +288,15 @@ function icon_motion.paint_pose(ctx, font, name, cx, cy, colour,
     return false
   end
   local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+  local glyph_colour = colour
   colour = theme.fade(colour, alpha)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
   local unit = (size or theme.metrics.ICON_FS) / 24
   if name == "library" then
-    paint_library(ctx, font, dl, cx, cy, unit, colour, progress)
+    paint_library(ctx, font, dl, cx, cy, unit, colour, progress, glyph_colour)
   elseif name == "ear" then
     paint_audition(ctx, font, dl, cx, cy, item_size or theme.metrics.ICON_FS,
-      colour, theme.fade(theme.tokens.ACCENT, alpha), progress)
+      colour, theme.fade(theme.tokens.ACCENT, alpha), progress, glyph_colour)
   elseif name == "settings" then
     local angle = progress and ease_in_out(progress) * math.pi / 3 or 0
     outline(dl, cx, cy, unit, shapes.gear[1], colour, angle)

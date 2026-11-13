@@ -24,7 +24,8 @@ local pins       = require("core.pins")
 local importer   = require("core.importer")
 local analysis   = require("core.analysis")
 local copies     = require("analysis_copies")
-local store      = require("core.library_store")
+local library_service = require("library_service")
+local save_retry = require("core.save_retry")
 local reaper_api = require("reaper_api")
 local project    = require("project_state")
 
@@ -34,29 +35,54 @@ local service = {}
 -- This lasts only for the open project; no absolute path enters its pin data.
 local stalled_moves = setmetatable({}, { __mode = "k" })
 
+-- Every loaded pin set gets its own session number. Pin ids restart at "p1" in
+-- every project, and REAPER may hand the same project pointer to a different
+-- file opened into the same tab, so anything id-keyed that outlives a frame (a
+-- label edit, a drag, the picker's preview) remembers this number rather than
+-- the pointer. Save As keeps the number; another project, or the same file
+-- reloaded with different pins, gets a new one.
+local last_session = 0
+
+-- How often refresh compares the stored pin text even when REAPER's change
+-- counter hasn't moved, in seconds (see refresh).
+local RECHECK_SECONDS = 1
+
 local function empty_pins(proj, path)
+  last_session = last_session + 1
   return {
     proj      = proj,                    -- which project this pin state belongs to
+    session   = last_session,            -- identity for id-keyed work (see above)
     path      = path,                    -- its .RPP path ("" = never saved)
     dir       = project.refs_dir(path),  -- the References folder (nil until saved)
     data      = pins.new_state(),
+    -- The stored pin text as last read or written. A project that still stores
+    -- exactly this text is the one these records came from.
+    text      = nil,
+    change_count = nil,                  -- REAPER's change counter when `text` was checked
+    checked_at = nil,                    -- the time `text` was last checked, in seconds
     by_origin = {},                      -- library sound id -> pin, for the list's markers
     origin_of = {},                      -- pin id -> library sound id, for "Show in library"
     markers_version = 0,                 -- bumped on every rebuild (see rebuild_markers)
     load_error = nil,
+    load_newer = nil,                    -- the load error is newer-version data, not damage
   }
 end
 
 local DAMAGED = "This project's pinned references couldn't be read. Changes to pinned " ..
-  "references are paused, and the saved data will not be overwritten. Right-click the " ..
-  "warning under THIS PROJECT to discard the unreadable data and start with no pinned references."
+  "references are paused, and the saved data will not be overwritten. To discard the " ..
+  "unreadable data, open the reference list and choose Start With No Pinned References."
 
--- The damaged-data refusal, in one shape. `service.edit` asks it before every
+local NEWER = "This project's pinned references were saved by a newer version of yb-Reference. " ..
+  "Update yb-Reference to use them. Changes to pinned references are paused, and the saved " ..
+  "data will not be overwritten."
+
+-- The paused-data refusal, in one shape. `service.edit` asks it before every
 -- change, but an operation that looks a pin UP first has to ask before it does:
--- damaged data loads as an empty list, so the lookup would report a missing pin
--- and hide the real reason from the user.
+-- unreadable data loads as an empty list, so the lookup would report a missing
+-- pin and hide the real reason from the user.
 local function damaged(state)
   if state.pins.relocation_error then return state.pins.relocation_error end
+  if state.pins.load_newer then return NEWER end
   if state.pins.load_error then return DAMAGED end
   return nil
 end
@@ -110,28 +136,127 @@ local function same_folder(a, b)
   return a == b
 end
 
+local function missing_note(names)
+  if #names == 0 then return nil end
+  if #names == 1 then
+    return string.format("\"%s\" has no audio in the original References folder, so it wasn't copied.",
+      names[1])
+  end
+  return string.format("%d pinned references have no audio in the original References folder, " ..
+    "so they weren't copied: \"%s\".", #names, table.concat(names, "\", \""))
+end
+
+local function assumed_note(names)
+  if #names == 0 then return nil end
+  if #names == 1 then
+    return string.format("\"%s\" has no audio in the original References folder, so it now uses the file " ..
+      "with the same name and size in the new one. Play it to check it's the right sound.", names[1])
+  end
+  return string.format("%d pinned references have no audio in the original References folder, so they now " ..
+    "use the files with the same names and sizes in the new one: \"%s\". Play them to check they're the " ..
+    "right sounds.", #names, table.concat(names, "\", \""))
+end
+
+local function join_messages(a, b)
+  if a and b then return a .. " " .. b end
+  return a or b
+end
+
+-- Whether this pin's audio is already in the new folder under its own name,
+-- byte for byte. Opening an earlier Save As copy into this tab looks exactly
+-- like Save As (same tab, same pin text), and that copy's References folder
+-- already holds its audio. Copying again would rename its pin.
+--
+-- When the original file is gone there is nothing to compare, so the size the
+-- pin recorded when it was made stands in for it, and the answer is "assumed"
+-- rather than "same". Without this, a healthy copy opened into a tab whose own
+-- audio is missing had its pin renamed to a file that doesn't exist. Equal
+-- name and size don't prove equal audio, so an assumed match is always
+-- reported for the user to check. An original that exists but can't be read is
+-- no match: the copy that follows fails and the move stops visibly.
+local function already_there(old_dir, new_dir, pin)
+  local src = reaper_api.join(old_dir, pin.filename)
+  local dest = reaper_api.join(new_dir, pin.filename)
+  local size, dest_size = reaper_api.file_size(src), reaper_api.file_size(dest)
+  if size then
+    return dest_size == size and library_service.identical_files(src, dest) and "same" or nil
+  end
+  if not reaper_api.path_exists(src) and pin.size_bytes ~= nil and dest_size == pin.size_bytes then
+    return "assumed"
+  end
+  return nil
+end
+
+-- Which pins are already there, whether all of them are, and the names of
+-- those only assumed to be. Decided before anything is copied, so a pin can
+-- never match a file this move has just written for another pin: two pins
+-- sharing one file would fail the pin list's own load check.
+local function pins_in_place(old_dir, new_dir, list)
+  local in_place, all, assumed = {}, true, {}
+  for i, pin in ipairs(list) do
+    local match = already_there(old_dir, new_dir, pin)
+    in_place[i] = match ~= nil
+    all = all and in_place[i]
+    if match == "assumed" then assumed[#assumed + 1] = pin.name end
+  end
+  return in_place, all, assumed
+end
+
 -- All copies must land before any pin changes its address. An existing name is
 -- not proof of matching audio, even when its byte size matches the original.
 -- Completed copies stay on disk after a refusal; deleting them could damage a
 -- project saved by another process while this move was in progress.
+--
+-- A pin whose audio is already missing gets its own unused name in the new
+-- folder and stays missing there, unless a file with its name and recorded
+-- size is already in that folder. It then uses that file, and the user is told
+-- to check it.
 local function carry_files_forward(old_dir, fresh, original_text, retry)
-  local data, plan = fresh.data, {}
+  local data, plan, missing, assumed = fresh.data, {}, {}, {}
   local changed = retry == true
-  if not same_folder(old_dir, fresh.dir) then
+  local moving = not same_folder(old_dir, fresh.dir)
+  if moving then
+    local in_place, all
+    in_place, all, assumed = pins_in_place(old_dir, fresh.dir, data.pins)
+    -- When every pin is already there, nothing is copied and the project isn't
+    -- marked changed: the user never caused a save. A retry still rewrites the
+    -- stored text: an earlier refused write may have left it different from
+    -- these records.
+    if all and not retry then return true, assumed_note(assumed) end
     reaper_api.ensure_dir(fresh.dir)
-    local taken = {}
+    local taken, listed = {}, nil
     for _, name in ipairs(reaper_api.list_files(fresh.dir)) do taken[name:lower()] = true end
-    for _, pin in ipairs(data.pins) do
-      local name = importer.unique_filename(pin.filename, taken)
-      taken[name:lower()] = true
-      local ok, err = reaper_api.copy_file(reaper_api.join(old_dir, pin.filename),
-        reaper_api.join(fresh.dir, name))
-      if not ok then return false, err end
+    for i, pin in ipairs(data.pins) do
+      -- A pin already there keeps its name, even when another pin in the same
+      -- set still needs copying.
+      local name = pin.filename
+      if not in_place[i] then
+        name = importer.unique_filename(pin.filename, taken)
+        taken[name:lower()] = true
+        local src = reaper_api.join(old_dir, pin.filename)
+        -- Audio absent from a reachable folder has nothing to copy. A file that
+        -- is listed but can't be opened (locked, no permission), or a folder
+        -- that can't be reached, must still stop the move: that audio exists.
+        local absent = false
+        if not reaper_api.path_exists(src) and reaper_api.directory_exists(old_dir) then
+          if not listed then
+            listed = {}
+            for _, n in ipairs(reaper_api.list_files(old_dir)) do listed[n:lower()] = true end
+          end
+          absent = not listed[pin.filename:lower()]
+        end
+        if absent then
+          missing[#missing + 1] = pin.name
+        else
+          local ok, err = reaper_api.copy_file(src, reaper_api.join(fresh.dir, name))
+          if not ok then return false, err end
+        end
+      end
       plan[#plan + 1] = { pin = pin, before = pin.filename, after = name }
       changed = changed or name ~= pin.filename
     end
   end
-  if not changed then return true end
+  if not changed then return true, join_messages(missing_note(missing), assumed_note(assumed)) end
   for _, item in ipairs(plan) do item.pin.filename = item.after end
   local ok, saved = pcall(project.write_pins, fresh.proj, pins.encode(data))
   if not ok or not saved then
@@ -142,13 +267,15 @@ local function carry_files_forward(old_dir, fresh, original_text, retry)
     return false, "The updated pinned references couldn't be saved in the project."
   end
   project.mark_dirty(fresh.proj)
-  return true, "Pinned references are ready in this project's References folder. Save the project again to keep them."
+  return true, join_messages("Pinned references are ready in this project's References folder. " ..
+    "Save the project again to keep them.", join_messages(missing_note(missing), assumed_note(assumed)))
 end
 
 -- Bring state.pins in line with the project in front of the user. Called once per
--- frame (two cheap calls and a compare when nothing changed): switching project
--- tabs, opening a project, or Save As all land here. Returns nil when nothing
--- changed, else { selected = <pin id to restore, or nil>, warning = <msg, or nil> }.
+-- frame (a few cheap calls and a compare when nothing changed): switching project
+-- tabs, opening a project, reopening one, or Save As all land here. Returns nil
+-- when nothing changed, else { selected = <pin id to restore, or nil>,
+-- warning = <msg, or nil>, same_project = <true for Save As> }.
 --
 -- Reloading never loses anything: every pin mutation is written into the
 -- project's storage immediately (see persist), so reading it back IS the latest.
@@ -160,28 +287,56 @@ end
 function service.refresh(state)
   local proj, path = project.current()
   local ps = state.pins
-  if ps and ps.proj == proj and ps.path == path then return nil end
+  if ps and ps.proj == proj and ps.path == path then
+    -- Same tab, same file. Reopening that file, or an undo, can still replace
+    -- the stored pins without changing either, and the next edit would then
+    -- write this stale list over them. The text is re-read when REAPER's change
+    -- counter moves. Whether reopening a file moves that counter isn't
+    -- verified, so the text is also re-read about once a second; never every
+    -- frame.
+    local count, now = project.change_count(proj), reaper_api.now()
+    if count == ps.change_count and now - ps.checked_at < RECHECK_SECONDS then return nil end
+    ps.change_count, ps.checked_at = count, now
+    if project.read_pins(proj) == ps.text then return nil end
+  end
 
-  -- The same project under a new path is Save As, not a switch. The report says
-  -- so (`same_project`) because the two deserve different handling upstream —
-  -- e.g. a latched reference keeps its restored selection through Save As, but
-  -- never inherits one from a genuinely different project.
-  local same_project = ps ~= nil and ps.proj == proj
+  -- The same pointer under a new path is Save As only while the project still
+  -- stores exactly the pin text this tool last read or wrote. Opening another
+  -- file into the tab may keep the pointer, and that project's own pins must
+  -- load as a different project: never inherit this one's audio, stall or list.
+  local text = project.read_pins(proj)
+  local same_project = ps ~= nil and ps.proj == proj and ps.path ~= path and ps.text == text
   local held = stalled_moves[proj]
-  if held and not same_project and held.path ~= path then held = nil; stalled_moves[proj] = nil end
+  if held and (held.text ~= text or (not same_project and held.path ~= path)) then
+    held = nil; stalled_moves[proj] = nil
+  end
   local moved_from = held and held.dir
     or ((same_project and ps.dir and #ps.data.pins > 0) and ps.dir or nil)
+  -- Pins that can't be read can't be moved either; Save As leaves their audio
+  -- in the original folder, and the user is told so below.
+  local left_in = same_project and ps.load_error and ps.dir or nil
 
-  local fresh = empty_pins(proj, path)
-  local text = project.read_pins(proj)
-  if held then
-    fresh.data = held.data
-  elseif text then
-    local ok, result = pcall(pins.decode, text)
-    if ok then
-      fresh.data = result
-    else
-      fresh.load_error = DAMAGED
+  local fresh
+  if same_project then
+    -- Save As keeps this pin set and its records, rather than decoding a copy of
+    -- the same text. The selection, playback, pauses, measurements, a trim still
+    -- being dragged and the picker all stay attached, and a moved file is simply
+    -- the same record under its new name.
+    fresh = ps
+    fresh.path, fresh.dir, fresh.relocation_error = path, project.refs_dir(path), nil
+  else
+    fresh = empty_pins(proj, path)
+    if held then
+      fresh.data = held.data
+    elseif text then
+      local ok, result = pcall(pins.decode, text)
+      if ok then
+        fresh.data = result
+      elseif pins.saved_by_newer(text) then
+        fresh.load_error, fresh.load_newer = NEWER, true
+      else
+        fresh.load_error = DAMAGED
+      end
     end
   end
 
@@ -203,10 +358,20 @@ function service.refresh(state)
         "The saved project may otherwise open the wrong audio. Original References folder:\n" .. moved_from,
         message)
       fresh.dir, fresh.relocation_error = moved_from, warning
-      stalled_moves[proj] = { path = path, dir = moved_from, data = fresh.data, warning = warning }
+      stalled_moves[proj] = { path = path, dir = moved_from, data = fresh.data, warning = warning,
+        text = project.read_pins(proj) }
     end
+  elseif left_in and fresh.dir and not same_folder(left_in, fresh.dir)
+      and reaper_api.directory_exists(left_in) then
+    warning = string.format("This project's pinned references %s, so their audio wasn't copied to the " ..
+      "References folder beside the new project file. Copy the files there to keep them with the " ..
+      "project. Original References folder:\n%s",
+      fresh.load_newer and "were saved by a newer version of yb-Reference" or "couldn't be read", left_in)
   end
 
+  fresh.text = project.read_pins(proj)
+  fresh.change_count = project.change_count(proj)
+  fresh.checked_at = reaper_api.now()
   state.pins = fresh
   rebuild_markers(state)
   return { selected = fresh.data.selected, warning = warning, same_project = same_project }
@@ -233,7 +398,9 @@ local function persist(state, opts)
   local ps = state.pins
   if ps.relocation_error then return false end
   if ps.load_error and not opts.force then return false end
-  if not project.write_pins(ps.proj, pins.encode(ps.data)) then return false end
+  local text = pins.encode(ps.data)
+  if not project.write_pins(ps.proj, text) then return false end
+  ps.text = text
   if not opts.quiet then project.mark_dirty(ps.proj) end
   return true
 end
@@ -265,16 +432,47 @@ function service.edit(state, fn)
 end
 local edit = service.edit
 
+-- Pinning that pauses between copy chunks must finish in the project it started
+-- in, or not at all. Returns a function that answers whether the project in
+-- front still has the same pin set, References folder, path and Library.
+-- REAPER can open another file into the same tab under the same pointer, and
+-- two never-pinned projects in one folder even share their empty pin text and
+-- References folder, so only the path tells them apart.
+function service.pin_target(state)
+  local ps, library = state.pins, state.library
+  local data, dir, path = ps.data, ps.dir, ps.path
+  return function()
+    return state.pins == ps and ps.data == data and ps.dir == dir and ps.path == path
+      and state.library == library
+  end
+end
+
+-- Whether a pin's References copy and a Library sound's file hold the same
+-- audio, compared the way import compares files: the Library file goes in as
+-- the existing copy, so both checks follow import's rule for a copy that can't
+-- be read. With no References folder there is no copy to read and nothing
+-- could be copied, so the name and size answer alone.
+local function same_audio(state, pin, sound)
+  if not state.pins.dir then return true end
+  return library_service.same_content(reaper_api.join(state.pins.dir, pin.filename),
+    reaper_api.join(state.library_dir, sound.filename), pin.size_bytes)
+end
+
+local function already_pinned(state, sound)
+  return pins.already_pinned(state.pins.data, sound,
+    function(p) return same_audio(state, p, sound) end)
+end
+
 -- Pin a library sound to the current project. Returns (true, message, pin_id) or
 -- (false, message[, existing_pin_id when it was already pinned]).
 function service.pin_sound(state, sound, copy_file)
   local ps = state.pins
-  local pin_data, pin_dir, library = ps.data, ps.dir, state.library
+  local same_target = service.pin_target(state)
 
   local refusal = service.can_pin(state)
   if refusal then return false, refusal end
 
-  local existing = pins.already_pinned(ps.data, sound)
+  local existing = already_pinned(state, sound)
   if existing then
     return false, string.format("\"%s\" is already pinned to this project.", sound.name), existing.id
   end
@@ -295,13 +493,12 @@ function service.pin_sound(state, sound, copy_file)
   local copied, cerr = (copy_file or reaper_api.copy_file)(src, dest)
   -- The injected copier may yield between chunks. Its completed audio remains
   -- harmless if another action changed the destination while it was working.
-  if state.pins ~= ps or ps.data ~= pin_data or ps.dir ~= pin_dir
-      or state.library ~= library then
+  if not same_target() then
     return false, "The sound wasn't pinned because the project or Library changed while its audio was being copied."
   end
   refusal = service.can_pin(state)
   if refusal then return false, refusal end
-  existing = pins.already_pinned(ps.data, sound)
+  existing = already_pinned(state, sound)
   if existing then
     return false, string.format("\"%s\" is already pinned to this project.", sound.name), existing.id
   end
@@ -332,6 +529,64 @@ function service.pin_sound(state, sound, copy_file)
   rebuild_markers(state)
   return true, string.format("\"%s\" is pinned to this project. Save the project to keep it.", sound.name),
     record.id
+end
+
+-- Pin several Library sounds as one background job, driven a step at a time by
+-- the entry loop like an import. Each copy pauses between chunks, so a long file
+-- never holds REAPER up, and the job stops as soon as the project, its pins or
+-- the Library change underneath it. Every result is counted for one summary,
+-- rather than each sound's message replacing the last.
+--
+-- `on_pinned(pin_id, added)` runs for a new pin (added = true) and for a sound
+-- that was already pinned (added = false).
+function service.start_pinning(state, sounds, on_pinned)
+  local same_target = service.pin_target(state)
+  local list = {}
+  for i, sound in ipairs(sounds) do list[i] = sound end
+  local job = { kind = "pin",
+    summary = { total = #list, current = 0, pinned = 0, already = 0, errors = {}, last_message = nil } }
+  local function copy(src, dest) return reaper_api.copy_file(src, dest, coroutine.yield) end
+  local thread = coroutine.create(function()
+    local sum = job.summary
+    for i, sound in ipairs(list) do
+      sum.current = i
+      local ok, message, pin_id = service.pin_sound(state, sound, copy)
+      sum.last_message = message
+      if ok then
+        sum.pinned = sum.pinned + 1
+      elseif pin_id then
+        sum.already = sum.already + 1
+      else
+        sum.errors[#sum.errors + 1] = message
+      end
+      if pin_id and on_pinned then on_pinned(pin_id, ok) end
+      coroutine.yield()
+    end
+  end)
+  -- Closing the coroutine also closes a suspended copy's files and removes its
+  -- partial file.
+  function job:cancel()
+    if self.done then return end
+    local ok, err = coroutine.close(thread)
+    self.done, self.cancelled = true, true
+    if not ok then self.error = err end
+  end
+  function job:step()
+    if self.done then return true end
+    if not same_target() or service.can_pin(state) then
+      self:cancel()
+      return true
+    end
+    local ok, err = coroutine.resume(thread)
+    if not ok then
+      coroutine.close(thread)
+      self.done, self.error = true, err
+    elseif coroutine.status(thread) == "dead" then
+      self.done = true
+    end
+    return self.done
+  end
+  return job
 end
 
 -- Unpin: the record leaves the project; the References copy deliberately stays
@@ -421,9 +676,14 @@ end
 -- id alone can collide with an unrelated sound in someone else's library), or
 -- the library already holding the same content. Matching never copies anything;
 -- the existing sound is simply pointed out. Returns (ok, message, sound_id,
--- added) — `added` says a new record was created, so the caller can refresh the
--- view and the analysis queue.
-function service.save_pin_to_library(state, pin_id)
+-- added, unsaved) — `added` says a new record was created, so the caller can
+-- refresh the view and the analysis queue, and `unsaved` that the Library file
+-- doesn't have it yet.
+--
+-- `library_saves` is the caller's save tracker (core/save_retry). Saving through
+-- it means a failed save is retried on its timer like any other Library change,
+-- rather than waiting for a change the user may never make.
+function service.save_pin_to_library(state, pin_id, library_saves)
   local ps = state.pins
   local lib = state.library
   local p = pins.find(ps.data, pin_id)
@@ -433,7 +693,8 @@ function service.save_pin_to_library(state, pin_id)
   for _, s in ipairs(lib.sounds) do
     if pins.origin_match(p, s) then existing = s; break end
   end
-  existing = existing or importer.find_duplicate(lib, p.source_name, p.size_bytes)
+  existing = existing or importer.find_duplicate(lib, p.source_name, p.size_bytes,
+    function(s) return same_audio(state, p, s) end)
   if existing then
     -- Remember the link when it was found by content: the marker lights up and
     -- the next check answers instantly. Best-effort — the dedup answer stands
@@ -493,14 +754,15 @@ function service.save_pin_to_library(state, pin_id)
   -- The start/end points travel exactly like the trim does.
   record.span_start, record.span_end = p.span_start, p.span_end
 
-  local saved, serr = pcall(store.save, state.library_path, lib)
+  local saved, serr = save_retry.try(library_saves)
   if not saved then
-    -- Same stance as import: the sound is in the in-memory library, every later
-    -- save writes the whole library again, so the tool keeps going — but say so.
+    -- Same stance as import: the sound is in the in-memory library and every
+    -- retry writes the whole library again, so the tool keeps going. The pin is
+    -- linked only once its Library record is safely on disk.
     local message = product_error.with_details(
       string.format("\"%s\" was added to your Library, but the Library file couldn't be saved. " ..
-        "Saving will be retried on the next change.", p.name), serr)
-    return true, message, record.id, true
+        "yb-Reference will keep trying to save it.", p.name), serr)
+    return true, message, record.id, true, true
   end
 
   -- Link the pin to its new library sound (marker + instant dedup from now on).
@@ -583,6 +845,8 @@ end
 function service.reset_pins(state)
   local ps = state.pins
   if ps.relocation_error then return false, ps.relocation_error end
+  -- Newer-version data is intact; only an update can read it, never a reset.
+  if ps.load_newer then return false, ps.load_error end
   ps.data = pins.new_state()
   if not persist(state, { force = true }) then
     return false, "The damaged pinned-reference data couldn't be replaced. Nothing was changed."
@@ -598,6 +862,8 @@ end
 -- prevents a late result from changing a replacement that reused the same id.
 -- A failed pass keeps the numbers already in the snapshot; it only records the
 -- failed state so a later retry can be told apart from a pending first pass.
+-- Failing again changes nothing, so it stores nothing: a pin whose audio is
+-- missing must not ask for a save every time its project comes to the front.
 function service.complete_analysis(state, expected_pin, results)
   local ps = state.pins
   local current = ps and pins.find(ps.data, expected_pin and expected_pin.id)
@@ -606,6 +872,7 @@ function service.complete_analysis(state, expected_pin, results)
   local old = { analysis = current.analysis }
   for _, field in ipairs(analysis.FIELDS) do old[field] = current[field] end
   local ok, reason = service.edit(state, function()
+    if not results and current.analysis == "failed" then return nil end
     if results then
       for _, field in ipairs(analysis.FIELDS) do current[field] = results[field] end
       current.analysis = "done"
