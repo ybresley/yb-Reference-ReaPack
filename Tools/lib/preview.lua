@@ -76,6 +76,7 @@ local live = {
                 -- gets a truthful playhead
   mono   = false, -- the monitoring MODE: survives stop/start, like a user setting
   channels = 0,   -- source channels while playing; >2 makes mono unavailable
+  confirmed_channels = nil,
   db     = 0,     -- the level the AUDIBLE parts play at; silent parts sit at 0
   pitch  = 0,     -- semitones; natural rate-style pitch, shared by every route
 }
@@ -140,6 +141,7 @@ local function release()
   end
   live.length = 0
   live.channels = 0
+  live.confirmed_channels = nil
 end
 
 -- What a route should be playing at right now: the real level if it belongs to
@@ -167,6 +169,23 @@ local function discard(built)
     if built[i].src then reaper.PCM_Source_Destroy(built[i].src) end
   end
   live.channels = 0
+  live.confirmed_channels = nil
+end
+
+local function analysis_evidence(parts)
+  local count=live.confirmed_channels
+  if type(count)~='number' or count<1 or count>8 or count~=math.floor(count) then return nil end
+  local routes=count>2 and DIRECT_ROUTES or ROUTES
+  if #parts~=#routes or #retiring>0 then return nil end
+  for index,part in ipairs(parts) do
+    if not part.handle then return nil end
+    if reaper.GetMediaSourceNumChannels(part.src)~=count then return nil end
+    local ok,output=reaper.CF_Preview_GetValue(part.handle,'I_OUTCHAN')
+    if not ok or output~=routes[index].outchan then return nil end
+  end
+  -- Readback verifies the source width and SWS route settings, not audibility
+  -- through physical device outputs.
+  return {source_channels=count,output_first=1,output_count=math.max(2,count),verified=true}
 end
 
 -- Build every part fully, THEN start them back to back. Anything done between
@@ -186,7 +205,16 @@ local function start(path, db, loop, position, semitones, channels, before_start
   -- first route, read the live source, then decide whether mono routes are safe.
   local first_src = reaper.PCM_Source_CreateFromFile(path)
   if not first_src then return false end
+  -- A file that opens but has no audio would play silence and, looping in
+  -- Reference mode, never end; report it as unplayable like a missing file.
+  if (reaper.GetMediaSourceLength(first_src) or 0) <= 0 then
+    reaper.PCM_Source_Destroy(first_src)
+    return false
+  end
   local actual = reaper.GetMediaSourceNumChannels(first_src)
+  if type(actual)=='number' and actual>=1 and actual<=8 and actual==math.floor(actual) then
+    live.confirmed_channels=actual
+  end
   if actual and actual >= 1 then channels = math.floor(actual) end
   live.channels = channels
   if channels > 2 then live.mono = false end
@@ -216,7 +244,7 @@ local function start(path, db, loop, position, semitones, channels, before_start
   -- Give the analyser one last chance to arm its source token after the old
   -- preview is gone, but before any route of this preview can enter audio.
   if before_start then
-    local ok, err = pcall(before_start)
+    local ok, err = pcall(before_start,analysis_evidence(built))
     if not ok then
       discard(built)
       error(err, 0)
@@ -252,6 +280,10 @@ function preview.releasing(path)
   end
   return false
 end
+function preview.busy()
+  collect_retired()
+  return #live.parts>0 or #retiring>0
+end
 
 -- Turn mono monitoring on or off. A MODE, not a per-playback option: it is
 -- remembered while nothing plays, so the next sound starts in whatever the user
@@ -271,6 +303,7 @@ end
 
 function preview.is_mono() return live.mono end
 function preview.channels() return live.channels end
+function preview.analysis_evidence() return analysis_evidence(live.parts) end
 
 -- Live-adjust the playing preview's volume (dB). No-op when nothing plays.
 -- Goes through the same gain rule as the mono switch, so the silent routes stay

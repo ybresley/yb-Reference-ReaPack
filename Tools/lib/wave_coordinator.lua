@@ -1,6 +1,7 @@
 local peaks = require("peaks")
 local detail = require("wave_detail")
 local holders = require("holders")
+local status_message = require("core.status_message")
 
 local wave = {}
 
@@ -36,7 +37,7 @@ function wave.refresh_detail(state, sound_path)
     -- valid whole-file envelope on screen.
     state.wave_detail = { sound_id = state.selected_id, channels = {}, count = 0,
       cols = cols, width = state.wave_cols, t0 = state.wave_view.t0, t1 = state.wave_view.t1 }
-    if read_error then state.status = read_error .. " Showing the overview instead." end
+    if read_error then status_message.problem(state, read_error .. " Showing the overview instead.") end
   end
 end
 
@@ -60,7 +61,7 @@ function wave.refresh_browse_detail(state, sound_path, id, width)
   reader.close()
   state.browse_detail = { sound_id = id, channels = channels or {}, count = count or 0,
     cols = cols, width = width, t0 = 0, t1 = 1, timing = timing }
-  if err then state.status = err .. " Showing the overview instead." end
+  if err then status_message.problem(state, err .. " Showing the overview instead.") end
 end
 
 -- Both views can consume the same completed envelope without another file read.
@@ -75,10 +76,23 @@ local function deliver(state, sound_path, id, channels)
   end
 end
 
+-- A build for a sound that neither view shows any more is thrown away on
+-- arrival, so it is cancelled rather than left to hold up the next sound. Its
+-- "already asked" mark goes too, so the sound can be requested again later.
+local function drop_orphan(state)
+  local id = peaks.pending()
+  if not id or id == state.selected_id or id == state.browse_id then return end
+  peaks.cancel()
+  for _, slot in ipairs({ "main", "browse" }) do
+    if holders.wave_asked(slot) == id then holders.forget_wave(slot) end
+  end
+end
+
 -- A deliberate re-pick permits retry. Cached envelopes can appear immediately,
 -- but a selection must never replace the other view's unfinished build.
 function wave.selected(state, sound_path)
   holders.forget_wave("main")
+  drop_orphan(state)
   if not state.selected or peaks.pending() then return end
   peaks.request(state.selected_id, sound_path(state.selected))
   holders.mark_wave("main", state.selected_id)
@@ -86,6 +100,7 @@ function wave.selected(state, sound_path)
 end
 
 function wave.step(state, sound_path)
+  drop_orphan(state)
   state.wave_loading = peaks.pending()
   deliver(state, sound_path, peaks.advance())
   if peaks.pending() then return end

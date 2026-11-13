@@ -2,21 +2,16 @@ local core = require('core.stereo')
 local raster = require('core.stereo_raster')
 local clip_arcs = require('core.stereo_clip_arcs')
 local theme = require('ui.theme')
-local helper_status = require('ui.spectrum_status')
 local controls = require('ui.spectrum_controls')
 local settings = require('ui.stereo_settings')
 local preferences = require('core.stereo_preferences')
 local tips = require('ui.tips')
+local surround_field = require('ui.surround_field')
 
 local T, M = theme.tokens, theme.metrics
 local stereo = {}
 local defaults = preferences.defaults()
-
-local function centre_text(ctx, dl, value, x, y, width, height)
-  local tw, th = reaper.ImGui_CalcTextSize(ctx, value)
-  reaper.ImGui_DrawList_AddText(dl, x + math.max(0, (width - tw) / 2),
-    y + math.max(0, (height - th) / 2), T.TEXT_QUATERNARY, value)
-end
+stereo.open_settings = settings.open_at
 
 local function label(ctx, dl, value, x, y)
   local tw, th = reaper.ImGui_CalcTextSize(ctx, value)
@@ -38,20 +33,26 @@ local function correlation(ctx, dl, model, x, width, cy, radius, polar, now, pre
   label(ctx, dl, '0', bx + M.STEREO_LABEL_GAP * 2, middle)
   label(ctx, dl, '-1', bx + M.STEREO_LABEL_GAP * 2, bottom)
   if small then reaper.ImGui_PopFont(ctx) end
+
   local value = core.correlation(model, now)
   if value then
     local position = middle - value * (bottom - top) / 2
     reaper.ImGui_DrawList_AddRectFilled(dl, bx - 3 * scale, position - scale,
       bx + 3 * scale, position + scale, T.STEREO_TRACE)
   end
-  if not presentation then
-    tips.show(ctx, reaper.ImGui_IsMouseHoveringRect(ctx, bx - M.WINDOW_PAD, top,
-      x + width, bottom), value and string.format('Correlation: %+.2f', value)
-        or 'Correlation: unavailable', 'stereo_correlation')
+  if not presentation and reaper.ImGui_IsMouseHoveringRect(ctx, bx - M.WINDOW_PAD, top,
+      x + width, bottom) then
+    tips.show(ctx, true, value and string.format('Correlation: %+.2f', value)
+      or 'Correlation: unavailable', 'stereo_correlation',
+      tips.rect(bx - M.WINDOW_PAD, top, x + width - (bx - M.WINDOW_PAD), bottom - top))
   end
 end
 
 function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, panel_width, presentation)
+  local profile=state.preview_analysis_profile or state.analysis_output_profile or state.analysis_channels
+  if profile and profile.view=='surround' then
+    return surround_field.draw(ctx,state,width,height,res,input_exclusion,panel_x,panel_width,presentation)
+  end
   local model = state.stereo
   local system = state.monitor_filter.system
   local x, y = reaper.ImGui_GetCursorScreenPos(ctx)
@@ -103,12 +104,14 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
   local small = theme.push_small_font(ctx)
   -- AddLine centres its stroke half a pixel beyond the supplied coordinate.
   label(ctx, dl, 'M', cx + 0.5, cy - radius - M.STEREO_LABEL_GAP)
-  label(ctx, dl, 'L', cx - diagonal - M.STEREO_LABEL_GAP, cy - diagonal - 4 * scale)
-  label(ctx, dl, 'R', cx + diagonal + M.STEREO_LABEL_GAP, cy - diagonal - 4 * scale)
+  label(ctx, dl, profile and profile.labels[profile.pair_left] or 'L', cx - diagonal - M.STEREO_LABEL_GAP, cy - diagonal - 4 * scale)
+  label(ctx, dl, profile and profile.labels[profile.pair_right] or 'R', cx + diagonal + M.STEREO_LABEL_GAP, cy - diagonal - 4 * scale)
   if not polar then
     label(ctx, dl, 'S', cx + radius + M.STEREO_LABEL_GAP, cy)
   end
   if small then reaper.ImGui_PopFont(ctx) end
+
+  if presentation and presentation.blocked then return end
 
   if prefs.show_correlation then
     correlation(ctx, dl, model, x, width, cy, radius, polar, model.now or 0, presentation)
@@ -118,15 +121,9 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
   local action = settings.draw(ctx, state, res, panel_x or x, y,
     panel_width or width, height, input_exclusion, presentation)
   reaper.ImGui_SetCursorScreenPos(ctx, x, y + height)
-
-  if system and not system.available then
-    if presentation then return end
-    if input_exclusion then
-      local mx, my = reaper.ImGui_GetMousePos(ctx)
-      if controls.contains(input_exclusion, mx, my) then return action end
-    end
-    local recovery = helper_status.draw(ctx, system, x, y, width, height)
-    return action or recovery
+  if model.pair_unavailable or system and not system.available
+      and not model.preview_capture_active then
+    return action
   end
 
   local now = core.display_time(model, model.now or 0)
@@ -143,7 +140,6 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
   end
   -- Leave the grid empty on the click frame, before the action clears history.
   if action and action.type == 'stereo_clear_display' then return action end
-  local visible = false
   local dot_size = math.max(1, math.floor(M.STEREO_DOT_SIZE + 0.5))
   local clip_radius = 1.5 * scale
   if not model.raster then
@@ -156,7 +152,8 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
   end
   local pixels = raster.build(model.raster, model, radius, polar, dot_size, now, prefs)
   local ox, oy = math.floor(cx - radius), math.floor(cy - radius)
-  -- Resize previews already place hits on the current grid.
+  -- Resize previews already place hits on the current grid. Very large plots
+  -- use a coarser grid than the dot size; fill each cell to avoid a lattice.
   local grid_step = pixels.dot_size
   -- Include the marker radius so full-scale samples remain visible at vertices.
   reaper.ImGui_DrawList_PushClipRect(dl, cx - radius - clip_radius, cy - radius - clip_radius,
@@ -164,13 +161,12 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
   -- Draw each occupied pixel once at its freshest brightness. Capturing more
   -- samples adds detail without repeatedly painting the same screen position.
   for i = 1, pixels.count do
-    visible = true
     local cell = pixels.cells[i]
     local level = math.floor(pixels.levels[cell] * 255 + 0.5)
     local dx = math.floor(ox + cell % pixels.cols * grid_step)
     local dy = math.floor(oy + math.floor(cell / pixels.cols) * grid_step)
     reaper.ImGui_DrawList_AddRectFilled(dl, dx, dy,
-      dx + dot_size, dy + dot_size, model.raster.colours[level])
+      dx + grid_step, dy + grid_step, model.raster.colours[level])
   end
   -- Draw full-scale markers last so ordinary dots cannot obscure them.
   -- Clipping holds at its actual full-scale boundary independently of display
@@ -184,7 +180,6 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
       end
       local arcs = clip_arcs.build(model.raster.clip_arcs, pixels, radius, clip_radius, px, py)
       for i = 1, arcs.count do
-        visible = true
         local first, last = arcs.starts[i], arcs.ends[i]
         local segments = math.max(2, math.ceil((last - first) * radius / 3))
         reaper.ImGui_DrawList_PathArcTo(dl, cx, cy, radius, first, last, segments)
@@ -192,14 +187,12 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
       end
     else
       for i = 1, pixels.clip_count do
-        visible = true
         local cell = pixels.clip_cells[i]
         reaper.ImGui_DrawList_AddCircleFilled(dl,
           ox + cell % pixels.cols * grid_step,
           oy + math.floor(cell / pixels.cols) * grid_step, clip_radius, T.STEREO_CLIP, 4)
       end
       if core.overflow_clip_visible(model, now, prefs) then
-        visible = true
         local clip = model.overflow_clip
         local px, py = core.point(clip.left, clip.right)
         reaper.ImGui_DrawList_AddCircleFilled(dl, cx + px * radius, cy - py * radius,
@@ -208,15 +201,6 @@ function stereo.draw(ctx, state, width, height, res, input_exclusion, panel_x, p
     end
   end
   reaper.ImGui_DrawList_PopClipRect(dl)
-  if model.playing and not visible and (model.status == 'invalid' or model.status == 'stale') then
-    centre_text(ctx, dl, 'Stereo data unavailable', x, y, width, height)
-  end
-  if model.playing and model.overrun_until and now < model.overrun_until then
-    reaper.ImGui_DrawList_PushClipRect(dl, x, y, x + width, y + height, true)
-    centre_text(ctx, dl, 'Some stereo history was skipped.',
-      x, y + height - 20 * scale, width, 20 * scale)
-    reaper.ImGui_DrawList_PopClipRect(dl)
-  end
   return action
 end
 

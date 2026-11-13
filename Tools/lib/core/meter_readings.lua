@@ -17,8 +17,41 @@ local function channel_power(value)
   return 10 ^ (value / 10), true
 end
 
+function readings.peak_measurement(model)
+  if model.true_peak_available == false then return 'Sample Peak' end
+  return (model.prefs or {}).peak_measurement or 'True Peak'
+end
+
+function readings.peak(values)
+  values = values or {}
+  local peak
+  local function include(value)
+    if valid_level(value) and value ~= -math.huge then
+      peak = peak and math.max(peak, value) or value
+    end
+  end
+  if type(values.channels) == 'table' and #values.channels > 0 then
+    for _, channel in ipairs(values.channels) do include(channel.peak) end
+  else
+    include(values.peak_l)
+    include(values.peak_r)
+  end
+  return peak
+end
+
 function readings.rms(values)
   values = values or {}
+  if type(values.channels)=='table' and #values.channels>0 then
+    local power,has_reading=0,false
+    for _,channel in ipairs(values.channels) do
+      if channel.rms~=nil then has_reading=true end
+      local contribution,valid=channel_power(channel.rms)
+      if not valid then return nil end
+      power=power+contribution
+    end
+    if not has_reading then return nil end
+    return power>0 and 10*math.log(power/#values.channels)/math.log(10) or -math.huge
+  end
   local left, right = values.rms_l, values.rms_r
   if left == nil and right == nil then return nil end
   local left_power, left_valid = channel_power(left)
@@ -32,7 +65,7 @@ function readings.rms(values)
 end
 
 function readings.target_difference(model)
-  if type(model) ~= 'table' then return nil end
+  if type(model) ~= 'table' or model.loudness_available==false then return nil end
   local prefs = model.prefs or {}
   local values = model.values or {}
   local measurement = prefs.target_difference_measurement or 'Integrated'

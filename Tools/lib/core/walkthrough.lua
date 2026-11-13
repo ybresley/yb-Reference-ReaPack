@@ -13,12 +13,12 @@ walkthrough.STOPS = {
       act = "open_browser", target = "library_button" } },
   { id = "pin", window = "main", button = "Next",
     title = "REFERENCE VIEW",
-    body = "Drag a sound here to pin it to the project. The panels show waveform, spectrum, stereo image, loudness readings and history.",
+    body = "Drag a sound here to pin it to the project. The reference's waveform and readings sit beside panels for its spectrum, stereo image, loudness and history.",
     note = "Pins are saved with the project. Drag the gaps to resize panels." },
   { id = "latch", window = "main", button = "Next",
     title = "PLAY & REFERENCE MODE",
-    body = "Play references directly in yb-Reference, or enable Latch to trigger them with Reaper's playback. Latch mutes your project so you hear the selected reference instead.",
-    note = "Turn Latch off to hear your project again." },
+    body = "Play references directly in yb-Reference, or turn on the Latch button to trigger them with Reaper's playback. The Latch button mutes your project so you hear the selected reference instead.",
+    note = "Turn the Latch button off to hear your project again." },
   { id = "transport", window = "main", button = "Next",
     title = "REFERENCE CONTROLS",
     body = "Use these controls to switch between references, change playback settings, inspect loudness measurements and adjust the reference level. Hover over a control to see what it does." },
@@ -32,10 +32,6 @@ walkthrough.STOPS = {
 
 function walkthrough.new()
   return { active = false, pos = nil, browser_open = false, feedback_open = false }
-end
-
-function walkthrough.begin_welcome(s)
-  walkthrough.begin_stops(s)
 end
 
 function walkthrough.begin_stops(s)

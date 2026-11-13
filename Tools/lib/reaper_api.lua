@@ -5,6 +5,14 @@
 
 local reaper_api = {}
 function reaper_api.now() return reaper.time_precise() end
+function reaper_api.open_audio_preferences()
+  if type(reaper.ViewPrefs)~='function' then
+    return nil,'Open Reaper Preferences > Audio to change the virtual channel setting.'
+  end
+  local ok=pcall(reaper.ViewPrefs,0,'Audio')
+  if not ok then return nil,'Reaper could not open Audio preferences. Open Preferences > Audio manually.' end
+  return true
+end
 local product_error = require("product_error")
 
 local SEP = package.config:sub(1, 1) -- "\" on Windows, "/" elsewhere — never hard-coded
@@ -117,12 +125,13 @@ end
 
 -- Recording in a background project also protects it from new measurement
 -- passes. Ordinary playback and preview deliberately do not delay measurement.
-function reaper_api.recording_active()
+function reaper_api.recording_active(R)
+  R = R or reaper
   local index = 0
   while true do
-    local project = reaper.EnumProjects(index)
+    local project = R.EnumProjects(index)
     if not project then return false end
-    local play_state = reaper.GetPlayStateEx(project)
+    local play_state = R.GetPlayStateEx(project)
     if (play_state & 4) ~= 0 then return true end
     index = index + 1
   end
@@ -145,7 +154,12 @@ local EXT_MASTER  = "master_db"
 local EXT_LOUD    = "loud_unit"
 local EXT_BROWSER_GEOM = "browser_geom"
 local EXT_WAVE_H  = "browser_wave_h"
+local EXT_STACKED_CARD_H = "stacked_card_h"
+local EXT_LIBRARY_PLACEMENT = "library_placement"
+local EXT_LIBRARY_PANEL_WIDTH = "library_panel_width"
+local EXT_LIBRARY_PANEL_OPEN = "library_panel_open"
 local EXT_REFERENCE_STACK_SPLIT = "reference_stack_split"
+local EXT_READING_EXTRA = "reading_extra"
 local EXT_MATCH_PRESETS = "match_presets"
 local EXT_MATCH_TARGET  = "match_target"
 local EXT_SEEN_VERSION  = "seen_version"
@@ -155,7 +169,12 @@ local EXT_COL_GEN       = "col_gen"
 local EXT_UI_SCALE      = "ui_scale"
 local EXT_ACCENT_COLOUR = "accent_colour"
 local EXT_UI_ANIMATIONS = "ui_animations"
-local EXT_OPEN_LIBRARY  = "open_library_on_startup"
+local EXT_UPDATE_POPUP  = "update_popup"
+local EXT_UPDATE_SKIPPED = "update_skipped"
+-- Whether the separate Library window was open. The key keeps its old name
+-- from the retired "Open Library on Startup" switch, so a window that switch
+-- opened still opens on the first launch after the change.
+local EXT_LIBRARY_WINDOW_OPEN = "open_library_on_startup"
 local EXT_BROWSER_VIEW  = "browser_view"
 local EXT_BROWSER_CATEGORIES = "browser_categories"
 local EXT_BROWSER_ANCHOR = "browser_category_anchor"
@@ -214,8 +233,8 @@ end
 -- a new user has no history to catch up on. The entry script stamps it silently
 -- in that case so the NEXT update is the first thing they ever see here.
 function reaper_api.seen_version()
-  local v = reaper.GetExtState(EXT_SECTION, EXT_SEEN_VERSION)
-  return v ~= "" and v or nil
+  return stored_ext(EXT_SECTION, EXT_SEEN_VERSION)
+    or stored_ext(LEGACY_EXT_SECTION, EXT_SEEN_VERSION)
 end
 
 function reaper_api.set_seen_version(v)
@@ -229,7 +248,8 @@ end
 -- so closing the tool mid-walkthrough ends it for good and Settings > Help
 -- replays it on request.
 function reaper_api.walkthrough_seen()
-  return reaper.GetExtState(EXT_SECTION, EXT_WALKTHROUGH) ~= ""
+  return (stored_ext(EXT_SECTION, EXT_WALKTHROUGH)
+    or stored_ext(LEGACY_EXT_SECTION, EXT_WALKTHROUGH)) ~= nil
 end
 
 function reaper_api.set_walkthrough_seen()
@@ -427,14 +447,23 @@ function reaper_api.set_ui_animations(enabled)
   reaper.SetExtState(EXT_SECTION, EXT_UI_ANIMATIONS, enabled and "1" or "0", true)
 end
 
--- Whether the separate Library window should open with the tool. Off is both
--- the first-run default and the safe interpretation of any unknown value.
-function reaper_api.get_open_library_on_startup()
-  return reaper.GetExtState(EXT_SECTION, EXT_OPEN_LIBRARY) == "1"
+-- The update popup's two choices (core/update_notice.lua): whether it appears
+-- at all (on unless turned off), and the version the user skipped, if any.
+function reaper_api.get_update_popup()
+  local skipped = reaper.GetExtState(EXT_SECTION, EXT_UPDATE_SKIPPED)
+  return {
+    enabled = reaper.GetExtState(EXT_SECTION, EXT_UPDATE_POPUP) ~= "0",
+    skipped = skipped ~= "" and skipped or nil,
+  }
 end
 
-function reaper_api.set_open_library_on_startup(enabled)
-  reaper.SetExtState(EXT_SECTION, EXT_OPEN_LIBRARY, enabled and "1" or "0", true)
+function reaper_api.set_update_popup(enabled)
+  reaper.SetExtState(EXT_SECTION, EXT_UPDATE_POPUP, enabled and "1" or "0", true)
+end
+
+function reaper_api.set_update_skipped(version)
+  if type(version) ~= "string" or version == "" then return end
+  reaper.SetExtState(EXT_SECTION, EXT_UPDATE_SKIPPED, version, true)
 end
 
 -- The browser remembers how it was being viewed, but not search text or raw
@@ -639,6 +668,88 @@ function reaper_api.set_browser_wave_h(h)
   end
 end
 
+-- The Reference card's dragged height above the docked Library, at 100% UI
+-- Size. nil means its natural height, the same as the wave height above.
+function reaper_api.get_stacked_card_height()
+  local n = tonumber(reaper.GetExtState(EXT_SECTION, EXT_STACKED_CARD_H))
+  if n and n > 0 and n < math.huge then return n end
+  return nil
+end
+
+function reaper_api.set_stacked_card_height(h)
+  if h then
+    reaper.SetExtState(EXT_SECTION, EXT_STACKED_CARD_H, tostring(math.floor(h + 0.5)), true)
+  else
+    reaper.DeleteExtState(EXT_SECTION, EXT_STACKED_CARD_H, true)
+  end
+end
+
+-- The Library panel's placement and unscaled width are app preferences, so
+-- they remain independent of the managed library's saved data.
+function reaper_api.get_library_placement()
+  local value = reaper.GetExtState(EXT_SECTION, EXT_LIBRARY_PLACEMENT)
+  if value == "embedded" then return value end
+  return "floating"
+end
+
+function reaper_api.set_library_placement(placement)
+  if placement ~= "floating" and placement ~= "embedded" then return false end
+  reaper.SetExtState(EXT_SECTION, EXT_LIBRARY_PLACEMENT, placement, true)
+  return true
+end
+
+-- The Library reopens as it was left, remembered separately for each
+-- placement. The separate window starts closed on a first run, and any
+-- unknown value reads as closed.
+function reaper_api.get_library_initial_open()
+  if reaper_api.get_library_placement() == "embedded" then
+    -- Earlier copies saved placement only. Restore those pinned panels unless
+    -- the user has explicitly hidden one since visibility became remembered.
+    return reaper.GetExtState(EXT_SECTION, EXT_LIBRARY_PANEL_OPEN) ~= "0"
+  end
+  return reaper.GetExtState(EXT_SECTION, EXT_LIBRARY_WINDOW_OPEN) == "1"
+end
+
+-- The peak reading the one-row readings show beside the loudness readings:
+-- "true_peak", "peak" or "rms".
+local READING_EXTRAS = { true_peak = true, peak = true, rms = true }
+
+function reaper_api.get_reading_extra()
+  local value = reaper.GetExtState(EXT_SECTION, EXT_READING_EXTRA)
+  return READING_EXTRAS[value] and value or "true_peak"
+end
+
+function reaper_api.set_reading_extra(extra)
+  if not READING_EXTRAS[extra] then return false end
+  reaper.SetExtState(EXT_SECTION, EXT_READING_EXTRA, extra, true)
+  return true
+end
+
+function reaper_api.set_library_open(placement, open)
+  local key = placement == "embedded" and EXT_LIBRARY_PANEL_OPEN or EXT_LIBRARY_WINDOW_OPEN
+  reaper.SetExtState(EXT_SECTION, key, open and "1" or "0", true)
+end
+
+local function clamp_library_panel_width(width)
+  if type(width) ~= "number" or width ~= width or math.abs(width) == math.huge then
+    return nil
+  end
+  return math.max(220, math.min(440, width))
+end
+
+function reaper_api.get_library_panel_width()
+  local width = clamp_library_panel_width(
+    tonumber(reaper.GetExtState(EXT_SECTION, EXT_LIBRARY_PANEL_WIDTH)))
+  return width or 280
+end
+
+function reaper_api.set_library_panel_width(width)
+  width = clamp_library_panel_width(width)
+  if not width then return false end
+  reaper.SetExtState(EXT_SECTION, EXT_LIBRARY_PANEL_WIDTH, tostring(width), true)
+  return true
+end
+
 -- The Reference View's vertical divider as a share of its available height.
 -- This is a display preference, deliberately separate from the spectrum JSON so
 -- copies with different spectrum preference formats can continue to coexist.
@@ -728,18 +839,12 @@ end
 -- selected). Used by the "Show library folder" button so the user can find the
 -- library and its trash without hunting through REAPER's settings folders.
 --
--- Prefers SWS's CF_LocateInExplorer (clean, no console flash). Falls back to
--- Windows Explorer directly when SWS isn't present. Returns true if it could try,
--- false if there's no way to on this setup — the caller then says so rather than
--- looking like the button did nothing.
+-- Uses SWS's CF_LocateInExplorer (clean, no console flash). Startup refuses to run
+-- without SWS, so the false return only covers an unexpected missing function: the
+-- caller then says so rather than looking like the button did nothing.
 function reaper_api.reveal_file(path)
   if reaper.APIExists("CF_LocateInExplorer") then
     reaper.CF_LocateInExplorer(path)
-    return true
-  end
-  if SEP == "\\" then
-    -- /select, opens the folder and highlights the file. Quotes handle spaces.
-    os.execute('explorer /select,"' .. path .. '"')
     return true
   end
   return false
@@ -747,17 +852,13 @@ end
 
 -- Open a FOLDER in the OS file browser — the Reference View's folder square, which
 -- opens this project's References folder (where every pinned copy lives).
--- Same shape as reveal_file above: SWS's clean shell call first, Explorer as the
--- fallback, and an honest false when neither is available so the caller can say
--- where the folder is instead of looking like the button did nothing.
+-- Same shape as reveal_file above: SWS's clean shell call, and an honest false when
+-- it is unavailable so the caller can say where the folder is instead of looking
+-- like the button did nothing.
 function reaper_api.open_folder(dir)
   if not dir or dir == "" then return false end
   if reaper.APIExists("CF_ShellExecute") then
     reaper.CF_ShellExecute(dir)
-    return true
-  end
-  if SEP == "\\" then
-    os.execute('explorer "' .. dir .. '"')
     return true
   end
   return false
@@ -934,8 +1035,11 @@ local function ext_of(name)
   return e and e:lower() or nil
 end
 
--- True if a filename looks like one of our accepted audio types.
+-- True if a filename looks like one of our accepted audio types. Hidden files are
+-- never audio: macOS writes a "._Kick.wav" sidecar beside every file it copies to
+-- an exFAT, FAT or network drive.
 function reaper_api.is_audio_file(name)
+  if name:sub(1, 1) == "." then return false end
   local e = ext_of(name)
   return e ~= nil and reaper_api.AUDIO_EXTS[e] == true
 end
@@ -1066,11 +1170,27 @@ function reaper_api.directory_exists(path)
   return os.rename(directory, directory) == true
 end
 
+-- Files the operating system puts in folders on its own. The user never sees
+-- them, so they must not make a new folder count as occupied.
+local function is_system_file(name)
+  local lower = name:lower()
+  return name:sub(1, 1) == "." or lower == "desktop.ini" or lower == "thumbs.db"
+end
+
 -- A new library may only be created in a directory with no files or child
 -- folders. Returns nil when the path is not a directory, false when occupied.
 function reaper_api.directory_is_empty(path)
   if not reaper_api.directory_exists(path) then return nil end
-  if reaper.EnumerateFiles(path, 0) ~= nil then return false end
+  -- REAPER caches listings; index -1 makes it read the folder again.
+  reaper.EnumerateFiles(path, -1)
+  reaper.EnumerateSubdirectories(path, -1)
+  local i = 0
+  while true do
+    local name = reaper.EnumerateFiles(path, i)
+    if name == nil then break end
+    if not is_system_file(name) then return false end
+    i = i + 1
+  end
   if reaper.EnumerateSubdirectories(path, 0) ~= nil then return false end
   return true
 end
@@ -1087,14 +1207,25 @@ function reaper_api.move_file(src, dest)
 
   local moved, err = os.rename(src, dest)
   if moved then return true end
+  -- REAPER's rename can report the error left behind by the destination check
+  -- above instead of its own: a file held open by playback came back as "No such
+  -- file or directory" while it was still there, where plain Lua says
+  -- "Permission denied". So describe what can be checked rather than trusting it.
+  if not reaper_api.path_exists(src) then
+    return false, product_error.with_details("The audio file isn't there any more.", err)
+  end
   return false, product_error.with_details(
-    "Check that the audio file is available and isn't in use, then try again.", err)
+    "Check that the audio file isn't open in another program, then try again.",
+    "The file is still there but couldn't be moved. Reported: " .. tostring(err))
 end
 
 -- Every file directly inside a folder (non-recursive, no sub-folders). Returns
 -- filenames, not full paths.
 function reaper_api.list_files(dir, pause)
   local out = {}
+  -- REAPER caches listings; index -1 makes it read the folder again, so a file
+  -- added or moved moments ago is seen as it really is.
+  reaper.EnumerateFiles(dir, -1)
   local i = 0
   while true do
     local name = reaper.EnumerateFiles(dir, i)

@@ -12,7 +12,10 @@ end
 local function number(v)
   if v == nil or v ~= v then return '—' end
   if v == -math.huge or v <= -99 then return '−∞' end
-  return string.format('%.1f', v):gsub('^-', '−')
+  -- Round to the shown tenth first so a reading just below zero isn't "−0.0".
+  local rounded = math.floor(v * 10 + 0.5) / 10
+  if rounded == 0 then return '0.0' end
+  return (string.format('%.1f', rounded):gsub('^-', '−'))
 end
 
 local function loudness_number(value,opts)
@@ -29,7 +32,9 @@ end
 local function time_label(seconds,opts)
   seconds = math.max(0, seconds or 0)
   if opts and opts.time_format=='Seconds' then return string.format('%.1fs',seconds) end
-  return string.format('%02d:%04.1f', seconds // 60, seconds % 60)
+  -- Split whole tenths so 59.96 s reads 01:00.0 rather than 00:60.0.
+  local tenths = math.floor(seconds * 10 + 0.5)
+  return string.format('%02d:%04.1f', tenths // 600, tenths % 600 / 10)
 end
 
 local function text(ctx, dl, x, y, value, colour, size, align, width, row_height)
@@ -172,10 +177,33 @@ function drawing.meter_readout(ctx,dl,r,cx,label,value,colour,size)
   end
 end
 
+function drawing.layout_hint(ctx,dl,r,model)
+  local s=theme.scale
+  local message=model and model.sample_rate_supported==false
+    and 'LUFS unavailable at this sample rate.' or 'Choose a channel layout for loudness.'
+  local pushed=theme.push_release_font(ctx,11*s)
+  local lines,current={},''
+  for word in message:gmatch('%S+') do
+    local candidate=current=='' and word or current..' '..word
+    if current~='' and R.ImGui_CalcTextSize(ctx,candidate)>math.max(1,r.w-16*s) then
+      lines[#lines+1]=current
+      current=word
+    else current=candidate end
+  end
+  lines[#lines+1]=current
+  local _,height=R.ImGui_CalcTextSize(ctx,'Layout')
+  local alpha=R.ImGui_GetStyleVar(ctx,R.ImGui_StyleVar_Alpha())
+  local top=r.y+math.max(0,(r.h-#lines*height)/2)
+  for index,value in ipairs(lines) do
+    text(ctx,dl,r.x+r.w/2,top+(index-1)*height,value,
+      theme.fade(T.TEXT_SECONDARY,alpha),11*s,'center')
+  end
+  if pushed then R.ImGui_PopFont(ctx) end
+end
+
 
 drawing.number=number
 drawing.loudness_number=loudness_number
-drawing.loudness_tick=loudness_tick
 drawing.time_label=time_label
 drawing.text=text
 drawing.line=line

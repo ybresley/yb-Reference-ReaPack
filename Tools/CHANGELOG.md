@@ -26,6 +26,36 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.6.0 — 2026-11-13
+
+This update adds surround analysis, a combined Reference panel and a Library that can stay beside Reference View, along with Reference mode and metering fixes.
+
+### Highlights
+
+- **Surround** — Reference View now measures surround audio up to 7.1. Meters, loudness and Spectrum follow every speaker, each project remembers its speaker layout, and the Surround Field shows where neighbouring speakers are in or out of phase.
+- **Reference Panel** — The Waveform panel and the bottom bar are now one Reference panel beside the analysis panels. It keeps the picker, stored readings, waveform and playback controls together, and folds its parts in a fixed order as the window gets smaller.
+- **Docked Library** — The Library can stay open beside Reference View, with its own waveform and audition controls, including a new Mono button. Review Files lists audio in the Library folder that isn't part of your Library, so you can add it or move it to the trash.
+
+### Changes
+
+- **Updates** — When a new version is out, a popup shows its date and overview, with Release Notes, Skip This Version and Update Now. Skipping a version keeps the popup away until a newer one. Turn the popup off from the popup itself or in Settings → Updates.
+- **Loudness** — When the meter panel is short, the Readings column keeps two readings instead of hiding. Right-click it to choose which two.
+- **Loudness** — Meter bars keep even spacing at every width, with their labels above the values.
+- **Loudness** — Very short meter panels now keep their readings, with each label beside its value. The shortest show one or two readings. Click a label to choose another.
+- **Library** — The Library reopens open or closed, as you left it. Open Library on Startup is removed.
+- **Library** — Adding audio together with other files, such as licences or artwork, no longer reports the other files as errors.
+- **Appearance** — Tooltips appear beside the control or area they describe and stay still while the pointer moves. They now wait half a second before appearing.
+- **Dialogs** — Info messages, such as Reference mode turning off, now have a close button.
+
+### Fixes
+
+- **Latch Mode** — Reference mode no longer leaves a project muted after Save As, with the project open in two tabs, or when yb-Reference closes while latched.
+  A project that still needs unmuting by hand now says so.
+- **Projects** — After Save As, a pin no longer picks up a different sound of the same size.
+- **Loudness** — The meter now connects after Reaper restarts, instead of reporting that it was changed or not added by yb-Reference.
+- **Spectrum Analyser** — The spectrum line no longer thins out or disappears in dense high-frequency detail.
+- **Window** — A graphics failure now closes yb-Reference without a second script error.
+
 ## 0.5.2 — 2026-10-26
 
 This update adds macOS support and improves live metering and small-window layouts.

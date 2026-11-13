@@ -23,7 +23,7 @@ local decode={}
 local alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 for i=1,#alphabet do decode[alphabet:byte(i)]=i-1 end
 local smoothing={motion_mode='power',attack_seconds=.012,
-  release_seconds=mathx.power_release_seconds(20,.9),average_seconds=3}
+  release_seconds=mathx.power_release_seconds(20,.9)}
 
 function panels.new()
   return {view=wave_view.new(),scope=stereo_demo.new(stereo_signal),meter=meter.new(),

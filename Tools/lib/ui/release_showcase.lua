@@ -30,7 +30,7 @@ local function demonstration(ctx, res)
     demo_key = topic.id
     demo = renderers[topic.renderer or 'other'].new()
   end
-  local elapsed = tour.tick(selection, reaper.ImGui_GetTime(ctx), theme.motion.enabled)
+  local elapsed = tour.tick(selection, reaper.ImGui_GetTime(ctx))
   local _, room = reaper.ImGui_GetContentRegionAvail(ctx)
   local height = math.max(1, room - M.ITEM_SPACING_Y)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 0, 0)
@@ -47,8 +47,8 @@ end
 
 function showcase.draw(ctx, res, preview)
   if not renderers then
-    renderers = { meter = require('ui.release_meter'), stereo = require('ui.release_stereo'),
-      layout = require('ui.release_panel_layout') }
+    renderers = { surround = require('ui.release_surround'), card = require('ui.release_card'),
+      library = require('ui.release_library') }
   end
   local bold = theme.push_release_bold_font(ctx)
   reaper.ImGui_TextColored(ctx, T.ACCENT, 'v' .. content.version)

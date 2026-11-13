@@ -5,6 +5,7 @@
 local fb_core = require("core.feedback")
 local store = require("core.library_store")
 local mac_process = require("mac_process")
+local wsh_script = require("core.wsh_script")
 
 local feedback = {}
 
@@ -75,18 +76,18 @@ local function clean_attempt()
 end
 
 local function recover_atomic(path)
-  local ok, err = pcall(store.recover, path)
+  local ok, err = pcall(store.recover, path, false)
   return ok, err
 end
 
 local function save_pending(record)
   fb_core.encode_pending(record)
-  store.save(P.pending, record)
+  store.save_record(P.pending, record)
 end
 
 local function save_receipt(receipt)
   fb_core.encode_saved_receipt(receipt)
-  store.save(P.receipt, {
+  store.save_record(P.receipt, {
     version = fb_core.RECEIPT_VERSION,
     request_id = receipt.request_id,
     report_id = receipt.report_id,
@@ -121,9 +122,9 @@ local function write_shim()
       .. " -H 'Content-Type: application/json' --data-binary " .. quote("@" .. P.payload)
       .. " -o " .. quote(P.reply) .. " -- " .. quote(feedback.URL) .. "\n")
   end
-  return write_file(P.vbs, 'On Error Resume Next\r\n'
+  return write_file(P.vbs, wsh_script.encode('On Error Resume Next\r\n'
     .. 'Set sh = CreateObject("WScript.Shell")\r\n'
-    .. 'sh.Run "' .. curl_cmd():gsub('"', '""') .. '", 0, True\r\n')
+    .. 'sh.Run "' .. curl_cmd():gsub('"', '""') .. '", 0, True\r\n'))
 end
 
 local function current_matches(message, email)

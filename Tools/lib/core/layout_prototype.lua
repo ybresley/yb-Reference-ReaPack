@@ -1,9 +1,10 @@
--- Saved four-panel arrangements for Reference View.
--- The UI supplies the space left after the transport and draws the returned frames.
+-- Saved panel arrangements for Reference View. The waveform lives in the
+-- Reference card, so the panels are the spectrum, stereo image and loudness.
+-- The UI supplies the space beside the card and draws the returned frames.
 local layout = {}
 
-local IDS = {'waveform', 'spectrum', 'stereo', 'loudness'}
-local VALID_ID = {waveform=true, spectrum=true, stereo=true, loudness=true}
+local IDS = {'spectrum', 'stereo', 'loudness'}
+local VALID_ID = {spectrum=true, stereo=true, loudness=true}
 local VALID_VARIANT = {automatic=true, map=true, direct=true}
 local VALID_MODE = {auto=true, row=true, stack=true, grid=true,
   top=true, bottom=true, left=true, right=true}
@@ -147,7 +148,6 @@ local function dimensions(id, options)
   if id == 'loudness' then
     return 320*scale, (options.loudness_min_height or 200*scale) + header
   end
-  if id == 'waveform' then return options.min_width or 300*scale, 120*scale + header end
   if id == 'spectrum' then return options.min_width or 300*scale,
     (options.min_height or 180*scale) + header end
   local aspect = options.stereo_aspect == 2 and 2 or 1
@@ -480,4 +480,128 @@ function layout.measure(width, height, prefs, options)
     tab_height=0, content_y=0}
 end
 
+-- Moves every panel and divider `dx` to the right.
+local function shift(g, dx)
+  for _, rects in ipairs({g.panels, g.dividers or {}}) do
+    for _, rect in ipairs(rects) do
+      rect.x = rect.x + dx
+      if rect.axis == 'x' then rect.origin = (rect.origin or 0) + dx end
+    end
+  end
+end
+
+-- The rows the card can sit beside: panels that start at the left edge and
+-- do not run the full height, grouped by their top edge. Returns the rows'
+-- bottoms from the top down, or nil when the leftmost panel runs the full
+-- height (one row of panels, or a tall panel on the left).
+local function left_rows(g, height)
+  local tops, bottoms = {}, {}
+  for _, p in ipairs(g.panels) do
+    if p.x < .5 then
+      if p.y < .5 and p.h >= height - .5 then return nil end
+      local top = math.floor(p.y + .5)
+      if not bottoms[top] then tops[#tops+1] = top end
+      bottoms[top] = math.max(bottoms[top] or 0, p.y + p.h)
+    end
+  end
+  table.sort(tops)
+  local rows = {}
+  for i, top in ipairs(tops) do rows[i] = bottoms[top] end
+  return rows
+end
+
+-- Narrows the panels and dividers above `bottom` so they start at `x0`.
+-- Panels in one row keep the gap between them; a row's right edge stays put.
+-- Returns false when a panel would fall below its minimum width.
+local function narrow(g, bottom, x0, gap, options)
+  local rows = {}
+  -- Only panels wholly beside the card narrow; a taller one is a column of
+  -- its own that the card's rows end against.
+  local function beside(p) return p.y + p.h <= bottom + .5 end
+  for _, p in ipairs(g.panels) do
+    if beside(p) then
+      local top = math.floor(p.y + .5)
+      local row = rows[top]
+      if not row then row = {right = 0, count = 0}; rows[top] = row end
+      row.right = math.max(row.right, p.x + p.w)
+      row.count = row.count + 1
+    end
+  end
+  for _, row in pairs(rows) do
+    local gaps = (row.count - 1) * gap
+    row.ratio = (row.right - x0 - gaps) / math.max(1, row.right - gaps)
+    if row.ratio <= 0 then return false end
+  end
+  local placed = {}
+  for _, p in ipairs(g.panels) do placed[#placed+1] = p end
+  table.sort(placed, function(a, b) return a.x < b.x end)
+  local cursors = {}
+  for _, p in ipairs(placed) do
+    if beside(p) then
+      local top = math.floor(p.y + .5)
+      local ratio = rows[top].ratio
+      p.x, p.w = cursors[top] or x0, p.w * ratio
+      cursors[top] = p.x + p.w + gap
+      if p.w < dimensions(p.id, options) - .5 then return false end
+    end
+  end
+  for _, d in ipairs(g.dividers or {}) do
+    if d.axis == 'y' and d.y < bottom - .5 then
+      -- A gap between two of the card's rows starts beside the card.
+      d.w, d.x = d.x + d.w - math.max(d.x, x0), math.max(d.x, x0)
+    elseif d.axis == 'x' and d.y + d.h <= bottom + .5 then
+      -- A seam inside one of the card's rows: shares stay fractions of the
+      -- row's narrower usable width, and the limits keep the minimums.
+      local ratio = rows[math.floor(d.y + .5)].ratio
+      d.x = x0 + (d.x - (d.origin or 0)) * ratio + (d.origin or 0)
+      d.origin, d.span = x0 + (d.origin or 0), d.span * ratio
+      local low, high = (d.min_share or 0) / ratio, 1 - (1 - (d.max_share or 1)) / ratio
+      d.min_share, d.max_share = low, math.max(low, high)
+    end
+    -- A seam crossing below the card is a column edge at its row's right
+    -- edge, which does not move.
+  end
+  return true
+end
+
+-- Measures the panels around the Reference card, which sits at the left edge.
+-- card:
+--   width     the card's column, including the gap after it
+--   natural   the card's height when it is not stretched
+--   minimum   the card's smallest height
+--   column    true to keep the card a full-height column, as while editing
+-- The card covers however many rows from the top bring it closest to its
+-- natural height; the panels in those rows narrow to make room, and the rows
+-- below run the full width. When the leftmost panel runs the full height, or
+-- the card would cover every row, it is a full-height column instead and the
+-- panels share what is left. Returns the geometry with `card_h`, the card's
+-- height.
+function layout.measure_with_card(width, height, prefs, options, card)
+  options = options or {}
+  if not card.column then
+    local g = layout.measure(width, height, prefs, options)
+    local rows = not g.temporary and #g.panels > 1 and left_rows(g, height)
+    if rows and #rows > 1 then
+      local best
+      for i = 1, #rows - 1 do
+        if rows[i] >= card.minimum
+            and (not best or math.abs(rows[i] - card.natural) < math.abs(rows[best] - card.natural)) then
+          best = i
+        end
+      end
+      -- The last row only competes as the full-height column below.
+      if best and math.abs(rows[best] - card.natural) <= math.abs(height - card.natural) then
+        local gap = math.max(0, options.gap or 8*(options.scale or 1))
+        if narrow(g, rows[best], card.width, gap, options) then
+          g.card_h = rows[best]
+          return g
+        end
+      end
+    end
+  end
+  local g = layout.measure(math.max(0, width - card.width), height, prefs, options)
+  shift(g, card.width)
+  g.card_h = height
+  return g
+end
 return layout

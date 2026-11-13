@@ -34,7 +34,20 @@ function ruler.format_label(seconds, step)
     hours, minutes, seconds_in_minute)
 end
 
+-- From ten seconds up, steps follow clock units (15 and 30 seconds, whole
+-- minutes, hours) so a long recording never counts in 50 s or 500 s.
+local CLOCK_STEPS = {
+  { 10, 5 }, { 15, 5 }, { 30, 5 }, { 60, 5 }, { 120, 4 }, { 300, 5 },
+  { 600, 5 }, { 900, 5 }, { 1800, 5 }, { 3600, 5 }, { 7200, 4 },
+  { 18000, 5 }, { 36000, 5 },
+}
+
 local function nice_step_at_least(raw)
+  if raw > 10 * (1 + EPS) then
+    for _, entry in ipairs(CLOCK_STEPS) do
+      if raw <= entry[1] * (1 + EPS) then return entry[1], entry[2] end
+    end
+  end
   local exponent = math.floor(math.log(raw) / math.log(10))
   local scale = 10 ^ exponent
   local normalised = raw / scale
@@ -95,16 +108,19 @@ function ruler.build(start_time, finish_time, width, measure)
   local tick_step = (minor_step / span * width >= MIN_MINOR_GAP_PX) and minor_step or major_step
   local first = math.ceil(start_time / tick_step - EPS)
   local last = math.floor(finish_time / tick_step + EPS)
+  -- Majors are found by counting ticks, not by comparing times: at a late
+  -- position the rounding error of index * step outgrows any fixed tolerance.
+  local per_major = tick_step == major_step and 1 or divisions
+  local last_major = last // per_major
   local ticks, previous_label_right = {}
   for index = first, last do
     local time = index * tick_step
-    local major_index = math.floor(time / major_step + 0.5)
-    local is_major = math.abs(time - major_index * major_step) <= major_step * EPS
+    local major_index = index // per_major
+    local is_major = index % per_major == 0
     local x = (time - start_time) / span * width
     local tick = { x = x, time = time, major = is_major }
     if is_major then
-      local label = tick_label(time, major_step,
-        major_index == math.floor(finish_time / major_step + EPS))
+      local label = tick_label(time, major_step, major_index == last_major)
       local label_width = measure(label)
       local left = label_left(x, label_width, width)
       if not previous_label_right or left >= previous_label_right + LABEL_PAD_PX then

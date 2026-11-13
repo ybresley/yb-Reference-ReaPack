@@ -59,13 +59,9 @@ local function effective_target(ws)
   return cur.id, cur
 end
 
--- Whether the current stop wants a rect under this id: as its ringed TARGET,
--- or as its CONTEXT — a second region kept bright without a ring (the sidebar
--- stop keeps the sound list visible so a category click visibly filters).
+-- Whether the current stop wants a rect under this id: its ringed target.
 local function wants(ws, id)
-  local target, cur = effective_target(ws)
-  if target == id then return true end
-  return type(cur) == "table" and not wt.is_frozen(ws) and cur.context == id
+  return (effective_target(ws)) == id
 end
 
 -- Record the LAST SUBMITTED ITEM as (part of) target `id`. Called by the
@@ -111,14 +107,17 @@ end
 -- everything, hole and ring included. Also records the window's rect for the
 -- card's anchoring below.
 --
--- A stop may keep up to TWO regions bright: its ringed target, and an unringed
--- `context` region (the sidebar stop's sound list). The wash is therefore cut
--- band by band around however many holes this window carries, instead of the
--- fixed four-rects-around-one-hole shape.
-function walkthrough.wash(ctx, ws, win)
+-- The wash is cut band by band around however many holes this window carries,
+-- instead of a fixed four-rects-around-one-hole shape.
+-- x, y, w, h cover an explicit area instead of the current window, for a
+-- region whose targets are noted after its own window has closed.
+function walkthrough.wash(ctx, ws, win, x, y, w, h)
   if not ws or not ws.active then return end
-  local wx, wy = reaper.ImGui_GetWindowPos(ctx)
-  local ww, wh = reaper.ImGui_GetWindowSize(ctx)
+  local wx, wy, ww, wh = x, y, w, h
+  if not wx then
+    wx, wy = reaper.ImGui_GetWindowPos(ctx)
+    ww, wh = reaper.ImGui_GetWindowSize(ctx)
+  end
   hosts[win] = { x = wx, y = wy, w = ww, h = wh,
     frame = reaper.ImGui_GetFrameCount(ctx) }
   if not HAS_FG_LIST then return end
@@ -135,13 +134,6 @@ function walkthrough.wash(ctx, ws, win)
     if r and r.frame == frame then
       ring = inflate_clamped(r, wx, wy, ww, wh)
       holes[#holes + 1] = ring
-    end
-    local ctx_id = type(cur) == "table" and cur.context or nil
-    if ctx_id then
-      local c = rects[ctx_id]
-      if c and c.frame == frame then
-        holes[#holes + 1] = inflate_clamped(c, wx, wy, ww, wh)
-      end
     end
   end
 
@@ -178,11 +170,9 @@ function walkthrough.wash(ctx, ws, win)
         end
       end
     end
-    -- Only the TARGET wears the ring — a ringed context would make two
-    -- subjects out of one stop.
     if ring then
       local radius = M.WALK_RING_RADIUS
-      if wt.is_frozen(ws) or (type(cur) == 'table' and cur.act) then
+      if wt.is_frozen(ws) then
         reaper.ImGui_DrawList_AddRect(dl, ring.x1, ring.y1, ring.x2, ring.y2,
           theme.fade(T.ACCENT, 0.5), radius, 0, M.BORDER_GLOW_WIDTH)
         widgets.draw_border_glow(ctx, dl, ring.x1, ring.y1, ring.x2, ring.y2,
@@ -437,7 +427,7 @@ function walkthrough.card(ctx, ws)
   -- Reopening a closed tutorial window keeps the current lesson.
   local btn_label, act
   if frozen then btn_label, act = cur.reopen.button, cur.reopen.act
-  else btn_label, act = cur.button, cur.act end
+  else btn_label = cur.button end
 
   do
     if text_button(ctx, "Back", frame_h, ws.pos <= 1) then

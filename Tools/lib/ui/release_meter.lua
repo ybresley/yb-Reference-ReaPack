@@ -53,10 +53,15 @@ function meter.new()
   return {model=model_new(), script={}, targets={}, history_tip={}}
 end
 
+-- Setting a preference copies the whole table, so only a changed value is set.
+local function set_changed(prefs, key, value)
+  if prefs[key] ~= value then preferences.set(prefs, key, value) end
+end
+
 function meter.update(demo, topic, elapsed)
   topic = topic or 'meter_overview'
   local model = demo.model
-  local step = story.sample(topic, elapsed, demo.script)
+  local step = story.sample(topic, elapsed, demo.script, not theme.motion.enabled)
   local restarted = demo.topic ~= topic or (demo.phase and step.phase < demo.phase)
     or (demo.last_elapsed and elapsed < demo.last_elapsed)
   local dt = demo.last_elapsed and math.max(0, elapsed-demo.last_elapsed) or 0
@@ -86,11 +91,11 @@ function meter.update(demo, topic, elapsed)
     demo.history_tip_slot = index + 1
   end
   model.elapsed, model.view_elapsed = point.t, recording_time
-  preferences.set(model.prefs, 'show_history', not custom)
-  preferences.set(model.prefs, 'show_lr', not custom or step.show_lr)
-  preferences.set(model.prefs, 'extra_readings', custom and step.extra_readings or false)
-  preferences.set(model.prefs, 'show_target', not custom or step.show_target)
-  preferences.set(model.prefs, 'show_i', not custom or step.show_i)
+  set_changed(model.prefs, 'show_history', not custom)
+  set_changed(model.prefs, 'show_lr', not custom or step.show_lr)
+  set_changed(model.prefs, 'extra_readings', custom and step.extra_readings or false)
+  set_changed(model.prefs, 'show_target', not custom or step.show_target)
+  set_changed(model.prefs, 'show_i', not custom or step.show_i)
   local peak = maxima[index]
   model.m_max, model.s_max, model.tp_max = peak.m, peak.s, peak.tp
   model.values.crest = peak.crest

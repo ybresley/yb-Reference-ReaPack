@@ -44,9 +44,13 @@ function feedback.clip(text)
   return utf8_clip(text, feedback.MAX_MESSAGE)
 end
 
-function feedback.count(text)
-  if type(text) ~= "string" then return 0 end
-  return utf8.len(text) or #text
+-- The address is optional, and a typed one must be a single plain address: it
+-- becomes the recipient of a reply draft, so a list or "Name <x@y>" is refused.
+function feedback.valid_email(text)
+  if type(text) ~= "string" then return false end
+  local trimmed = text:match("^%s*(.-)%s*$")
+  if trimmed == "" then return true end
+  return trimmed:match('^[^%s@,;<>"]+@[^%s@,;<>"]+%.[^%s@,;<>"]+$') ~= nil
 end
 
 function feedback.reaper_version(raw)

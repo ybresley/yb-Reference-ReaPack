@@ -11,6 +11,9 @@ local defaults = preferences.defaults()
 local ui = {open=false}
 local groups = {display={rows=2}, appearance={rows=4}, meters={rows=3}}
 local preview_targets
+-- Added to widget ids in a demonstration so it never shares animation state
+-- with the live control of the same name.
+local preview_suffix = ''
 
 local function record_target(ctx, key)
   if not preview_targets then return end
@@ -35,6 +38,13 @@ local function update_anchor(x, y, width, height)
   end
 end
 
+function settings.open_at(x, y, width, height)
+  if not ui.open or ui.closing then
+    ui.open, ui.opening, ui.closing = true, true, nil
+  end
+  update_anchor(x, y, width, height)
+end
+
 local VIEWS = {
   {value='polar_sample', draw=icons.draw_stereo_polar, tip='Polar Sample'},
   {value='lissajous', draw=icons.draw_stereo_lissajous, tip='Lissajous'},
@@ -48,6 +58,9 @@ local OPTIONS = {
 for _, option in pairs(OPTIONS) do option.items = table.concat(option.labels, '\0') .. '\0' end
 
 local HINTS = {
+  scope = 'Shows the selected channel pair or the energy around the speakers.',
+  pair_left = 'Chooses the left input for Lissajous, Polar Sample and correlation.',
+  pair_right = 'Chooses the right input for Lissajous, Polar Sample and correlation.',
   brightness = 'Adjusts the brightness of all dots without changing their positions.',
   history = 'Lower values make older dots fainter so the newest paths stand out.',
   trail = 'Sets how long older dots remain visible.',
@@ -83,7 +96,7 @@ end
 local function brightness_row(ctx, key, label, value, view)
   row_label(ctx, label, key, M.SPECTRUM_OPTION_W)
   local number_w = reaper.ImGui_CalcTextSize(ctx, '150%')
-  local next_value, commit = widgets.step_slider(ctx, 'stereo_' .. view .. '_' .. key,
+  local next_value, commit = widgets.step_slider(ctx, 'stereo_' .. view .. '_' .. key .. preview_suffix,
     value * 100, {min=50, max=150, step=5, tick_step=25,
       width=M.SPECTRUM_OPTION_W - number_w - M.ITEM_SPACING_X})
   record_target(ctx, key)
@@ -99,14 +112,33 @@ end
 
 local function switch_row(ctx, key, label, on, hint)
   row_label(ctx, label, key, M.SET_SWITCH_W)
-  local clicked = widgets.switch(ctx, 'stereo_' .. key, on, hint)
+  local clicked = widgets.switch(ctx, 'stereo_' .. key .. preview_suffix, on, hint)
   record_target(ctx, key)
   if clicked then
     return {type='stereo_setting', key=key, value=not on}
   end
 end
 
+local function show_channel_controls(profile)
+  return profile and (profile.count > 2 or profile.view ~= 'pair'
+    or profile.pair_left ~= 1 or profile.pair_right ~= math.min(2, profile.count))
+end
+
+local function channel_row(ctx, key, label, value, labels, values)
+  row_label(ctx, label, key == 'view' and 'scope' or key, M.SPECTRUM_OPTION_W)
+  reaper.ImGui_SetNextItemWidth(ctx, M.SPECTRUM_OPTION_W)
+  local selected = 0
+  for index, candidate in ipairs(values) do
+    if candidate == value then selected = index - 1 end
+  end
+  local changed, index = reaper.ImGui_Combo(ctx, '##stereo_channels_' .. key, selected,
+    table.concat(labels, '\0') .. '\0')
+  if changed then return {type='analysis_channels_setting', key=key, value=values[index + 1]} end
+end
+
 local function draw_content(ctx, state)
+  local profile = state.analysis_channels
+  local surround = profile and profile.view == 'surround'
   local prefs = state.stereo_preferences or defaults
   local view = state.stereo_view == 'polar_sample' and 'polar_sample' or 'lissajous'
   local appearance = prefs.views[view]
@@ -116,6 +148,19 @@ local function draw_content(ctx, state)
   local opened, child, closed = widgets.begin_settings_group(ctx, 'stereo_display', 'Display',
     true, nil, groups.display, 'stereo_settings_close')
   if opened then
+    if show_channel_controls(profile) then
+      if state.analysis_channel_error then reaper.ImGui_BeginDisabled(ctx) end
+      accept(channel_row(ctx, 'view', 'Scope', profile.view,
+        {'Channel Pair', 'Surround Field'}, {'pair', 'surround'}))
+      local labels, values = {}, {}
+      for index = 1, profile.count do
+        labels[index], values[index] = index .. ' · ' .. profile.labels[index], index
+      end
+      accept(channel_row(ctx, 'pair_left', 'Pair Left', profile.pair_left, labels, values))
+      accept(channel_row(ctx, 'pair_right', 'Pair Right', profile.pair_right, labels, values))
+      if state.analysis_channel_error then reaper.ImGui_EndDisabled(ctx) end
+    end
+    if surround then reaper.ImGui_BeginDisabled(ctx) end
     row_label(ctx, 'View', 'view', M.SPECTRUM_OPTION_W)
     local selected = widgets.two_way_switch(ctx, 'stereo_view_switch', view, VIEWS,
       M.SPECTRUM_OPTION_W, nil, true)
@@ -123,9 +168,10 @@ local function draw_content(ctx, state)
     if failed then reaper.ImGui_BeginDisabled(ctx) end
     accept(option_row(ctx, 'trace', 'Drawing Style', appearance.trace, view, view ~= 'lissajous'))
     if failed then reaper.ImGui_EndDisabled(ctx) end
+    if surround then reaper.ImGui_EndDisabled(ctx) end
   end
   widgets.end_settings_group(ctx, child)
-  if failed then reaper.ImGui_BeginDisabled(ctx) end
+  if failed or surround then reaper.ImGui_BeginDisabled(ctx) end
   opened, child = widgets.begin_settings_group(ctx, 'stereo_appearance', 'Appearance', false, nil, groups.appearance)
   if opened then
     accept(brightness_row(ctx, 'brightness', 'Current Brightness', appearance.brightness, view))
@@ -146,7 +192,7 @@ local function draw_content(ctx, state)
       'Shows how closely the left and right channels agree. Negative values can cancel when summed to mono.'))
   end
   widgets.end_settings_group(ctx, child)
-  if failed then reaper.ImGui_EndDisabled(ctx) end
+  if failed or surround then reaper.ImGui_EndDisabled(ctx) end
   reaper.ImGui_SetCursorPosY(ctx, reaper.ImGui_GetCursorPosY(ctx) + M.ITEM_SPACING_Y)
   local frozen = state.stereo.frozen == true
   local width = (reaper.ImGui_GetContentRegionAvail(ctx) - M.ITEM_SPACING_X) / 2
@@ -173,6 +219,7 @@ local function panel_height(ctx, state)
   local bold = theme.push_bold_font(ctx)
   local heading = reaper.ImGui_GetTextLineHeight(ctx)
   if bold then reaper.ImGui_PopFont(ctx) end
+  groups.display.rows = show_channel_controls(state.analysis_channels) and 5 or 2
   -- These groups contain fixed-height rows. Give them their final height on
   -- the opening frame so child auto-sizing cannot shrink and regrow the panel.
   local height = 2 * M.WINDOW_PAD + frame + 6 * M.ITEM_SPACING_Y
@@ -247,9 +294,9 @@ function settings.gallery_preview(ctx, state, x, y, id, preview)
     local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
     reaper.ImGui_BeginDisabled(ctx)
     reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_Alpha(), alpha)
-    preview_targets = preview.targets
+    preview_targets, preview_suffix = preview.targets, '_' .. tostring(id or 'preview')
     local result = table.pack(xpcall(function() draw_content(ctx, state) end, debug.traceback))
-    preview_targets = nil
+    preview_targets, preview_suffix = nil, ''
     reaper.ImGui_PopStyleVar(ctx)
     reaper.ImGui_EndDisabled(ctx)
     if result[1] and preview.paint_pointer then
@@ -294,8 +341,7 @@ function settings.draw(ctx, state, res, x, y, width, height, exclusion, presenta
     if open then
       ui.closing = true
     else
-      ui.open, ui.opening, ui.closing = true, true, nil
-      update_anchor(x, y, width, height)
+      settings.open_at(x, y, width, height)
     end
   end
   if not presentation then

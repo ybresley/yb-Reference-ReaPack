@@ -11,14 +11,21 @@
 -- record pointing at a file that was never copied.
 
 local categories = require("core.categories")
+local fold = require("core.text_fold")
 
 local importer = {}
 
--- Filename (with extension) from a full path. Handles both separators because
--- source paths arrive from Windows Explorer/pickers ("\") but tests and any
--- future platform may use "/".
+-- Which file-name rules apply on this computer. Tests may flip it to exercise
+-- the other platform's rules.
+importer.WINDOWS = package.config:sub(1, 1) == "\\"
+
+-- Filename (with extension) from a full path. Windows paths may use either
+-- separator. On macOS and Linux only "/" separates folders: a backslash is an
+-- ordinary character in a file name there, so cutting at it would import
+-- "A\B.wav" as "B.wav".
 function importer.basename(path)
-  return (path:gsub("^.*[\\/]", ""))
+  if importer.WINDOWS then return (path:gsub("^.*[\\/]", "")) end
+  return (path:gsub("^.*/", ""))
 end
 
 -- Split "Kick_01.wav" -> "Kick_01", ".wav". A name with no extension, or a
@@ -69,28 +76,66 @@ function importer.is_safe_filename(name)
   return true
 end
 
--- The set of library filenames already spoken for by existing records, keyed
--- lowercase (Windows filenames are case-insensitive, so "Kick.wav" collides with
+-- Is this stored Library file name safe to act on HERE? Windows keeps the strict
+-- rule above. macOS and Linux only refuse what really escapes the Library
+-- folder: separators, "." and "..", and control characters. Names such as
+-- "What?.wav" are ordinary files there, and Libraries saved by 0.5.2 on a Mac
+-- can contain them; refusing them would stop those Libraries opening at all.
+-- New imports never create such names (see safe_filename), so a Library made
+-- from now on also opens on Windows.
+function importer.is_stored_filename(name)
+  if importer.WINDOWS then return importer.is_safe_filename(name) end
+  if type(name) ~= "string" or name == "" then return false end
+  if name == "." or name == ".." then return false end
+  if name:find("[\\/]") or name:find("%c") then return false end
+  return true
+end
+
+-- Turn any file name into one that passes is_safe_filename on every platform,
+-- changing as little as possible. macOS allows "?", "*", "|", '"', "<", ">" and
+-- ":" (Finder shows a "/" typed into a name as ":"), plus device names such as
+-- "Aux". A Library copy needs a name Windows can open too, because a Library
+-- folder can move between computers.
+function importer.safe_filename(name)
+  name = tostring(name or ""):gsub('[<>:"|?*\\/%c]', "_")
+  name = name:gsub("[%. ]+$", "") -- Windows would silently strip these
+  if name == "" then return "_" end
+  local stem, rest = name:match("^([^%.]*)(.*)$")
+  if RESERVED[stem:upper()] then name = stem .. "_" .. rest end
+  return name
+end
+
+-- The key a taken-name set uses for a file name. Windows file names ignore case,
+-- including accented letters, so "École.wav" and "école.wav" are one file.
+function importer.name_key(name)
+  return fold.lower(name)
+end
+
+-- The set of library filenames already spoken for by existing records, keyed by
+-- name_key (Windows filenames are case-insensitive, so "Kick.wav" collides with
 -- "kick.wav"). The caller unions this with the actual directory listing before
 -- resolving a name, so an orphan file on disk can't be silently overwritten.
 function importer.taken_filenames(lib)
   local set = {}
   for _, s in ipairs(lib.sounds) do
-    if s.filename then set[s.filename:lower()] = true end
+    if s.filename then set[importer.name_key(s.filename)] = true end
   end
   return set
 end
 
+-- Some callers key their sets with plain lower(), so check both forms.
 local function is_taken(taken, name)
-  return taken[name:lower()] == true
+  return taken[name:lower()] == true or taken[importer.name_key(name)] == true
 end
 
--- Given a desired filename and a set of taken names, return the desired name if
--- free, else the first "<base>_N.<ext>" that isn't taken (N starts at 2). Never
+-- Given a desired filename and a set of taken names, return a name that is free
+-- and safe on every platform: the desired name made safe (see safe_filename), or
+-- else the first "<base>_N.<ext>" that isn't taken (N starts at 2). Never
 -- returns a name already in the set, so a copy can never overwrite an existing
 -- file.
 function importer.unique_filename(desired, taken)
   taken = taken or {}
+  desired = importer.safe_filename(desired)
   if not is_taken(taken, desired) then return desired end
   local base, ext = importer.split_ext(desired)
   local n = 2
@@ -101,14 +146,14 @@ function importer.unique_filename(desired, taken)
   end
 end
 
--- Find an already-imported copy of the same source file, matched on original
--- basename + byte size. Cheap and good enough for a hand-curated library of a few
--- hundred sounds; the caller uses this to ASK before importing a duplicate rather
--- than silently making a second copy. nil source_name/size never matches.
-function importer.find_duplicate(lib, source_name, size_bytes)
+-- Find an already-imported copy of the same source file. Original basename +
+-- byte size only make a candidate: two different exports can share both. Core
+-- can't read files, so `same_audio(sound)` from the caller decides. nil
+-- source_name/size never matches.
+function importer.find_duplicate(lib, source_name, size_bytes, same_audio)
   if source_name == nil or size_bytes == nil then return nil end
   for _, s in ipairs(lib.sounds) do
-    if s.source_name == source_name and s.size_bytes == size_bytes then
+    if s.source_name == source_name and s.size_bytes == size_bytes and same_audio(s) then
       return s
     end
   end

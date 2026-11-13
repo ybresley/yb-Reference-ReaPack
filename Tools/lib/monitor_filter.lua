@@ -3,6 +3,9 @@
 -- health checks, the expiring controller lease, repair and clean shutdown.
 
 local monitor_filter = {}
+local audio_device = require('audio_device')
+local meter_host = require('meter_host')
+local recording_active = require('reaper_api').recording_active
 
 local R = reaper
 local MONITOR_FX = 0x1000000
@@ -38,16 +41,18 @@ local CONTROL = {
   revision = 9,
   response_sequence = 10,
 }
-local PROTOCOL = 13
+local PROTOCOL = 15
 local SPECTRUM = {
   fft_size = 16, smoothing = 17, epoch = 18, capture_state = 19, revision = 20,
   average_seconds = 21, history_epoch = 23,
   idle_seconds = 24, session = 25, stereo_enabled = 22,
+  channel_count = 26, pair_left = 27, pair_right = 28, channel_revision = 29,
   magic = 32, protocol = 33, sequence = 34, sample_rate = 35, count = 36,
   peak = 38, frame_epoch = 39, fmin = 40, fmax = 41, frame_fft = 42,
   hop = 43, active = 44, frame_smoothing = 45, frame_revision = 46,
   current_sample_rate = 47, final = 48, average_ready = 49,
-  history_samples = 51, frame_session = 52, data = 64, average_data = 576,
+  history_samples = 51, frame_session = 52, frame_channels = 53, input_channels = 54,
+  outputs = 55, data = 64, average_data = 576,
 }
 local SPECTRUM_MAGIC = 260826.1
 local SPECTRUM_TIMEOUT = 1.0
@@ -94,7 +99,9 @@ local S = {
   activation_started = nil,
   spectrum = { fft_size = 4096, smoothing_octaves = 1 / 12, epoch = 0,
     capture_state = 0, average_seconds = 0,
-    history_epoch = 0, idle_seconds = 0, stereo_enabled = false },
+    history_epoch = 0, idle_seconds = 0, stereo_enabled = false,
+    channel_count = 2, pair_left = 1, pair_right = 2,
+    channel_signature = "", channel_revision = 0, outputs = {1,2}, max_output = 2 },
   spectrum_revision = 0,
   spectrum_dirty = true,
   spectrum_frame = nil,
@@ -107,7 +114,7 @@ local S = {
   stereo_last_arrival = nil,
   stereo_next_serial = 1,
   stereo_last_clip_total = 0,
-  range_error = nil,
+  rejected_range = nil,
 }
 
 local function now()
@@ -116,6 +123,12 @@ end
 
 local function finite(value)
   return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+local function pin_mask(value)
+  if not finite(value) or value%1~=0 or value < -2147483648 or value > 4294967295 then return nil end
+  -- REAPER exposes signed and unsigned halves of the same 32-bit mask.
+  return value & 0xffffffff
 end
 
 local function current_master()
@@ -199,21 +212,41 @@ end
 
 local function view()
   local available = S.phase == "ready"
+  local can_install = R.TrackFX_AddByName ~= nil
+  local can_retry_control = R.gmem_attach and R.gmem_read and R.gmem_write
+  local can_restore = not S.recovery_blocked and (
+    S.phase == "missing" and can_install
+    or S.phase == "error" and not S.dev_sync_error and can_install and can_retry_control
+    or S.phase == "incompatible" and S.exact_identity and can_install and R.TrackFX_Delete)
+  local can_enable = S.control_ready and S.exact_identity and R.TrackFX_SetEnabled and (
+    S.phase == "bypassed" or S.phase == "offline" and R.TrackFX_SetOffline)
+  local limit = max_filter_hz()
+  local rejected = S.rejected_range
+  if rejected and rejected.limit ~= limit then
+    rejected.limit = limit
+    rejected.message = string.format("Listening is full range. Set High to %d Hz or lower.", limit)
+  end
   return {
     phase = S.phase,
     message = S.message,
     available = available,
+    waiting_for_recording = not available and not not (S.recording_restore or S.recording_insert or S.dev_sync_pending),
     audible = available and S.last_applied_on == true,
-    waiting_for_saved_helper = S.phase == "settling" and S.wait_for_saved_helper,
-    can_restore = S.phase == "missing" or S.phase == "error"
-      or S.phase == "incompatible",
-    max_filter_hz = max_filter_hz(),
-    range_error = S.range_error,
+    waiting_for_saved_helper = S.phase == "settling" and S.saved_helper_pending == true,
+    can_restore = not not can_restore,
+    can_enable = not not can_enable,
+    helper_identified = not not S.exact_identity,
+    max_filter_hz = limit,
+    range_error = rejected and rejected.message,
+    rejected_range = rejected,
+    input_channels = S.control_ready and R.gmem_read(SPECTRUM.input_channels) or nil,
+    analysis_input_status = S.analysis_input_status,
   }
 end
 
-local function set_phase(phase, message)
+local function set_phase(phase, message, recovery_blocked)
   S.phase, S.message = phase, message
+  S.recovery_blocked = recovery_blocked
   S.response_failed = false
   if phase ~= "ready" then
     if S.control_ready then
@@ -258,8 +291,15 @@ local function publish_spectrum()
     { SPECTRUM.idle_seconds, S.spectrum.idle_seconds },
     { SPECTRUM.session, S.session },
     { SPECTRUM.stereo_enabled, S.spectrum.stereo_enabled and 1 or 0 },
+    { SPECTRUM.channel_count, S.spectrum.channel_count },
+    { SPECTRUM.pair_left, S.spectrum.pair_left },
+    { SPECTRUM.pair_right, S.spectrum.pair_right },
+    { SPECTRUM.channel_revision, S.spectrum.channel_revision },
   }) do
     if not control_write(value[1], value[2]) then return false end
+  end
+  for channel=1,8 do
+    if not control_write(SPECTRUM.outputs+channel-1, S.spectrum.outputs[channel] or channel) then return false end
   end
   if not control_write(SPECTRUM.revision, revision) then return false end
   S.spectrum_revision, S.spectrum_dirty = revision, false
@@ -278,6 +318,13 @@ local function compatible(master, entry)
   end
   local value = R.TrackFX_GetParam(master, entry.fx, PARAM.protocol)
   return math.abs((tonumber(value) or 0) - PROTOCOL) < 0.001
+end
+
+local function defer_restore(automatic)
+  -- Explicit recovery also accepts versions that automatic updates must leave alone.
+  if not automatic or not S.recording_restore then
+    S.recording_restore = automatic and 'automatic' or 'explicit'
+  end
 end
 
 local function refresh_owned_helper(allow_incompatible, automatic)
@@ -303,7 +350,6 @@ local function refresh_owned_helper(allow_incompatible, automatic)
         or protocol % 1 ~= 0 or protocol < 6 or protocol >= PROTOCOL then
       return false, false
     end
-    S.auto_update_attempted = true
   end
 
   -- Recheck exact ownership in this fresh snapshot before replacing anything.
@@ -314,6 +360,11 @@ local function refresh_owned_helper(allow_incompatible, automatic)
       or not R.TrackFX_GetEnabled(snap.master, entry.fx)
       or R.TrackFX_GetOffline(snap.master, entry.fx)) then return true, false end
   if R.TrackFX_GetFXGUID(snap.master, entry.fx) ~= entry.guid then return true, false end
+  if recording_active(R) then
+    defer_restore(automatic)
+    return false, false
+  end
+  if automatic then S.auto_update_attempted = true end
   if R.TrackFX_Delete(snap.master, entry.fx) ~= true then return true, false end
 
   -- Replacing the filter must keep the analysis meter at the front of the chain.
@@ -324,30 +375,65 @@ local function refresh_owned_helper(allow_incompatible, automatic)
   return true, true
 end
 
+local function check_analysis_inputs(snap, entry)
+  local status
+  if type(R.TrackFX_GetPinMappings) ~= "function" then
+    status = "input_mapping_unverified"
+  else
+    -- Read every mask of each selected native pin, including channels 65–128.
+    for channel = 1, S.spectrum.channel_count do
+      local pin = S.spectrum.outputs[channel] - 1
+      local low, high = R.TrackFX_GetPinMappings(snap.master, entry.fx, 0, pin)
+      local upper_low, upper_high = R.TrackFX_GetPinMappings(
+        snap.master, entry.fx, 0, pin + 0x1000000)
+      low,high,upper_low,upper_high=pin_mask(low),pin_mask(high),pin_mask(upper_low),pin_mask(upper_high)
+      if low == nil or high == nil or upper_low == nil or upper_high == nil then
+        status = "input_mapping_unverified"
+        break
+      end
+      local masks = {0, 0, 0, 0}
+      masks[math.floor(pin / 32) + 1] = 1 << (pin % 32)
+      if low ~= masks[1] or high ~= masks[2]
+          or upper_low ~= masks[3] or upper_high ~= masks[4] then
+        status = "input_mapping_changed"
+        break
+      end
+    end
+  end
+  if status ~= S.analysis_input_status then
+    S.spectrum_frame, S.spectrum_last_arrival = nil, nil
+    S.stereo_frame, S.stereo_last_arrival = nil, nil
+  end
+  S.analysis_input_status = status
+end
+
 local function bind(snap, entry)
+  S.exact_identity = FX_NAMES[entry.original_name] or FX_NAMES[entry.name]
   if not compatible(snap.master, entry) then
     dry_entry(snap, entry)
     S.bound_guid, S.slot = entry.guid, entry.slot
-    if FX_NAMES[entry.original_name] or FX_NAMES[entry.name] then
+    if S.exact_identity then
       store_guid(entry.guid)
     end
     set_phase("incompatible",
-      "The helper doesn't match this yb-Reference version. Choose Update Helper to reload it.")
+      S.exact_identity and "The helper doesn't match this version of yb-Reference."
+      or "The saved effect could not be identified as yb-Reference Monitoring Filter. Check it in Monitor FX.")
     return false
   end
   store_guid(entry.guid)
   if entry.offline then
     S.bound_guid, S.slot = entry.guid, entry.slot
-    set_phase("offline", "The Monitoring Filter is offline in Reaper. Bring it online in Monitor FX to use filtering.")
+    set_phase("offline", "yb-Reference Monitoring Filter is offline. Bring it online in Monitor FX.")
     return false
   end
   if not entry.enabled then
     S.bound_guid, S.slot = entry.guid, entry.slot
-    set_phase("bypassed", "The Monitoring Filter is bypassed in Reaper. Enable it in Monitor FX to use filtering.")
+    set_phase("bypassed", "yb-Reference Monitoring Filter is bypassed. Enable it in Monitor FX.")
     return false
   end
 
   S.bound_guid, S.slot = entry.guid, entry.slot
+  check_analysis_inputs(snap, entry)
   set_phase("ready", "Full-range monitoring. The filter applies to timeline and reference audio.")
   S.response_sequence = R.gmem_read(CONTROL.response_sequence)
   S.response_ack, S.response_at = nil, now()
@@ -357,8 +443,22 @@ local function bind(snap, entry)
   return true
 end
 
+-- The live meter must stay at slot 0 to measure what reaches the speakers, and
+-- it stops when anything moves in front of it.
+local function leading_meter(snap)
+  local first = snap.entries[1]
+  if not first then return false end
+  if not R.TrackFX_GetNamedConfigParm then return false end
+  local ok, ident = R.TrackFX_GetNamedConfigParm(snap.master, first.fx, "fx_ident")
+  return ok and ident == "yb-Reference/yb-Reference_Meter.jsfx"
+end
+
 local function insert_helper(snap)
-  local slot = math.min(S.replacement_slot or 0, #snap.entries)
+  -- A saved Loudness meter can be in place before its audio token is ready.
+  -- Keep it ahead of the listening filter even on first install or restore.
+  local first = (meter_host.has_saved_front_meter(R, snap.master) or leading_meter(snap)) and 1 or 0
+  local slot = math.min(math.max(first, S.replacement_slot or 0), #snap.entries)
+  if recording_active(R) then S.recording_insert = true; return false end
   local position = R.TrackFX_AddByName(snap.master, FX_QUERY, true, -1000 - slot)
   S.auto_insert = false
   S.stable_count, S.last_signature = 0, nil
@@ -503,8 +603,25 @@ local function response_tick(settings)
   local deadline = S.activation_started or S.response_at
   if deadline and now() - deadline >= ENGAGE_TIMEOUT then
     control_write(CONTROL.active, 0)
+    -- A removed, bypassed or offline helper also stops replying, and the
+    -- once-a-second chain check may not have seen it yet. Name that cause
+    -- instead of offering to replace a helper the user turned off.
+    local snap = snapshot()
+    if snap then
+      local matches = exact_matches(snap)
+      local entry = verified_owned_entry(snap)
+      if not entry or #matches > 1
+          or (#matches == 1 and matches[1].guid ~= S.bound_guid) then
+        resolve(snap, false)
+        return
+      end
+      if entry.offline or not entry.enabled or not compatible(snap.master, entry) then
+        bind(snap, entry)
+        return
+      end
+    end
     set_phase("error",
-      "The helper stopped responding. Choose Restore Helper to reconnect it.")
+      "The helper stopped responding. Monitor FX may be bypassed or the audio device stopped. It reconnects when audio runs again, or choose Restore Helper.")
     S.response_failed = true
   end
 end
@@ -542,14 +659,14 @@ local function health_tick(settings, force_write)
         or (ack ~= S.heartbeat and ack == S.response_ack) then return end
   end
   if S.phase ~= "ready" then bind(snap, entry) end
+  check_analysis_inputs(snap, entry)
   local low, high = tonumber(settings.low_hz), tonumber(settings.high_hz)
   local limit = max_filter_hz()
   if settings.on and (not low or not high or low ~= low or high ~= high
       or low < 10 or high < low + 1 or high > limit) then
     control_write(CONTROL.active, 0)
     S.last_applied_on, S.activation_started, S.last_settings = false, nil, nil
-    S.range_error = "This range isn't available at the current sample rate. High must be above Low and no higher than "
-      .. tostring(limit) .. " Hz."
+    S.rejected_range = {low_hz=low, high_hz=high, preset_id=settings.selected_id}
     -- Keep analysis alive while the rejected listening range remains dry.
     if not publish_spectrum() or not write_heartbeat() then
       set_phase("error", "The helper stopped responding. Choose Restore Helper to reconnect it.")
@@ -576,12 +693,12 @@ local function health_tick(settings, force_write)
   end
   -- Automatic dry fallback must not acknowledge its own warning. Only a
   -- supported listening choice or an explicit Full choice clears the notice.
-  if settings.on then S.range_error = nil end
+  if settings.on then S.rejected_range = nil end
   S.next_health = t + HEALTH_INTERVAL
 end
 
 function monitor_filter.dismiss_range_error()
-  S.range_error = nil
+  S.rejected_range = nil
 end
 
 local function read_file(path)
@@ -639,22 +756,28 @@ function monitor_filter.init(opts)
   S.stored_guid = R.GetExtState(EXT_SECTION, EXT_GUID)
   if S.stored_guid == "" then S.stored_guid = nil end
   S.startup_guid, S.auto_update_attempted = S.stored_guid, false
+  S.recording_restore, S.recording_insert, S.dev_sync_pending = nil, nil, nil
   S.bound_guid, S.slot = nil, nil
   S.replacement_slot = nil
   S.next_lease, S.next_health = 0, 0
   S.last_settings, S.last_applied_on = nil, false
   S.activation_started = nil
-  S.range_error = nil
+  S.rejected_range = nil
+  S.analysis_input_status = "input_mapping_unverified"
   S.response_sequence, S.response_ack, S.response_at = nil, nil, nil
   S.response_failed = false
   S.response_needed = false
+  S.audio_suspended = false
   S.spectrum = { fft_size = 4096, smoothing_octaves = 1 / 12, epoch = 0,
     capture_state = 0, average_seconds = 0,
-    history_epoch = 0, idle_seconds = 0, stereo_enabled = false }
+    history_epoch = 0, idle_seconds = 0, stereo_enabled = false,
+    channel_count = 2, pair_left = 1, pair_right = 2,
+    channel_signature = "", channel_revision = 0, outputs = {1,2}, max_output = 2 }
   S.spectrum_revision, S.spectrum_dirty = 0, true
   S.spectrum_frame, S.spectrum_last_arrival = nil, nil
   S.stereo_frame, S.stereo_last_arrival = nil, nil
   S.stereo_next_serial, S.stereo_last_clip_total = 1, 0
+  S.stereo_min_revision = 0
   S.spectrum_staging = {}
   S.spectrum_average_staging = {}
   S.stereo_staging_left, S.stereo_staging_right = {}, {}
@@ -668,7 +791,12 @@ function monitor_filter.init(opts)
   if S.control_ready then
     initialise_control_session()
   end
-  S.dev_sync_error = opts.dev_copy and sync_dev_helper(opts.source_path) or nil
+  if opts.dev_copy and recording_active(R) then
+    S.dev_sync_pending = opts.source_path
+    S.dev_sync_error = nil
+  else
+    S.dev_sync_error = opts.dev_copy and sync_dev_helper(opts.source_path) or nil
+  end
   if not S.control_ready then
     set_phase("error", "The Monitoring Filter control channel isn't available in this Reaper version.")
   elseif S.dev_sync_error then
@@ -677,7 +805,41 @@ function monitor_filter.init(opts)
 end
 
 function monitor_filter.tick(settings)
+  if (S.dev_sync_pending or S.recording_restore or S.recording_insert) and not recording_active(R) then
+    if S.dev_sync_pending then
+      S.dev_sync_error = sync_dev_helper(S.dev_sync_pending)
+      S.dev_sync_pending = nil
+      if S.dev_sync_error then
+        S.recording_restore, S.recording_insert = nil, nil
+        set_phase('error', 'The development Monitoring Filter couldn’t be installed: ' .. S.dev_sync_error)
+      end
+    end
+    if not S.dev_sync_error then
+      local restore, insert = S.recording_restore, S.recording_insert
+      S.recording_restore, S.recording_insert = nil, nil
+      if restore then monitor_filter.restore(restore == 'automatic')
+      elseif insert then
+        S.phase, S.frame, S.stable_count, S.auto_insert = 'settling', 0, 0, true
+      end
+    end
+  end
   if S.dev_sync_error or not S.control_ready then return view() end
+  if audio_device.suspended(R) then
+    if not S.audio_suspended then
+      control_write(CONTROL.active, 0)
+      S.audio_suspended = true
+      S.last_applied_on, S.last_settings, S.activation_started = false, nil, nil
+      S.response_needed = false
+      S.next_health = 0
+    end
+    return view()
+  end
+  if S.audio_suspended then
+    S.audio_suspended = false
+    -- Replies left in shared memory cannot confirm that the device resumed.
+    S.response_sequence = R.gmem_read(CONTROL.response_sequence)
+    S.response_ack = R.gmem_read(CONTROL.ack)
+  end
   S.frame = S.frame + 1
 
   -- Full must cancel even an activation that has not yet been acknowledged.
@@ -704,6 +866,7 @@ function monitor_filter.tick(settings)
     end
     local saved_helper_pending = S.wait_for_saved_helper
       and not find_guid(snap, S.stored_guid) and #exact_matches(snap) == 0
+    S.saved_helper_pending = saved_helper_pending
     if (S.stable_count >= STABLE_SNAPSHOTS and not saved_helper_pending)
         or S.frame >= MAX_SETTLE_FRAMES then
       S.wait_for_saved_helper = false
@@ -737,19 +900,26 @@ function monitor_filter.restore(automatic)
   if automatic and (S.phase ~= "incompatible" or S.auto_update_attempted) then return false end
   if S.phase ~= "missing" and S.phase ~= "error"
       and S.phase ~= "incompatible" then return false end
+  if not view().can_restore then return false end
+  if recording_active(R) then
+    defer_restore(automatic)
+    return false
+  end
   if S.phase == "incompatible" then
     local attempted, refreshed = refresh_owned_helper(true, automatic)
+    if S.recording_restore then return false end
     if automatic and not attempted then return false end
     if not attempted or not refreshed then
       set_phase("error",
-        "The helper couldn't be reloaded. Remove yb-Reference Monitoring Filter from Monitor FX, then choose Add Helper.")
+        "The helper couldn't be reloaded. Remove yb-Reference Monitoring Filter from Monitor FX, then choose Add Helper.", true)
       return false
     end
   elseif S.phase == "error" then
     local attempted, refreshed = refresh_owned_helper(false)
+    if S.recording_restore then return false end
     if attempted and not refreshed then
       set_phase("error",
-        "The helper couldn't be refreshed. Remove yb-Reference Monitoring Filter from Monitor FX, then choose Add Helper.")
+        "The helper couldn't be refreshed. Remove yb-Reference Monitoring Filter from Monitor FX, then choose Add Helper.", true)
       return false
     end
   end
@@ -758,7 +928,7 @@ function monitor_filter.restore(automatic)
   S.frame, S.stable_count = 0, 0
   S.last_signature = nil
   S.auto_insert = true
-  S.wait_for_saved_helper = false
+  S.wait_for_saved_helper, S.saved_helper_pending = false, false
   S.dev_sync_error = nil
   if not S.control_ready and R.gmem_attach and R.gmem_read and R.gmem_write then
     S.control_ready = R.gmem_attach(GMEM_NAME) ~= false
@@ -794,6 +964,12 @@ function monitor_filter.configure_spectrum(config)
     or tonumber(config.idle_seconds)
   local stereo_enabled = config.stereo_enabled
   if stereo_enabled == nil then stereo_enabled = S.spectrum.stereo_enabled end
+  local channel_count = config.channel_count == nil and S.spectrum.channel_count
+    or tonumber(config.channel_count)
+  local pair_left = config.pair_left == nil and S.spectrum.pair_left or tonumber(config.pair_left)
+  local pair_right = config.pair_right == nil and S.spectrum.pair_right or tonumber(config.pair_right)
+  local channel_signature = config.channel_signature == nil and S.spectrum.channel_signature
+    or config.channel_signature
   if (fft ~= 2048 and fft ~= 4096 and fft ~= 8192)
       or (smoothing ~= 0 and smoothing ~= 1 / 24 and smoothing ~= 1 / 12 and smoothing ~= 1 / 6)
       or epoch ~= epoch or epoch < 0 or epoch > 1000000000 or epoch % 1 ~= 0
@@ -802,25 +978,56 @@ function monitor_filter.configure_spectrum(config)
       or history_epoch == nil or history_epoch ~= history_epoch or history_epoch < 0
       or history_epoch > 1000000000 or history_epoch % 1 ~= 0
       or not finite(idle_seconds) or idle_seconds < 0 or idle_seconds > 1000000000
-      or type(stereo_enabled) ~= "boolean" then
+      or type(stereo_enabled) ~= "boolean"
+      or not finite(channel_count) or channel_count < 1 or channel_count > 8
+      or channel_count % 1 ~= 0
+      or not finite(pair_left) or pair_left < 1 or pair_left > channel_count or pair_left % 1 ~= 0
+      or not finite(pair_right) or pair_right < 1 or pair_right > channel_count or pair_right % 1 ~= 0
+      or type(channel_signature) ~= "string" then
     return false
+  end
+  if config.outputs~=nil and type(config.outputs)~="table" then return false end
+  local outputs, selected, max_output, outputs_changed = {}, {}, 0, false
+  for channel=1,channel_count do
+    local source_outputs=config.outputs
+    if source_outputs==nil and config.channel_count==nil then source_outputs=S.spectrum.outputs end
+    local output=source_outputs==nil and channel or source_outputs[channel]
+    if not finite(output) or output%1~=0 or output<1 or output>128 or selected[output] then return false end
+    outputs[channel],selected[output]=output,true
+    max_output=math.max(max_output,output)
+    outputs_changed=outputs_changed or output~=S.spectrum.outputs[channel]
+  end
+  local channels_changed = outputs_changed or channel_count ~= S.spectrum.channel_count
+    or channel_signature ~= S.spectrum.channel_signature
+  local pair_changed = pair_left ~= S.spectrum.pair_left or pair_right ~= S.spectrum.pair_right
+  if outputs_changed or channel_count ~= S.spectrum.channel_count then
+    S.analysis_input_status = "input_mapping_unverified"
+    -- Preview can publish the new capture before tick(). Verify its wider or
+    -- narrower input map even when that early publication clears dirty state.
+    S.next_health = 0
   end
   if fft ~= S.spectrum.fft_size or smoothing ~= S.spectrum.smoothing_octaves
       or epoch ~= S.spectrum.epoch or capture_state ~= S.spectrum.capture_state
       or average_seconds ~= S.spectrum.average_seconds
       or history_epoch ~= S.spectrum.history_epoch
       or idle_seconds ~= S.spectrum.idle_seconds
-      or stereo_enabled ~= S.spectrum.stereo_enabled then
+      or stereo_enabled ~= S.spectrum.stereo_enabled or channels_changed or pair_changed then
     if S.control_ready and (epoch ~= S.spectrum.epoch
+        or channels_changed or pair_changed
         or (stereo_enabled and not S.spectrum.stereo_enabled)) then
       S.stereo_next_serial = (tonumber(R.gmem_read(STEREO.latest)) or 0) + 1
       S.stereo_last_clip_total = tonumber(R.gmem_read(STEREO.clip_total)) or 0
       S.stereo_frame, S.stereo_last_arrival = nil, nil
+      S.stereo_min_revision = S.spectrum_revision + 2
     end
+    local channel_revision = S.spectrum.channel_revision + (channels_changed and 1 or 0)
     S.spectrum = { fft_size = fft, smoothing_octaves = smoothing, epoch = epoch,
       capture_state = capture_state, average_seconds = average_seconds,
       history_epoch = history_epoch,
-      idle_seconds = idle_seconds, stereo_enabled = stereo_enabled }
+      idle_seconds = idle_seconds, stereo_enabled = stereo_enabled,
+      channel_count = channel_count, pair_left = pair_left, pair_right = pair_right,
+      channel_signature = channel_signature, channel_revision = channel_revision,
+      outputs = outputs, max_output = max_output }
     S.spectrum_dirty = true
   end
   return true
@@ -856,7 +1063,6 @@ function monitor_filter.enable()
   local snap, entry = reacquire()
   if not snap then return false end
   if not R.TrackFX_SetEnabled or (entry.offline and not R.TrackFX_SetOffline) then
-    set_phase("error", "The helper couldn't be enabled. Enable yb-Reference Monitoring Filter in Monitor FX.")
     return false
   end
   if not control_write(CONTROL.active, 0) then
@@ -882,6 +1088,7 @@ end
 -- rejected snapshot never replaces the last complete set of measurements.
 function monitor_filter.read_spectrum(time)
   if not S.control_ready or S.phase ~= "ready" then return nil, "unavailable" end
+  if S.analysis_input_status then return nil, S.analysis_input_status end
   if S.spectrum_dirty then return nil, "waiting" end
   local t = finite(time) and time or now()
   local sequence = R.gmem_read(SPECTRUM.sequence)
@@ -890,6 +1097,9 @@ function monitor_filter.read_spectrum(time)
   end
   if R.gmem_read(SPECTRUM.magic) ~= SPECTRUM_MAGIC
       or R.gmem_read(SPECTRUM.protocol) ~= PROTOCOL then return nil, "invalid" end
+  if R.gmem_read(SPECTRUM.input_channels) < S.spectrum.max_output then
+    return nil, "invalid"
+  end
   if S.spectrum_frame and sequence == S.spectrum_frame.sequence then
     if S.spectrum_frame.revision ~= S.spectrum_revision then return nil, "waiting" end
     if S.spectrum_frame.final then return S.spectrum_frame end
@@ -909,6 +1119,7 @@ function monitor_filter.read_spectrum(time)
   local history_samples = R.gmem_read(SPECTRUM.history_samples)
   if R.gmem_read(SPECTRUM.frame_session) ~= S.session
       or epoch ~= S.spectrum.epoch or fft ~= S.spectrum.fft_size
+      or R.gmem_read(SPECTRUM.frame_channels) ~= S.spectrum.channel_count
       or frame_revision ~= S.spectrum_revision
       or math.abs(R.gmem_read(SPECTRUM.frame_smoothing) - S.spectrum.smoothing_octaves) > 0.000001 then
     return nil, "waiting"
@@ -943,18 +1154,33 @@ function monitor_filter.read_spectrum(time)
   frame.revision, frame.final = frame_revision, final == 1
   frame.average_ready = average_ready == 1
   frame.history_samples = history_samples
+  frame.channel_count = S.spectrum.channel_count
   S.spectrum_frame, S.spectrum_last_arrival = frame, t
   return frame
+end
+
+-- A packet that fails validation is either one the writer reopened during the
+-- read or one damaged packet. Neither may erase the whole scope: wait for a
+-- reopened slot, and skip only a packet whose seal held throughout the read.
+-- A skipped packet still shows that the helper is publishing.
+local function skip_stereo_packet(base, seal, serial, t)
+  if R.gmem_read(base + STEREO.sequence) ~= seal then return nil, "waiting" end
+  S.stereo_next_serial, S.stereo_last_arrival = serial + 1, t
+  return nil, "skipped"
 end
 
 -- Stereo packets are sealed individually. An interrupted read leaves the last
 -- accepted packet intact, and a bounded queue absorbs short UI stalls.
 function monitor_filter.read_stereo(time)
   if not S.control_ready or S.phase ~= "ready" then return nil, "unavailable" end
+  if S.analysis_input_status then return nil, S.analysis_input_status end
   if S.spectrum_dirty or not S.spectrum.stereo_enabled then return nil, "waiting" end
   local t = finite(time) and time or now()
   if R.gmem_read(SPECTRUM.magic) ~= SPECTRUM_MAGIC
       or R.gmem_read(SPECTRUM.protocol) ~= PROTOCOL then return nil, "invalid" end
+  if R.gmem_read(SPECTRUM.input_channels) < S.spectrum.max_output then
+    return nil, "invalid"
+  end
   local newest = R.gmem_read(STEREO.latest)
   if not finite(newest) or newest < 0 or newest % 1 ~= 0 then
     return nil, "invalid"
@@ -1021,22 +1247,26 @@ function monitor_filter.read_stereo(time)
     return nil, "waiting"
   end
   if not finite(revision) or revision < 0 or revision % 2 ~= 0 then
-    return nil, "invalid"
+    return skip_stereo_packet(base, seal, serial, t)
   end
   if revision > S.spectrum_revision then return nil, "waiting" end
+  if revision < S.stereo_min_revision then
+    if R.gmem_read(base + STEREO.sequence) == seal then S.stereo_next_serial = serial + 1 end
+    return nil, "waiting"
+  end
   if not finite(count) or count < 1 or count > STEREO_COUNT or count % 1 ~= 0
       or (final ~= 0 and final ~= 1) or not finite(end_sample)
       or not finite(recorded_at) or not finite(clip_total)
       or not finite(clip_before) or clip_total < clip_before
       or not finite(sample_rate) or sample_rate <= 0 then
-    return nil, "invalid"
+    return skip_stereo_packet(base, seal, serial, t)
   end
   local left, right = S.stereo_staging_left, S.stereo_staging_right
   for i = 1, count do
     local l = R.gmem_read(base + STEREO.left + i - 1)
     local r = R.gmem_read(base + STEREO.right + i - 1)
     if not finite(l) or not finite(r) then
-      return nil, "invalid"
+      return skip_stereo_packet(base, seal, serial, t)
     end
     left[i], right[i] = l, r
   end

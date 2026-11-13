@@ -70,12 +70,13 @@ function tour.current(value, content)
   return feature, feature.topics[value.topics[value.feature] or 1]
 end
 
-function tour.tick(value, now, animate)
+-- Demos keep playing with Interface Animations off; the demos themselves drop
+-- the in-between motion.
+function tour.tick(value, now)
   -- A hidden window must resume where it stopped, without skipping a demo step.
-  if value.last_time and animate ~= false then
+  if value.last_time then
     value.elapsed = value.elapsed + math.max(0, math.min(0.1, now - value.last_time))
   end
-  -- Keep the wall clock current while paused so re-enabling cannot jump ahead.
   value.last_time = now
   return value.elapsed
 end

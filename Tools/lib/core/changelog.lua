@@ -93,6 +93,9 @@ function changelog.parse(text)
 
   for line in (text .. "\n"):gmatch("(.-)\r?\n") do
     local head = line:match("^##%s+([^%s]+)")
+    -- "v0.5.3" ranks below every number in the version comparison, so a leading
+    -- v is dropped here or that release's notes would never be shown.
+    if head then head = head:gsub("^[vV](%d)", "%1") end
     local sub = line:match("^###%s+(.+)$")
     local bullet = line:match("^%s*[%-%*]%s+(.+)$")
     -- A detail line: indented, no bullet, and only meaningful under an entry.
@@ -257,6 +260,11 @@ function changelog.reapack_lines(release, width)
   return out
 end
 
+local function short_area(text)
+  local _, words = text:gsub("%S+", "")
+  return (utf8.len(text) or #text) <= 24 and words <= 3
+end
+
 -- Reconstruct the catalogue's wrapped plain text for the shared notes renderer.
 -- Continuations are joined so the window, rather than the export width, wraps them.
 function changelog.from_catalog(record)
@@ -280,6 +288,9 @@ function changelog.from_catalog(record)
         entry = nil
       elseif bullet and group then
         local area, body = bullet:match("^([^:]+):%s*(.*)$")
+        -- An area is a short feature name. A longer lead-in before a colon is
+        -- the start of a sentence in an entry that has no area.
+        if area and not short_area(area) then area, body = nil, nil end
         entry = { area = area, text = body or bullet }
         group.entries[#group.entries + 1] = entry
       elseif entry then

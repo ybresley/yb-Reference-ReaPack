@@ -2,7 +2,10 @@ Option Explicit
 
 If WScript.Arguments.Count < 4 Or WScript.Arguments.Count > 6 Then WScript.Quit 2
 
+' A backslash right before the closing quote would escape it and swallow the
+' next argument (a drive root is the usual case), so it is doubled.
 Function Quote(value)
+  If Right(value, 1) = "\" Then value = value & "\"
   Quote = Chr(34) & value & Chr(34)
 End Function
 

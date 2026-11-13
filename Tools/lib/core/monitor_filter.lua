@@ -7,7 +7,6 @@ local json = require("vendor.json")
 
 monitor_filter.MIN_HZ = 10
 monitor_filter.MAX_HZ = 20000
-monitor_filter.MIN_GAP_HZ = 1
 
 monitor_filter.SLOPES = { 12, 24, 36, 48 }
 
@@ -122,33 +121,6 @@ function monitor_filter.frequency_to_t(hz)
     monitor_filter.MIN_HZ, monitor_filter.MAX_HZ)
   return math.log(hz / monitor_filter.MIN_HZ)
     / math.log(monitor_filter.MAX_HZ / monitor_filter.MIN_HZ)
-end
-
-function monitor_filter.t_to_frequency(t)
-  t = clamp(finite(t) or 0, 0, 1)
-  return rounded_hz(monitor_filter.MIN_HZ
-    * (monitor_filter.MAX_HZ / monitor_filter.MIN_HZ) ^ t)
-end
-
-function monitor_filter.format_frequency(hz)
-  hz = rounded_hz(clamp(finite(hz) or monitor_filter.MIN_HZ,
-    monitor_filter.MIN_HZ, monitor_filter.MAX_HZ))
-  if hz >= 1000 then
-    local khz = hz / 1000
-    if hz % 1000 == 0 then return string.format("%d kHz", khz) end
-    if hz % 100 == 0 then return string.format("%.1f kHz", khz) end
-    return string.format("%d Hz", hz)
-  end
-  return string.format("%d Hz", hz)
-end
-
--- One line keeps the preference inspectable in Reaper's ini. On/off is omitted
--- so every launch starts dry even if the previous session ended unexpectedly.
-function monitor_filter.encode(value)
-  value = monitor_filter.normalise(value)
-  -- Keep the previous four-part shape so existing preferences and older copies
-  -- remain readable. The retired mode slot is always written as band isolation.
-  return table.concat({ "band", value.low_hz, value.high_hz, value.slope }, "|")
 end
 
 function monitor_filter.decode(text)

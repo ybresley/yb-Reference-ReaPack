@@ -1,14 +1,16 @@
 -- Saved arrangements are separate from older layout preferences so visiting an
--- older copy cannot erase the four-panel choices.
+-- older copy cannot erase these choices. The arrangements without a Waveform
+-- panel have their own key: copies that still have one keep reading theirs.
 local preferences = require('core.panel_layout_preferences')
 local layout = require('core.layout_prototype')
 local meters = require('core.meter_layout')
 local settings = {}
-local SECTION, KEY = 'yb-Reference', 'panel_layout_v1'
+local SECTION, KEY, PREVIOUS_KEY = 'yb-Reference', 'panel_layout_v2', 'panel_layout_v1'
 local METER_SPLITS = {history_x=true, history_y=true, readings_x=true, loudness_lr=true}
 
 function settings.load(previous, previous_error, meter_prefs)
   local text = reaper.GetExtState(SECTION, KEY)
+  if text == '' then text = reaper.GetExtState(SECTION, PREVIOUS_KEY) end
   local model, splits, err
   if text ~= '' then
     model, splits, err = preferences.decode(text)

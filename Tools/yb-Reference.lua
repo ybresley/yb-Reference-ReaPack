@@ -1,12 +1,12 @@
 -- @description yb-Reference
--- @version 0.5.2
+-- @version 0.6.0
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
 --   inside Reaper, with instant preview through Monitor FX and Reference mode
 --   for comparing sounds with your project.
 --
---   Windows, with macOS support in testing. Requires the free [SWS](https://www.sws-extension.org/)
+--   Works on Windows and macOS. Requires the free [SWS](https://www.sws-extension.org/)
 --   and [ReaImGui](https://github.com/cfillion/reaimgui) extensions.
 --
 --   Support: [yoni.ybtools@gmail.com](mailto:yoni.ybtools@gmail.com)
@@ -45,35 +45,59 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update adds macOS support and improves live metering and small-window
---   layouts.
+--   This update adds surround analysis, a combined Reference panel and a
+--   Library that can stay beside Reference View, along with Reference mode and
+--   metering fixes.
+--    
+--   Highlights
+--     • Surround: Reference View now measures surround audio up to 7.1.
+--       Meters, loudness and Spectrum follow every speaker, each project
+--       remembers its speaker layout, and the Surround Field shows where
+--       neighbouring speakers are in or out of phase.
+--     • Reference Panel: The Waveform panel and the bottom bar are now one
+--       Reference panel beside the analysis panels. It keeps the picker,
+--       stored readings, waveform and playback controls together, and folds
+--       its parts in a fixed order as the window gets smaller.
+--     • Docked Library: The Library can stay open beside Reference View, with
+--       its own waveform and audition controls, including a new Mono button.
+--       Review Files lists audio in the Library folder that isn't part of your
+--       Library, so you can add it or move it to the trash.
 --    
 --   Changes
---     • macOS: yb-Reference can now run on macOS.
---     • Loudness: When space is tight, meter bars switch to numeric M/S/I
---       readings and the highest true peak since reset.
---     • Loudness: Extra Readings adds RMS and Target Diff alongside Crest
---       Factor. Click Target Diff to switch between Integrated, Momentary and
---       Short-Term loudness.
---     • Loudness: L/R peak bars are brighter.
---     • Setup: The tutorial now starts in Reference View and introduces its
---       display panels and the feedback form.
---     • Settings: Spectrum/Filter Settings, Stereo Settings and Loudness
---       Settings now have a Close button.
+--     • Updates: When a new version is out, a popup shows its date and
+--       overview, with Release Notes, Skip This Version and Update Now.
+--       Skipping a version keeps the popup away until a newer one. Turn the
+--       popup off from the popup itself or in Settings → Updates.
+--     • Loudness: When the meter panel is short, the Readings column keeps two
+--       readings instead of hiding. Right-click it to choose which two.
+--     • Loudness: Meter bars keep even spacing at every width, with their
+--       labels above the values.
+--     • Loudness: Very short meter panels now keep their readings, with each
+--       label beside its value. The shortest show one or two readings. Click a
+--       label to choose another.
+--     • Library: The Library reopens open or closed, as you left it. Open
+--       Library on Startup is removed.
+--     • Library: Adding audio together with other files, such as licences or
+--       artwork, no longer reports the other files as errors.
+--     • Appearance: Tooltips appear beside the control or area they describe
+--       and stay still while the pointer moves. They now wait half a second
+--       before appearing.
+--     • Dialogs: Info messages, such as Reference mode turning off, now have a
+--       close button.
 --    
 --   Fixes
---     • Loudness: Reconnect no longer adds duplicate meters to Monitor FX
---       after a connection failure.
---     • Window: Loudness and Stereo keep measuring through brief interface
---       pauses.
---     • Window: Switching between Lissajous and Polar Sample no longer resizes
---       the other panels.
---     • Spectrum Analyser: Stopping playback no longer adds false
---       high-frequency energy to the display.
---     • Spectrum Analyser: Starting a reference again now clears its previous
---       Average trace.
---     • Updates: ReaPack update reports now separate the release notes for
---       each version.
+--     • Latch Mode: Reference mode no longer leaves a project muted after Save
+--       As, with the project open in two tabs, or when yb-Reference closes
+--       while latched.
+--         A project that still needs unmuting by hand now says so.
+--     • Projects: After Save As, a pin no longer picks up a different sound of
+--       the same size.
+--     • Loudness: The meter now connects after Reaper restarts, instead of
+--       reporting that it was changed or not added by yb-Reference.
+--     • Spectrum Analyser: The spectrum line no longer thins out or disappears
+--       in dense high-frequency detail.
+--     • Window: A graphics failure now closes yb-Reference without a second
+--       script error.
 --    
 --   ------------------------------------------------
 --    
@@ -162,19 +186,18 @@ local CONTEXT_NAME = COPY_TITLE
 -- FIRST, before anything that can bail out below: a recovery note means a previous run
 -- died while reference mode was latched, leaving a master muted. Restoring it must not
 -- depend on ReaImGui being installed or the library file being readable — both of those
--- give up and `return`, which would strand a muted project. Also drop any leftover
--- hotkey press from while the tool was closed, so it can't silently latch on launch.
+-- give up and `return`, which would strand a muted project.
 local reaper_api = require("reaper_api")
 local reference  = require("reference")
-reference.clear_toggle_request()
-local recovery_msg, recovery_urgent = reference.recover()
+local recovery_msg, recovery_urgent, recovery_alert = reference.recover()
 -- Recovery retries every frame while it can still help, but a persistent failure
 -- gets one native warning per distinct message rather than reopening the same box.
 local reference_alerted
 
--- An unresolved recovery is the user's project still sitting muted, so it can't wait
--- for the status line — the startup paths below may never reach it.
-if recovery_urgent then
+-- An unresolved recovery is the user's project still sitting muted, and a damaged
+-- marker may hide one, so neither can wait for the message card: the startup
+-- paths below may stop before the window opens.
+if recovery_urgent or recovery_alert then
   reaper_api.message(recovery_msg, "yb-Reference · Reference Mode Needs Attention")
   reference_alerted = recovery_msg
 end
@@ -264,6 +287,9 @@ local icon_font_path = table.concat({ root, "assets", "fonts", "lucide.ttf" }, S
 
 local library_dir, library_remembered = reaper_api.library_dir()
 local library_path = reaper_api.join(library_dir, "library.json")
+
+-- Exit cleanup runs every step even when one throws, then raises the first error.
+local run_exit_steps = require("core.exit_steps").run
 
 -- Keep the tool alive when no safe library can be loaded. Without real library
 -- data the normal browser cannot tell the truth, so this small window only
@@ -397,6 +423,10 @@ local function run_library_recovery(missing_dir)
   end
 
   local function loop()
+    -- ReaImGui reports renderer failures and can discard the context between
+    -- frames. Stopping here lets the registered exit cleanup release resources.
+    if not reaper.ImGui_ValidatePtr(ctx, "ImGui_Context*") then return end
+
     -- Crash recovery remains live even though the normal tool has not opened.
     -- A missing audio library must never stop a queued muted-project repair.
     local _, message, urgent = reference.refresh()
@@ -406,7 +436,6 @@ local function run_library_recovery(missing_dir)
     elseif not urgent then
       reference_alerted = nil
     end
-    reference.clear_toggle_request()
 
     if pending_folder_action then
       local done, dir, pick_err = reaper_api.poll_folder_picker()
@@ -457,9 +486,11 @@ local function run_library_recovery(missing_dir)
   -- cleanup below, so recovery owns the resources it can hold across frames.
   reaper_api.mark_action_running(CMD_ID, true)
   reaper.atexit(function()
-    reference.cleanup()
-    reaper_api.cancel_folder_picker()
-    reaper_api.mark_action_running(CMD_ID, false)
+    run_exit_steps({
+      reference.cleanup,
+      reaper_api.cancel_folder_picker,
+      function() reaper_api.mark_action_running(CMD_ID, false) end,
+    })
   end)
   reaper.defer(loop)
 end
@@ -495,12 +526,32 @@ if store.exists(library_path) then
   -- (that would destroy the user's data) — surface a clear message and stop.
   local ok, result = pcall(store.load, library_path)
   if not ok then
+    -- Each cause has a different fix, and only a damaged file should ever lead
+    -- the user towards replacing it.
+    local kind = store.failure_kind(result)
+    local message
+    if kind == "newer" then
+      message = "The Library couldn't be opened because a newer version of yb-Reference saved it. " ..
+        "The file was not changed.\n\nUpdate yb-Reference to open this Library."
+    elseif kind == "not_saved" then
+      message = "The Library needs a one-time update, but the updated file couldn't be saved. " ..
+        "Another program, such as backup or sync software, may be using it. The file was not changed." ..
+        "\n\nClose any program using the file, then run the tool again."
+    elseif kind == "unusable_names" then
+      message = "The Library couldn't be opened because it holds file names this computer can't use, " ..
+        "such as names with ? or : in them on Windows. The file was not changed.\n\n" ..
+        "Open the Library on the computer that made it, or email " .. feedback.ADDRESS .. " for help."
+    else
+      message = "The Library couldn't be opened because its data is damaged. The file was not changed.\n\n" ..
+        (store.exists(store.previous_path(library_path))
+          and ("A copy from before the last save is in the same folder, named \"library.prev.json\". " ..
+            "To use it, close Reaper, move \"library.json\" somewhere safe, then rename " ..
+            "\"library.prev.json\" to \"library.json\".")
+          or "Restore it from a backup, or move it aside to start a fresh library.") ..
+        "\n\nEmail " .. feedback.ADDRESS .. " for help."
+    end
     reaper_api.message(
-      product_error.with_details(
-        "The Library couldn't be opened because its data is damaged or incompatible. The file was not changed.", result) .. "\n\n" ..
-      "The tool has left the file untouched. Restore it from a backup, or move it " ..
-      "aside to start a fresh library, or email " .. feedback.ADDRESS ..
-      " for help.\n\nFile:\n" .. library_path,
+      message .. "\n\nFile:\n" .. library_path .. "\n\n" .. product_error.details(result),
       "yb-Reference · Library Not Loaded")
     return
   end
@@ -518,8 +569,10 @@ elseif store.present(library_path) then
 else
   -- A library is only born in a folder proved empty. Existing unrelated files
   -- are never mixed into a new library; the recovery window lets the user pick
-  -- another location instead.
-  if not reaper_api.directory_is_empty(library_dir) then
+  -- another location instead. A remembered folder always held a library.json,
+  -- so finding it empty (a sync service still downloading, an offline drive's
+  -- mount point) goes to recovery too, where New library is an explicit choice.
+  if location.when_missing(library_remembered, reaper_api.directory_is_empty(library_dir)) == "recover" then
     run_library_recovery(library_dir)
     return
   end
@@ -555,11 +608,23 @@ if not library_remembered then reaper_api.set_library_dir(library_dir) end
 -- in ui/app: context creation and the per-frame draw. library_service performs
 -- the library-changing work the UI asks for (importing, orphan sweep).
 local service    = require("library_service")
+local leftover_service = require("leftover_service")
+local leftovers  = require("core.leftovers") -- what the Review Files panel says about stray files
+local import_summary = require("core.import_summary")
+local new_category_drop = require("core.new_category_drop")
+local settled_write = require("core.settled_write")
+-- The floating Library reports its position every frame it moves; the saved copy
+-- follows once it holds still (and on close) so dragging doesn't rewrite settings.
+local browser_geom_save = settled_write.new(0.25, function(g)
+  reaper_api.set_browser_geom(g.x, g.y, g.w, g.h)
+end)
 local library_delete = require("library_delete")
+local leftover_wait  = require("leftover_wait")
 local categories = require("core.categories")
 local search     = require("core.search")
 local library_selection = require("core.selection")
 local browser_memory = require("core.browser_memory")
+local status_message = require("core.status_message") -- the on-screen message and how long it stays
 local analysis   = require("core.analysis") -- what still needs measuring
 local match      = require("core.match")    -- match-to-target trim arithmetic
 local span       = require("core.span")     -- start/end points: clamping + effective range
@@ -574,8 +639,10 @@ local panel_layout_settings = require("panel_layout_settings")
 local reference_panels = require("reference_panels")
 local stereo_core = require("core.stereo")
 local stereo_settings = require("stereo_settings")
+local analysis_channels = require("analysis_channels")
 local wave_view  = require("core.wave_view") -- Reference View waveform pan and zoom range
-local techfacts  = require("core.techfacts") -- the armed sound's tech line for the bar
+local techfacts  = require("core.techfacts") -- the armed sound's tech line for the card
+local duration_text = require("core.duration_text")
 local preview    = require("preview")  -- SWS audio-preview adapter (playback)
 local peaks      = require("peaks")    -- waveform envelope reader
 local wave_detail = require("wave_detail") -- selected waveform's visible-range detail reader
@@ -613,7 +680,6 @@ local stored_browser = browser_memory.normalise(saved_browser, library)
 if saved_browser.sound_id and not stored_browser.sound_id then
   reaper_api.set_browser_sound(nil)
 end
-local open_library_on_startup = reaper_api.get_open_library_on_startup()
 local stored_monitor_filter, stored_spectrum = spectrum.load()
 local stored_reference_panels, reference_panels_error = reference_panels.load(stored_spectrum.prefs)
 local stored_metering = metering.load()
@@ -624,10 +690,22 @@ local stored_stereo_preferences, stereo_preferences_error = stereo_settings.load
 -- Released copies receive the helper through ReaPack's [effect] package entry.
 -- DEV/Main copies also keep a source beside the script, so the adapter mirrors
 -- it into Reaper's Effects folder before trying to insert the Monitoring FX.
-monitoring_filter.init({
-  dev_copy = copy_label ~= nil,
-  source_path = table.concat({ root, "yb-Reference Monitoring Filter.jsfx" }, SEP),
-})
+local meter_track_cleanup = require('meter_track_cleanup').new(reaper)
+local cleanup_notices = {}
+local analysis_helpers_started = false
+local function analysis_ready()
+  if not meter_track_cleanup:input_ready() then return false end
+  if not analysis_helpers_started then
+    monitoring_filter.init({
+      dev_copy = copy_label ~= nil,
+      source_path = table.concat({ root, "yb-Reference Monitoring Filter.jsfx" }, SEP),
+    })
+    analysis_helpers_started = true
+  end
+  return true
+end
+meter_track_cleanup:tick()
+analysis_ready()
 
 -- Where the title bar's "Dock window in Docker" sends the window, asked once:
 -- REAPER's dockers are a property of the user's layout, not ours.
@@ -681,13 +759,12 @@ local state = {
   dock_target    = dock_target,                  -- where the title bar's "Dock window in Docker" sends it
   selected_id    = nil,
   selected       = nil,                          -- the selected sound record (convenience for the UI)
-  selected_tech  = nil, -- the armed sound's tech line for the bar (core.techfacts, set per selection)
+  selected_tech  = nil, -- the armed sound's file facts as a list, and its duration (core.techfacts, set per selection)
   status         = nil,
   view           = stored_browser.view,           -- which category set the list is showing
   query          = "",                           -- search box text
   sort           = stored_browser.sort,           -- remembered header sort; safe defaults on stale data
   loud_unit      = stored_unit,                  -- which measurement the Loudness column shows
-  open_library_on_startup = open_library_on_startup,
   -- How many times the columns have been reset — carried over from the last run
   -- (2026-08-11), because it is part of the name ImGui files the table's widths
   -- under: restarting it at 0 made a reset land on a name that already had saved
@@ -815,11 +892,13 @@ local state = {
   -- A sound being dragged out to the arrange view: { sound_id, hint }. nil the rest
   -- of the time. One drag at a time, held here rather than per row.
   drag           = nil,
-  -- The library browser popup (Phase 5.7 — two-view redesign): closed by
-  -- default unless the startup setting opens it, then toggled by the Reference
-  -- View's Library button / the popup's own close button / Esc / an OS file
-  -- drag passing over the Reference View.
-  browser_open   = open_library_on_startup,
+  -- The Library reopens as it was left, pinned or in its own window.
+  browser_open   = reaper_api.get_library_initial_open(),
+  library_placement = reaper_api.get_library_placement(),
+  library_panel_width = reaper_api.get_library_panel_width(),
+  stacked_card_height = reaper_api.get_stacked_card_height(),
+  -- The peak reading the one-row readings show: "true_peak", "peak" or "rms".
+  reading_extra  = reaper_api.get_reading_extra(),
   -- Remembered position + size (Phase 5.7 Stage 3), loaded once here; nil the
   -- first time this user ever opens it (or on an ancient ReaImGui without the
   -- geometry-reading calls) — app.lua then falls back to its default size.
@@ -836,6 +915,9 @@ local state = {
   -- the gear's accent dot and Settings' UPDATES section — and reports
   -- "start_update" back; nothing else touches it.
   update         = updater.state,
+  -- The update popup's saved choices: { enabled, skipped }. Settings and the
+  -- popup change them through "set_update_popup" and "skip_update".
+  update_popup   = reaper_api.get_update_popup(),
   -- The Send-feedback panel's view (lib/feedback.lua mutates phase; the
   -- display fields were filled at startup above). Settings' HELP section reads
   -- it and reports "send_feedback" back.
@@ -854,6 +936,13 @@ local state = {
   walkthrough    = walkthrough.new(),
 }
 
+-- The Library reopens as the user left it. `tour` marks a change the tutorial
+-- makes on its own, which must not replace that saved choice.
+local function set_browser_open(open, tour)
+  state.browser_open = open
+  if not tour then reaper_api.set_library_open(state.library_placement, open) end
+end
+
 -- What's New, decided once at startup (2026-08-08, `.brief/_done/changelog/`).
 --
 -- Since an update restarts the tool after ReaPack's report closes, "the first
@@ -871,10 +960,15 @@ local state = {
 -- card can never re-open on notes that have been read. The two are separate
 -- because they answer different questions and only agree most of the time.
 local running_version = state.update.installed
+-- A development copy shares the installed copy's mark. It never writes it, or a
+-- newer version tried here would arrive later as already read.
+local function stamp_seen(version)
+  if not state.dev_copy then reaper_api.set_seen_version(version) end
+end
 if running_version then
   local seen = reaper_api.seen_version()
   if not seen then
-    reaper_api.set_seen_version(running_version)
+    stamp_seen(running_version)
   else
     -- Upcoming Release can display a draft without marking it read before release.
     local missed = changelog.since(state.changelog, seen,
@@ -890,7 +984,7 @@ if running_version then
       -- crash while the card is open loses the re-push; Settings > Updates still
       -- holds every note. mark_for() takes the newest of running/shown, so a
       -- hand-edited file listing a version above the running one can't loop.
-      reaper_api.set_seen_version(changelog.mark_for(missed, running_version))
+      stamp_seen(changelog.mark_for(missed, running_version))
     end
   end
 end
@@ -905,7 +999,7 @@ end
 -- first run on an empty screen (Codex, 2026-08-10). Nothing is written in that
 -- case, so a later ReaImGui update still gets its first open.
 if not reaper_api.walkthrough_seen() and walkthrough_ui.can_draw() then
-  walkthrough.begin_welcome(state.walkthrough)
+  walkthrough.begin_stops(state.walkthrough)
   state.browser_open = false
   reaper_api.set_walkthrough_seen()
 end
@@ -926,7 +1020,7 @@ local function refresh_view()
   -- Deletion messages and Settings need full totals even during a search.
   -- Sidebar totals ignore category selection so other matches remain discoverable.
   state.counts = categories.counts(state.library)
-  state.sidebar_counts = state.query == "" and state.counts
+  state.sidebar_counts = not search.active(state.query) and state.counts
     or categories.counts(state.library, state.query)
   local pruned = library_selection.prune_sounds(state.visible_sounds,
     state.browse_ids, state.browse_anchor_id)
@@ -936,38 +1030,70 @@ refresh_view()
 
 -- Save the whole library atomically after a mutation (never exit-time). A failed
 -- save (disk full, a sync/backup tool holding the file) must NOT take the tool down
--- mid-frame: the change is still in memory and the very next mutation retries the
--- whole save, since every save writes the complete library. Said loudly once in a
--- dialog, then kept on the status line — a box per keystroke would be hostile.
+-- mid-frame: the change is still in memory and the next mutation, or the timed
+-- retry below, saves the whole library again. Said loudly once in a dialog, then
+-- kept on the status line — a box per keystroke would be hostile.
 local save_warned = false
+-- Tracks changes the Library file doesn't have yet (see core/save_retry).
+local save_retry = require("core.save_retry")
+local library_saves = save_retry.new(function()
+  store.save(state.library_path, state.library)
+end, reaper_api.now)
+
+local function try_save()
+  return save_retry.try(library_saves)
+end
+
+-- A retry that succeeded ends the episode: say so (a status line still claiming
+-- the library isn't saved would be a lie), and re-arm the one-time dialog so a
+-- NEW failure later isn't silently demoted to a status line nobody notices.
+local function end_save_episode()
+  if save_warned then
+    save_warned = false
+    status_message.info(state, "Library saved.")
+  end
+end
+
 -- Returns whether the save actually landed, so a caller that wants to report
 -- its own success can check first — overwriting the status line below with a
 -- cheerful message would delete the only notice a REPEAT failure gets (the
 -- dialog fires once per episode, the status line every time).
 local function commit()
-  local ok, err = pcall(store.save, state.library_path, state.library)
+  local ok, err = try_save()
   if ok then
-    -- A retry that succeeded ends the episode: say so (a status line still claiming
-    -- the library isn't saved would be a lie), and re-arm the one-time dialog so a
-    -- NEW failure later isn't silently demoted to a status line nobody notices.
-    if save_warned then
-      save_warned = false
-      state.status = "Library saved."
-    end
+    end_save_episode()
   else
-    state.status = "Couldn't save the latest change. It remains in the Library, and yb-Reference will try again when you make another change."
+    status_message.problem(state, "Couldn't save the latest change. It remains in the Library, and yb-Reference will keep trying to save it.")
     if not save_warned then
       save_warned = true
       reaper_api.message(
         product_error.with_details(
           "The Library couldn't be saved. Your latest change remains in the Library.", err) ..
-        "\n\nyb-Reference will try to save everything again when you make another change. " ..
+        "\n\nyb-Reference will keep trying to save everything, and tries once more when you close it. " ..
         "If this keeps happening, check your disk space, and whether backup or sync software " ..
         "is holding on to:\n" .. state.library_path,
         "yb-Reference · Library Couldn't Be Saved")
     end
   end
   return ok
+end
+
+-- Called every frame; quiet unless a save is waiting and its retry is due.
+local function retry_unsaved_library()
+  if save_retry.due(library_saves) and try_save() then end_save_episode() end
+end
+
+-- Closing with changes the file doesn't have: one last try, and if the file
+-- still won't take them, say so instead of losing them silently.
+local function save_before_closing()
+  local ok, err = save_retry.closing(library_saves)
+  if not ok then
+    reaper_api.message(
+      "Your latest Library changes couldn't be saved before yb-Reference closed, so they were lost. " ..
+      "Everything saved earlier is still in the Library file.\n\nFile:\n" .. state.library_path ..
+      "\n\n" .. product_error.details(err),
+      "yb-Reference · Library Couldn't Be Saved")
+  end
 end
 
 --------------------------------------------------------------- playback
@@ -999,16 +1125,19 @@ local function sound_path(s)
   return reaper_api.join(state.library_dir, s.filename)
 end
 
+local channel_settings = analysis_channels.new(reaper,preview)
 local playback = playback_coordinator.new(state, {
   find = find_sound, path = sound_path,
-  before_start = function(slot, sound_id, resuming)
+  before_start = function(slot, sound_id, resuming,evidence)
     -- Analysis failure remains visible in its panel without silencing preview.
+    if not analysis_ready() then return true end
+    channel_settings:prepare(state,evidence)
     metering.prepare_preview(state, slot, sound_id)
     return spectrum.prepare_preview(state, slot, sound_id, resuming)
   end,
   before_seek = function(kind)
-    local ok, err = metering.transport_event(state, kind)
-    if not ok and err then state.status = err end
+    -- A failed meter reset is shown, translated, on the Loudness panel.
+    if analysis_ready() then metering.transport_event(state, kind) end
   end,
 }, reference_alerted)
 
@@ -1044,11 +1173,14 @@ local function select_sound(id, quiet)
     state.mono = false
     preview.set_mono(false)
   end
-  -- The bar's tech-facts line (horizontal-layout brief, 2026-08-07), formatted
-  -- ONCE per selection — the bar draws this string every frame and must never
-  -- probe the file or format it itself (ui reads state; frame-allocation rule).
+  -- The Reference card's file facts and duration, formatted ONCE per
+  -- selection — the card draws them every frame and must never probe the file
+  -- or format them itself (ui reads state; frame-allocation rule).
   local source_info = reaper_api.source_info(sound_path(state.selected))
-  state.selected_tech = techfacts.format(source_info)
+  state.selected_tech = techfacts.parts(source_info)
+  if tonumber(state.selected.duration) then
+    state.selected_tech.duration = duration_text.format(state.selected.duration)
+  end
   wave_view.configure(state.wave_view, state.selected.duration, source_info and source_info.rate)
   wave.selected(state, sound_path)
   -- A deliberate re-pick clears the "this one wouldn't play" mark, so the user can
@@ -1091,10 +1223,6 @@ local function browse_sound(id, quiet, selection)
     return
   end
   reaper_api.set_browser_sound(id)
-  -- Picking a sound clears an old status message: the info row (the status
-  -- line's new home, 2026-07-29) should now describe THIS sound, not carry
-  -- yesterday's news. Anything below that sets a fresh status still wins.
-  state.status = nil
   -- The info row's technical facts (sample rate / bit depth / format / channels),
   -- read once per pick — never per frame.
   state.browse_info = reaper_api.source_info(sound_path(state.browse))
@@ -1130,7 +1258,7 @@ local function show_in_library(pin_id)
   local sound_id = ps and ps.origin_of and ps.origin_of[pin_id]
   local s = sound_id and find_sound(sound_id)
   if not s then
-    state.status = "This pin isn't in the Library. Drag it onto a Library category to add it."
+    status_message.problem(state, "This pin isn't in the Library. Drag it onto a Library category to add it.")
     return
   end
 
@@ -1148,7 +1276,7 @@ local function show_in_library(pin_id)
   end
   refresh_view()
 
-  state.browser_open = true
+  set_browser_open(true)
   browse_sound(sound_id, true) -- quiet: reveal it, never play it
   -- The scroll itself belongs to the table (only it knows where the row landed).
   -- A counter rather than a flag, so revealing the SAME sound twice still
@@ -1166,6 +1294,9 @@ end
 -- vs mid-session).
 local function apply_pins_refresh(r)
   if not r then return nil end
+  -- Save As keeps the same pin records, so nothing bound to them lets go:
+  -- playback, Pitch, zoom and the selection carry on.
+  if r.same_project then return state.pins.load_error or r.warning end
   picker_preview.set_context(state, nil)
   -- Everything holding a pin lets go at once. The pause memory matters as much as
   -- the audio here: pin ids restart at "p1" in every project, so a pause
@@ -1196,8 +1327,8 @@ local function drop_sound()
 
   -- A PIN dragged out of a project the user has since left names a different
   -- sound now; drop it rather than inserting the wrong audio.
-  if is_pin_id(drag.sound_id) and drag.proj ~= (state.pins and state.pins.proj) then
-    state.status = "That drag ended in a different project, so nothing was added."
+  if is_pin_id(drag.sound_id) and drag.pins_session ~= (state.pins and state.pins.session) then
+    status_message.problem(state, "That drag ended in a different project, so nothing was added.")
     return
   end
 
@@ -1206,7 +1337,7 @@ local function drop_sound()
   for _, id in ipairs(ids) do
     local sound = find_sound(id)
     if not sound then
-      state.status = "One of those sounds is no longer in the Library, so nothing was added."
+      status_message.problem(state, "One of those sounds is no longer in the Library, so nothing was added.")
       return
     end
     entries[#entries + 1] = {
@@ -1220,8 +1351,8 @@ local function drop_sound()
   local target = dragout.target()
   if not target.over_arrange then
     -- Not a failure — letting go somewhere else is how you change your mind.
-    state.status = string.format("\"%s\" wasn't added. It was dropped over %s, not the timeline.",
-      s.name, target.where)
+    status_message.problem(state, string.format("\"%s\" wasn't added. It was dropped over %s, not the timeline.",
+      s.name, target.where))
     return
   end
 
@@ -1231,89 +1362,89 @@ local function drop_sound()
   -- Re-asked HERE rather than trusted from the last drawn frame: the pointer
   -- moves between the frame that painted the strip and the release, and the
   -- drop must do what the mouse is over NOW.
-  local new_track = dragout.newtrack_zone(target) ~= nil
+  -- No track under the pointer means the empty space below the last track.
+  local new_track = target.track == nil or dragout.newtrack_zone(target) ~= nil
   local ok, result, details = dragout.insert(entries, target.track, target.position, new_track)
   if ok then
     if new_track then
       local channel_text = details and details.needed_channels > 2
         and string.format(" %d channels were enabled on the track.", details.needed_channels)
         or ""
-      state.status = #entries > 1
+      status_message.info(state, #entries > 1
         and string.format("Added %d sounds to a new track.%s", #entries, channel_text)
-        or string.format("Added \"%s\" to a new track.%s", s.name, channel_text)
+        or string.format("Added \"%s\" to a new track.%s", s.name, channel_text))
     else
-      state.status = dragout.landed_at(target.track, result, details, #entries)
+      status_message.info(state, dragout.landed_at(target.track, result, details, #entries))
     end
   else
-    state.status = #entries > 1
+    status_message.problem(state, #entries > 1
       and string.format("The sounds couldn't be added to the timeline: %s.", tostring(result))
-      or string.format("\"%s\" couldn't be added to the timeline: %s.", s.name, tostring(result))
+      or string.format("\"%s\" couldn't be added to the timeline: %s.", s.name, tostring(result)))
   end
 end
 
 --------------------------------------------------------------- deleting
 
--- Delete a sound. Anything holding the file OPEN must let go before it moves — a
--- preview playing it, a waveform build or a loudness pass reading it — and if the
+-- Delete sounds. Anything holding a file OPEN must let go before it moves — a
+-- preview playing it, a waveform build or a loudness pass reading it — and if a
 -- delete then can't be done, that background work is started again, so a refusal
--- really does leave everything as it was.
-local function delete_sound(id, batch)
-  local s = find_sound(id)
-  local name = s and s.name or "That sound"
-  local mine = holders.is_id(id)
+-- really does leave everything as it was. The service moves every file and then
+-- saves the Library once for the whole selection.
+local function delete_sounds(ids)
+  local held, order, sound_of = {}, {}, {}
+  for _, id in ipairs(ids or {}) do
+    if not held[id] then
+      sound_of[id] = find_sound(id)
+      held[id] = holders.release(state, holders.is_id(id))
+      order[#order + 1] = id
+    end
+  end
 
-  local held = holders.release(state, mine)
+  local result = service.delete_sounds(state, ids)
 
-  -- `audio_gone` marks the one failure that isn't a clean refusal: the file reached
+  -- `audio_gone` marks the one failure that isn't a clean refusal: the file is in
   -- the trash but the library wouldn't save. The sound is still listed, so its work
   -- must NOT be restarted — there's no file left to read, and a measurement failing
-  -- on it would try to save the library all over again.
-  local ok, why, audio_gone = service.delete_sound(state, id)
-  if not ok then
-    -- A clean refusal: hand the sound back its unfinished work.
-    if not audio_gone then
-      holders.restore(state, held, function() return s and sound_path(s) end)
-    end
-    state.status = why
-    if not batch then reaper_api.message(why, "yb-Reference · Delete Sound") end
-    return false, why
-  end
-
-  -- Gone for good: drop it from the measuring queue too (it holds nothing open, so
-  -- it only needed clearing once the delete actually happened).
-  analysis_service.forget(state, id)
-
-  -- The row is gone, so neither view may still be pointing at it.
-  holders.forget_selection(state, mine)
-  holders.forget_browse(state, mine)
-  reaper_api.set_browser_sound(state.browse_id)
-  state.browse_ids[id] = nil
-  if state.browse_anchor_id == id then state.browse_anchor_id = nil end
-  if not batch then refresh_view() end
-  state.status = string.format("\"%s\" moved to the trash folder in your Library.", name)
-  return true
-end
-
-local function delete_sounds(ids)
-  local deleted, failed, last_error = 0, 0, nil
-  local seen = {}
-  for _, id in ipairs(ids or {}) do
-    if not seen[id] then
-      seen[id] = true
-      local ok, why = delete_sound(id, true)
-      if ok then deleted = deleted + 1 else failed, last_error = failed + 1, why end
+  -- on it would try to save the library all over again. Restored last-released
+  -- first, so the waveform requests end as they were before the first release.
+  local refused = {}
+  for _, f in ipairs(result.refused) do refused[f.id] = f end
+  for i = #order, 1, -1 do
+    local id = order[i]
+    local f = refused[id]
+    if f and not f.audio_gone then
+      local s = sound_of[id]
+      holders.restore(state, held[id], function() return s and sound_path(s) end)
     end
   end
+
+  -- Gone for good: drop each from the measuring queue too (it holds nothing open,
+  -- so it only needed clearing once the delete actually happened), and neither
+  -- view may still be pointing at it.
+  for _, record in ipairs(result.deleted) do
+    local id = record.id
+    local mine = holders.is_id(id)
+    analysis_service.forget(state, id)
+    holders.forget_selection(state, mine)
+    holders.forget_browse(state, mine)
+    state.browse_ids[id] = nil
+    if state.browse_anchor_id == id then state.browse_anchor_id = nil end
+  end
+  if #result.deleted > 0 then reaper_api.set_browser_sound(state.browse_id) end
   refresh_view()
-  if failed > 0 then
-    local summary = string.format("%d sound%s moved to trash; %d could not be deleted.%s",
-      deleted, deleted == 1 and "" or "s", failed,
-      last_error and ("\n\n" .. last_error) or "")
-    state.status = summary
+
+  local deleted, failed = #result.deleted, #result.refused
+  if result.save_error then
+    status_message.problem(state, result.save_error)
+    reaper_api.message(result.save_error, "yb-Reference · Delete Sounds")
+  elseif failed > 0 then
+    local summary = string.format("%d sound%s moved to trash; %d could not be deleted.\n\n%s",
+      deleted, deleted == 1 and "" or "s", failed, result.refused[failed].why)
+    status_message.problem(state, summary)
     reaper_api.message(summary, "yb-Reference · Delete Sounds")
   elseif deleted > 0 then
-    state.status = string.format("%d sound%s moved to the trash folder in your Library.",
-      deleted, deleted == 1 and "" or "s")
+    status_message.info(state, string.format("%d sound%s moved to the trash folder in your Library.",
+      deleted, deleted == 1 and "" or "s"))
   end
 end
 
@@ -1330,7 +1461,7 @@ local function unpin_sound(id)
   local held = holders.release(state, mine)
 
   local ok, msg = pins_service.unpin(state, id)
-  state.status = msg
+  status_message.report(state, ok, msg)
   if not ok then
     -- A clean refusal: the pin is still there, so hand back its unfinished work.
     holders.restore(state, held, function() return sound_path(p) end)
@@ -1349,10 +1480,17 @@ end
 -- deliberate: dropping a pin on a second category moves the library copy there
 -- rather than making another one.
 local function save_pin_to_library(id, dest)
-  local ok, msg, sound_id, added = pins_service.save_pin_to_library(state, id)
+  local ok, msg, sound_id, added, unsaved = pins_service.save_pin_to_library(state, id, library_saves)
   -- Multi-line messages are real problems (a copy or save failure) — those get a
   -- dialog, like import failures do. One-liners stay on the status line.
-  state.status = msg:match("^[^\n]*")
+  if unsaved then
+    -- The new sound is only in memory until a retry lands, so the warning stays
+    -- up, and the retry that succeeds says the Library was saved.
+    save_warned = true
+    status_message.problem(state, msg)
+  else
+    status_message.report(state, ok, msg:match("^[^\n]*"))
+  end
   if msg:find("\n", 1, true) then
     reaper_api.message(msg, "yb-Reference · Save to Library")
   end
@@ -1366,8 +1504,8 @@ local function save_pin_to_library(id, dest)
       -- "saved under Whooshes" would be the tool lying about where the sound is.
       if commit() then
         local c = dest.category and categories.get(state.library, dest.category)
-        state.status = string.format("\"%s\" saved to your Library under %s.",
-          adopted.name, c and c.name or "Uncategorised")
+        status_message.info(state, string.format("\"%s\" saved to your Library under %s.",
+          adopted.name, c and c.name or "Uncategorised"))
       end
     end
   end
@@ -1395,7 +1533,74 @@ end
 -- — the usual cause is a file that was missing at the time, so putting it back and
 -- reopening the tool simply measures it.
 if not analysis_service.library_loaded(state) then
-  state.status = "Loudness measurements aren't available in this version of Reaper. Everything else works normally."
+  status_message.problem(state, "Loudness measurements aren't available in this version of Reaper. Everything else works normally.")
+end
+
+--------------------------------------------------------------- leftover files
+
+-- Audio files in the Library folder that aren't part of the Library: left by an
+-- add that stopped part-way, or copied in by hand. A standing notice offers
+-- Review Files; the panel draws from state.leftovers, and a background check
+-- fills in what each file is.
+local leftover_check
+
+-- The panel's texts for every file checked so far.
+local function describe_leftovers()
+  local lo = state.leftovers
+  local any_reason = false
+  for _, e in ipairs(lo.entries) do
+    if e.checked and e.length == nil then
+      e.reason = leftovers.reason_text(e)
+      e.length = leftovers.length_text(e)
+    end
+    if e.reason then any_reason = true end
+  end
+  lo.summary = not lo.checking and leftovers.summary(lo.entries) or nil
+  lo.show_reasons = any_reason and lo.summary == nil
+end
+
+-- Start again from what is in the folder now. Called at startup, after the
+-- panel's actions, and when the Library folder changes.
+local function set_leftovers(names)
+  if leftover_check then leftover_check:cancel() end
+  leftover_check = nil
+  if #names == 0 then
+    state.leftovers = nil
+    status_message.set_notice(state, nil)
+    return
+  end
+  local entries = leftovers.entries(names)
+  -- The key doubles as the preview's sound id and the row's ImGui id.
+  for _, e in ipairs(entries) do e.key = "leftover:" .. e.name end
+  state.leftovers = { entries = entries, heading = leftovers.heading(#entries),
+    settings_text = leftovers.settings_text(#entries), checking = true }
+  status_message.set_notice(state, {
+    text = leftovers.notice_text(#entries), button = "Review Files", action = "review_leftovers",
+  })
+  leftover_check = leftover_service.start_check(state, entries)
+  describe_leftovers()
+end
+
+-- A frame gets at most 2 ms of checking, the same budget as an import.
+local function step_leftover_check()
+  local job = leftover_check
+  if not job then return end
+  local deadline = reaper_api.now() + 0.002
+  for _ = 1, 16 do
+    if job:step() or reaper_api.now() >= deadline then break end
+  end
+  if job.done then
+    leftover_check = nil
+    -- A check that stopped early still frees the panel's buttons: adding
+    -- reads every file again anyway.
+    state.leftovers.checking = false
+    if job.error then
+      status_message.problem(state, product_error.with_details(
+        "Some files in your Library folder couldn't be checked. You can still add them or move them to the trash.",
+        job.error))
+    end
+  end
+  describe_leftovers()
 end
 
 -- Check the folder against the records both ways round, and say what's wrong rather
@@ -1403,7 +1608,7 @@ end
 local orphans, missing = service.check_files(state)
 
 local function add_status(msg)
-  state.status = state.status and (state.status .. "  \u{00B7}  " .. msg) or msg
+  status_message.problem(state, state.status and (state.status .. "  \u{00B7}  " .. msg) or msg)
 end
 
 -- This project's pins, loaded before the first frame (the sidebar reads them),
@@ -1411,13 +1616,9 @@ end
 local pins_warning = apply_pins_refresh(pins_service.refresh(state))
 if pins_warning then add_status(pins_warning) end
 
-if #orphans == 1 then
-  add_status("1 audio file in the Library folder is not yet in the Library. It may be left over from an interrupted add.")
-elseif #orphans > 1 then
-  add_status(string.format(
-    "%d audio files in the Library folder are not yet in the Library. They may be left over from an interrupted add.",
-    #orphans))
-end
+-- Stray files get their own notice, which waits until the messages above have
+-- been read.
+set_leftovers(orphans)
 
 -- A record whose file is gone still looks perfectly normal in the list — same name,
 -- same loudness from when it was last measured — so name the offenders. A handful
@@ -1437,39 +1638,21 @@ end
 
 -- A restored master mute matters more than an orphan count, so it leads the line.
 if recovery_msg then
-  state.status = state.status and (recovery_msg .. "  \u{00B7}  " .. state.status) or recovery_msg
-end
-
--- Turn an import summary into one plain-language status line.
-local function summarize(sum)
-  local parts = {}
-  if sum.added > 0 then
-    parts[#parts + 1] = string.format("%d %s added", sum.added, sum.added == 1 and "sound" or "sounds")
-  end
-  if #sum.duplicates > 0 then
-    parts[#parts + 1] = string.format("%d %s already in the Library",
-      #sum.duplicates, #sum.duplicates == 1 and "sound" or "sounds")
-  end
-  if #sum.skipped > 0 then parts[#parts + 1] = #sum.skipped .. " skipped" end
-  if #sum.errors > 0 then parts[#parts + 1] = #sum.errors .. " couldn't be added" end
-  if #parts == 0 then return "Nothing to add." end
-  return table.concat(parts, "  \u{00B7}  ")
+  status_message.problem(state, state.status and (recovery_msg .. "  \u{00B7}  " .. state.status) or recovery_msg)
 end
 
 local import_job
 local function do_import(paths, category, progress_view, pin_after)
   if not paths or #paths == 0 then return end
   if import_job then
-    state.status = "Sounds are still being added. Wait for this import to finish, then add more."
+    status_message.problem(state, "Sounds are still being added. Wait for this import to finish, then add more.")
     return
   end
-  local ps = state.pins
-  local pin_data, pin_dir = ps and ps.data, ps and ps.dir
+  local pin_target = pin_after and pins_service.pin_target(state)
   local first_pin
   import_job = service.start_import(state, paths, category, {
-    valid = pin_after and function()
-      return state.pins == ps and ps.data == pin_data and ps.dir == pin_dir
-        and not pins_service.can_pin(state)
+    valid = pin_target and function()
+      return pin_target() and not pins_service.can_pin(state)
     end or nil,
     on_sound = pin_after and function(sound)
       local ok, message, pid = pins_service.pin_sound(state, sound, function(src, dest)
@@ -1481,13 +1664,66 @@ local function do_import(paths, category, progress_view, pin_after)
       if pid and not first_pin then
         first_pin = pid
         select_sound(pid, true)
-        walkthrough.event(state.walkthrough, "sound_pinned")
       end
     end or nil,
   })
   import_job.pin_errors = {}
   import_job.progress_view = progress_view or "browse"
-  state.status = "Adding sounds…"
+  status_message.progress(state, "Adding sounds…")
+end
+
+-- Pinning Library sounds copies their audio, so it runs in the import's slot:
+-- one background job at a time, paced per update, cancelled at exit.
+local function start_pinning(sounds, progress_view)
+  if #sounds == 0 then return end
+  if import_job then
+    status_message.problem(state, "Sounds are still being added. Wait for this to finish, then pin more.")
+    return
+  end
+  local selected = false
+  import_job = pins_service.start_pinning(state, sounds, function(pid, added)
+    if added then analysis_service.added(state, find_sound(pid), progress_view) end
+    if not selected then
+      selected = true
+      -- Adding or pinning never starts playback. Auto-audition remains a
+      -- browser-click preference, not an import side effect.
+      select_sound(pid, true)
+      walkthrough.event(state.walkthrough, "sound_pinned")
+    end
+  end)
+  status_message.progress(state, "Pinning sounds…")
+end
+
+-- One summary for a pinning job. A single sound keeps its own message; a
+-- batch counts its results and lists every failure in one dialog.
+local function report_pinning(job)
+  local sum = job.summary
+  if job.error then
+    status_message.problem(state, "Pinning stopped before finishing.")
+    reaper_api.message(product_error.with_details(state.status, job.error), "yb-Reference · Pin To This Project")
+    return
+  end
+  if sum.total == 1 and not job.cancelled then
+    status_message.report(state, #sum.errors == 0, sum.last_message)
+    return
+  end
+  local parts = {}
+  if job.cancelled then parts[#parts + 1] = "Pinning stopped because the project or Library changed." end
+  if sum.pinned > 0 then
+    parts[#parts + 1] = sum.pinned == 1
+      and "1 sound is pinned to this project. Save the project to keep it."
+      or string.format("%d sounds are pinned to this project. Save the project to keep them.", sum.pinned)
+  end
+  if sum.already > 0 then
+    parts[#parts + 1] = string.format("%d %s already pinned.", sum.already, sum.already == 1 and "was" or "were")
+  end
+  if #sum.errors > 0 then
+    parts[#parts + 1] = string.format("%d couldn't be pinned.", #sum.errors)
+  end
+  status_message.report(state, #sum.errors == 0 and not job.cancelled, table.concat(parts, " "))
+  if #sum.errors > 0 then
+    reaper_api.message(state.status .. "\n\n" .. table.concat(sum.errors, "\n\n"), "yb-Reference · Pin To This Project")
+  end
 end
 
 local function step_import()
@@ -1500,40 +1736,130 @@ local function step_import()
   end
   local job, sum = import_job, import_job.summary
   if not job.done then
-    state.status = string.format("Adding sounds… %d of %d", sum.current or 0, sum.total or 0)
+    status_message.progress(state, string.format(job.kind == "pin" and "Pinning sounds… %d of %d" or "Adding sounds… %d of %d",
+      sum.current or 0, sum.total or 0))
     return
   end
   import_job = nil
+  if job.kind == "pin" then return report_pinning(job) end
   refresh_view()
-  -- Only a real addition advances the walkthrough; duplicates do not.
   local added = sum.added > 0
-  if added then
-    walkthrough.event(state.walkthrough, "files_added")
-  end
   analysis_service.library_changed(state, added and job.progress_view or nil)
   if job.error then
-    state.status = "Adding sounds stopped before finishing. Check the Library before trying again."
+    -- Usually a save that failed after a file was added in memory.
+    save_retry.mark_unsaved(library_saves)
+    status_message.problem(state, "Adding sounds stopped before finishing. Check the Library before trying again.")
     reaper_api.message(
       product_error.with_details(
         state.status, job.error) ..
-      "\n\nyb-Reference will try to save everything again when you make another change.",
+      "\n\nyb-Reference will keep trying to save everything.",
       "yb-Reference · Add Sounds")
     return
   end
-  state.status = summarize(sum)
-  if #job.pin_errors > 0 then state.status = state.status .. " · " .. #job.pin_errors .. " couldn't be pinned" end
+  local status, detail = import_summary.describe(sum)
+  if #job.pin_errors > 0 then status = status .. " · " .. #job.pin_errors .. " couldn't be pinned" end
   if job.cancelled then
-    state.status = "Adding sounds stopped because the destination changed. " .. state.status
+    status = "Adding sounds stopped because the destination changed. " .. status
   end
-  -- Skips/errors are real problems the user should see spelled out — surface them
-  -- in a dialog (duplicates are benign and stay in the status line only).
-  local detail = {}
-  for _, d in ipairs(sum.skipped) do detail[#detail + 1] = d end
-  for _, e in ipairs(sum.errors) do detail[#detail + 1] = e end
+  -- Only audio problems or a wholly unsupported selection need a dialog.
   for _, e in ipairs(job.pin_errors) do detail[#detail + 1] = e end
+  status_message.report(state,
+    (sum.added > 0 or #sum.duplicates > 0) and #detail == 0 and not job.cancelled, status)
   if #detail > 0 then
     reaper_api.message(state.status .. "\n\n" .. table.concat(detail, "\n"), "yb-Reference · Add Sounds")
   end
+end
+
+--------------------------------------------------------------- reviewing leftover files
+
+local LEFTOVER_PREVIEW_BLOCKED = "Reference mode is playing. Stop the Reaper timeline to preview here."
+
+local function find_leftover(name)
+  for _, e in ipairs(state.leftovers and state.leftovers.entries or {}) do
+    if e.name == name then return e end
+  end
+  return nil
+end
+
+-- Play buttons in the panel are one-shot: a second click on the playing file
+-- stops it. Whatever else was playing is paused, as the Reference Picker does.
+local function audition_leftover(name)
+  local e = find_leftover(name)
+  if not e then return end
+  local live = state.preview
+  if live.playing and live.slot == "leftover" and live.sound_id == e.key then
+    holders.stop_audio(state)
+    return
+  end
+  if state.reference.active then
+    status_message.info(state, LEFTOVER_PREVIEW_BLOCKED)
+    return
+  end
+  if live.playing and live.slot ~= "leftover" then
+    holders.pause_playback(state, live.slot, live.sound_id)
+  end
+  playback.play({ id = e.key, name = e.name, filename = e.name, channels = e.channels },
+    0, "leftover", false)
+end
+
+local function chosen_leftovers(names)
+  local wanted = {}
+  for _, n in ipairs(names or {}) do wanted[n] = true end
+  local out = {}
+  for _, e in ipairs(state.leftovers and state.leftovers.entries or {}) do
+    if wanted[e.name] then out[#out + 1] = e end
+  end
+  return out
+end
+
+-- Each file that couldn't be moved, with the reason, for the dialog.
+local function failure_lines(failed)
+  local lines = {}
+  for i, f in ipairs(failed) do lines[i] = f.name .. ": " .. tostring(f.why) end
+  return table.concat(lines, "\n\n")
+end
+
+-- Both actions reach here through leftover_wait, which has already waited for
+-- the panel's preview to let go of its file.
+local function leftovers_blocked()
+  if import_job then
+    status_message.problem(state, "Sounds are still being added. Wait for this import to finish, then try again.")
+    return true
+  end
+  return false
+end
+
+local function add_leftovers(names)
+  if leftovers_blocked() then return end
+  local result = leftover_service.add(state, chosen_leftovers(names))
+  if result.save_error then
+    local text = product_error.with_details(
+      "The files weren't added because the Library file wouldn't save. Nothing was changed.", result.save_error)
+    status_message.problem(state, text)
+    reaper_api.message(text, "yb-Reference · Add to Library")
+  else
+    if #result.added > 0 then
+      refresh_view()
+      analysis_service.library_changed(state, "browse")
+    end
+    status_message.report(state, #result.failed == 0 and (#result.added + result.duplicates) > 0,
+      leftovers.add_result({ added = #result.added, duplicates = result.duplicates,
+        unplayable = result.unplayable, channels = result.channels, failed = #result.failed }))
+    if #result.failed > 0 then
+      reaper_api.message(state.status .. "\n\n" .. failure_lines(result.failed), "yb-Reference · Add to Library")
+    end
+  end
+  set_leftovers((service.check_files(state)))
+end
+
+local function trash_leftovers(names)
+  if leftovers_blocked() then return end
+  local moved, failed = leftover_service.move_to_trash(state, chosen_leftovers(names))
+  status_message.report(state, #failed == 0, leftovers.trash_result(#moved, #failed))
+  if #failed > 0 then
+    reaper_api.message(state.status .. "\n\n" .. failure_lines(failed), "yb-Reference · Move to Trash")
+  end
+  set_leftovers((service.check_files(state)))
 end
 
 -- Run a library-changing category op; on success save + refresh, on failure show
@@ -1563,7 +1889,7 @@ end
 -- copies sounds, and the current library stays on disk.
 local function switch_library(new_dir)
   if import_job then
-    state.status = "Sounds are still being added. Wait for this import to finish, then change Library folders."
+    status_message.problem(state, "Sounds are still being added. Wait for this import to finish, then change Library folders.")
     return
   end
   -- Trailing separators would make the same folder look like a different one
@@ -1571,8 +1897,8 @@ local function switch_library(new_dir)
   new_dir = new_dir:gsub("[\\/]+$", "")
   if new_dir:match("^%a:$") then new_dir = new_dir .. SEP end
   if new_dir == "" then return end
-  if new_dir == state.library_dir then
-    state.status = "You're already using that Library folder."
+  if require("core.folder_path").same(new_dir, state.library_dir) then
+    status_message.info(state, "You're already using that Library folder.")
     return
   end
 
@@ -1663,14 +1989,16 @@ local function switch_library(new_dir)
   if state.pins then pins_service.rebuild_markers(state) end
 
   local n = #state.library.sounds
-  state.status = string.format("Now using the Library in %s. %d sound%s loaded.",
+  local text = string.format("Now using the Library in %s. %d sound%s loaded.",
     new_dir, n, n == 1 and "" or "s")
-  local _, now_missing = service.check_files(state)
+  local now_orphans, now_missing = service.check_files(state)
+  set_leftovers(now_orphans)
   if #now_missing == 1 then
-    state.status = state.status .. " One sound has a missing audio file."
+    text = text .. " One sound has a missing audio file."
   elseif #now_missing > 1 then
-    state.status = state.status .. string.format(" %d sounds have missing audio files.", #now_missing)
+    text = text .. string.format(" %d sounds have missing audio files.", #now_missing)
   end
+  status_message.report(state, #now_missing == 0, text)
 end
 
 local library_picker_pending = false
@@ -1712,10 +2040,14 @@ end
 -- once. Closing the window stops only what the Library itself started —
 -- holders.stop_browse_audition already refuses to touch a main-slot
 -- reference, so this never needs to ask which is which.
-local function close_browser()
-  state.browser_open = false
+local function close_browser(tour)
+  set_browser_open(false, tour)
   holders.stop_browse_audition(state)
 end
+
+-- Whether the Library was open when a replayed tutorial began, so it is put
+-- back when the tutorial ends. nil outside a replay.
+local library_before_tour = nil
 
 local function replace_monitor_filter(next_value, save)
   next_value.system = state.monitor_filter.system
@@ -1723,13 +2055,14 @@ local function replace_monitor_filter(next_value, save)
   state.monitor_filter = next_value
   if save then
     local ok, err = spectrum.save_filter(next_value)
-    if not ok then state.status = err end
+    if not ok then status_message.problem(state, err) end
   end
 end
 
 local actions = require("core.actions")
 local hotkeys = require("hotkeys")
 local settings = require("ui.settings")
+local leftover_panel = require("ui.leftover_panel")
 local function handle_action(a)
   if a.type == "pick" then
     do_import(reaper_api.pick_files(), a.category)
@@ -1771,7 +2104,7 @@ local function handle_action(a)
       end
       state.drag = { sound_id = a.id, sound_ids = ids, name = drag_name,
         channels = drag_channels,
-        proj = state.pins and state.pins.proj,
+        pins_session = state.pins and state.pins.session,
         pitch = ((a.target == "browse" and a.id == state.browse_id)
           and state.pitch.browse)
           or ((a.target ~= "browse" and a.id == state.selected_id)
@@ -1781,9 +2114,28 @@ local function handle_action(a)
   elseif a.type == "drop_sound" then
     drop_sound()
   elseif a.type == "toggle_browser" then
-    if state.browser_open then close_browser() else state.browser_open = true end
+    if state.browser_open then close_browser() else set_browser_open(true) end
   elseif a.type == "open_browser" then
-    state.browser_open = true
+    set_browser_open(true)
+  elseif a.type == "set_library_placement" then
+    if reaper_api.set_library_placement(a.placement) then
+      state.library_placement = a.placement
+      set_browser_open(true)
+    end
+  elseif a.type == "set_reading_extra" then
+    if reaper_api.set_reading_extra(a.extra) then state.reading_extra = a.extra end
+  elseif a.type == "set_stacked_card_height" then
+    -- The card's dragged height above the docked Library at 100% UI Size,
+    -- reported on release; no height is the reset back to its natural height.
+    local h = a.height and math.floor(a.height + 0.5) or nil
+    if h ~= state.stacked_card_height then
+      state.stacked_card_height = h
+      reaper_api.set_stacked_card_height(h)
+    end
+  elseif a.type == "set_library_panel_width" then
+    if reaper_api.set_library_panel_width(a.width) then
+      state.library_panel_width = reaper_api.get_library_panel_width()
+    end
   elseif a.type == "open_feedback" then
     settings.open(state, { section = "feedback" })
   elseif a.type == "close_browser" then
@@ -1806,21 +2158,38 @@ local function handle_action(a)
       app.request_undock()
     end
   elseif a.type == "browser_geom" then
-    -- Only ever sent when it actually changed (see app.lua) — write straight
-    -- through, no coalescing needed here.
+    -- Only ever sent when it actually changed (see app.lua); the live copy
+    -- updates now, the saved copy once the window stops moving.
     state.browser_geom = { x = a.x, y = a.y, w = a.w, h = a.h }
-    reaper_api.set_browser_geom(a.x, a.y, a.w, a.h)
+    browser_geom_save:request(reaper.time_precise(), state.browser_geom)
+  elseif a.type == "dismiss_status" then
+    status_message.close(state, a.notice)
+  elseif a.type == "reopen_leftovers" then
+    -- From Settings: bring the notice back even if it was closed, and open
+    -- its panel in whichever window shows it first. Settings closes because
+    -- it opens over the middle of REAPER and would hide the panel.
+    status_message.reopen_notice(state)
+    leftover_panel.request()
+    settings.close()
+  elseif a.type == "audition_leftover" then
+    audition_leftover(a.name)
+  elseif a.type == "leftovers_closed" then
+    leftover_wait.stop_audition(state)
+  elseif a.type == "add_leftovers" or a.type == "trash_leftovers" then
+    local ok, message = leftover_wait.request(state,
+      a.type == "add_leftovers" and "add" or "trash", a.names)
+    if not ok then status_message.problem(state, message) end
   elseif a.type == "reveal_library" then
     -- Point at the library file so the folder opens with something highlighted; if
     -- the tool can't open a file browser here, say so instead of doing nothing.
     if not reaper_api.reveal_file(state.library_path) then
-      state.status = "Couldn't open the Library folder automatically. It's here:  " .. state.library_dir
+      status_message.problem(state, "Couldn't open the Library folder automatically. It's here:  " .. state.library_dir)
     end
   elseif a.type == "delete_sound" or a.type == "delete_sounds" then
     local ok, message = library_delete.request(state,
       a.type == "delete_sound" and { a.id } or a.ids)
     if not ok then
-      state.status = message
+      status_message.problem(state, message)
       reaper_api.message(message, "yb-Reference · Delete Sounds")
     end
   elseif a.type == "set_loud_unit" then
@@ -1859,8 +2228,8 @@ local function handle_action(a)
   elseif a.type == "reorder_pin" then
     -- The stored order IS the order the arrows step through, so this is real
     -- project data: the service persists it and rolls back if it can't.
-    local _, msg = pins_service.reorder_pin(state, a.id, a.to)
-    if msg then state.status = msg end
+    local ok, msg = pins_service.reorder_pin(state, a.id, a.to)
+    if msg then status_message.report(state, ok, msg) end
   elseif a.type == "open_refs_folder" then
     -- Settings' Project References row (the bar's folder square until
     -- 2026-08-10). The folder is created if this project has never had
@@ -1868,11 +2237,11 @@ local function handle_action(a)
     -- look like the button did nothing.
     local dir = state.pins and state.pins.dir
     if not dir then
-      state.status = "This project hasn't been saved yet, so it has no References folder."
+      status_message.problem(state, "This project hasn't been saved yet, so it has no References folder.")
     else
       reaper_api.ensure_dir(dir)
       if not reaper_api.open_folder(dir) then
-        state.status = "Couldn't open the folder automatically. It's here:  " .. dir
+        status_message.problem(state, "Couldn't open the folder automatically. It's here:  " .. dir)
       end
     end
   elseif a.type == "set_browser_wave_h" then
@@ -1886,7 +2255,7 @@ local function handle_action(a)
     end
   elseif a.type == "layout_prototype" then
     local ok, err = panel_layout_settings.apply(state, a)
-    if err then state.status = err end
+    if err then status_message.problem(state, err) end
     if ok and a.operation and a.operation.type == "edit" and a.operation.value then
       settings.close()
     end
@@ -1909,14 +2278,32 @@ local function handle_action(a)
         if ok then state.reference_panels_error = nil end
       end
     end
-    if err then state.status = err end
+    if err then status_message.problem(state, err) end
+  elseif a.type == "analysis_channels_open" then
+    settings.open(state, {section="audio"})
+  elseif a.type == 'meter_track_cleanup_show' then
+    if not meter_track_cleanup:show_track(state.meter_track_cleanup_problem) then
+      reaper_api.message('That old meter connection is no longer available.','Old Meter Connection')
+    end
+  elseif a.type == 'analysis_audio_preferences' then
+    local ok,reason=reaper_api.open_audio_preferences()
+    if not ok then status_message.problem(state, reason) end
+  elseif a.type == "analysis_channels_setting" or a.type == "analysis_channels_reset" then
+    local ok, err = channel_settings:apply(state, a)
+    if not ok then status_message.problem(state, err)
+    elseif a.key~='save_retry' then
+      state.surround_channels = nil
+      stereo_core.reset(state.stereo)
+      state.stereo.raster = nil
+    end
   elseif a.type == "stereo_clear_display" then
+    state.surround_channels = nil
     stereo_core.clear_display(state.stereo)
     state.stereo.raster = nil
   elseif a.type == "stereo_setting" or a.type == "stereo_reset_settings"
       or a.type == "stereo_reset_all_settings" or a.type == "stereo_freeze" then
     local ok, err = stereo_settings.apply(state, a)
-    if not ok then state.status = err end
+    if not ok then status_message.problem(state, err) end
   elseif a.type == "stereo_view" then
     if reaper_api.set_stereo_view(a.value) then
       state.stereo_view = a.value
@@ -1928,14 +2315,14 @@ local function handle_action(a)
         if prefs then
           state.reference_panels = prefs
           local ok, err = reference_panels.save(prefs)
-          if not ok then state.status = err end
+          if not ok then status_message.problem(state, err) end
         end
       end
     end
   elseif a.type == "preview_pin" then
-    local ok, message = picker_preview.play(state, a.id, a.proj, playback.play)
+    local ok, message = picker_preview.play(state, a.id, a.session, playback.play)
     if not ok and message then
-      state.status = message
+      status_message.problem(state, message)
       -- The Library's status line may be hidden while the picker is in use.
       reaper_api.message(message, "yb-Reference · Preview Unavailable")
     end
@@ -1953,6 +2340,10 @@ local function handle_action(a)
   elseif a.type == "audition_browse_sound" then
     -- The browser selects on mouse-down, then sends this only when the gesture
     -- finishes as a click. A drag never reaches this path.
+    if a.selection and state.browse_id == a.id then
+      state.browse_ids = a.selection.ids
+      state.browse_anchor_id = a.selection.anchor
+    end
     if state.browse_id == a.id then playback.audition_browse() end
   elseif a.type == "show_in_library" then
     show_in_library(a.id)
@@ -1967,7 +2358,7 @@ local function handle_action(a)
   elseif a.type == "toggle_auto" then
     state.auto_audition = not state.auto_audition
   elseif a.type == "toggle_mono" then
-    playback.toggle_mono()
+    playback.toggle_mono(a.target == "browse" and "browse" or "main")
   elseif a.type == "set_pitch" then
     playback.set_pitch(a.target == "browse" and "browse" or "main", a.value)
   elseif a.type == "set_pitch_unit" then
@@ -1978,7 +2369,7 @@ local function handle_action(a)
       state.monitor_filter.on = not state.monitor_filter.on
     else
       state.monitor_filter.on = false
-      state.status = state.monitor_filter.system.message
+      status_message.problem(state, state.monitor_filter.system.message)
     end
   elseif a.type == "set_monitor_filter_boundary" then
     if not state.monitor_filter.system.available then return end
@@ -2011,26 +2402,53 @@ local function handle_action(a)
   elseif a.type == "set_monitor_filter_range" then
     if not state.monitor_filter.system.available then return end
     local value, err = monitor_filter_core.set_range(state.monitor_filter, a.low_hz, a.high_hz)
-    if value then replace_monitor_filter(value, true) else state.status = err end
+    if value then replace_monitor_filter(value, true) else status_message.problem(state, err) end
+  elseif a.type == "save_and_apply_filter_range" then
+    local current = state.monitor_filter
+    local system = current.system
+    if not system.rejected_range then return end
+    local value, err
+    local preset_id = system.rejected_range.preset_id
+    if preset_id then
+      value, err = monitor_filter_core.edit_preset(current, preset_id, a.low_hz, a.high_hz)
+      if value then value = monitor_filter_core.apply_preset(value, preset_id) end
+    else
+      value, err = monitor_filter_core.set_range(current, a.low_hz, a.high_hz)
+    end
+    if not system.available then
+      err = "The Listening Filter is unavailable."
+    elseif value and value.high_hz > (system.max_filter_hz or monitor_filter_core.MAX_HZ) then
+      err = system.range_error
+    elseif value then
+      value.preference_error = current.preference_error
+      local saved
+      saved, err = spectrum.save_filter(value)
+      if saved then replace_monitor_filter(value, false) end
+    end
+    state.monitor_filter.range_save_error = err
   elseif a.type == "edit_monitor_filter_preset" or a.type == "restore_monitor_filter_preset" then
     local value, err
     if a.type == "edit_monitor_filter_preset" then
       value, err = monitor_filter_core.edit_preset(state.monitor_filter, a.id, a.low_hz, a.high_hz)
     else value, err = monitor_filter_core.restore_preset(state.monitor_filter, a.id) end
-    if value then replace_monitor_filter(value, true) else state.status = err end
+    if value then replace_monitor_filter(value, true) else status_message.problem(state, err) end
   elseif a.type == 'meter_panel_swap' or a.type == 'meter_panel_split' then
     local ok, err = panel_layout_settings.apply(state, a)
-    if not ok and err then state.status = err end
+    if not ok and err then status_message.problem(state, err) end
   elseif a.type == 'meter_set_preference' then
     local ok, err = metering.set_preference(state.metering, a.key, a.value, a.commit)
-    if not ok and err then state.status = err end
+    if not ok and err then status_message.problem(state, err) end
   elseif a.type == 'meter_reset_page' then
     local ok, err = metering.reset_page(state.metering, a.page)
-    if not ok and err then state.status = err end
+    if not ok and err then status_message.problem(state, err) end
   elseif a.type == 'meter_reset' or a.type == 'meter_reconnect' then
+    if not analysis_ready() then return end
     local run = a.type == 'meter_reset' and metering.reset or metering.reconnect
-    local ok, err = run(state)
-    if not ok and err then state.status = err end
+    -- The panel keeps the reason too, but its own status is rewritten on the
+    -- next update, so a failed button press also gets a card the user can read.
+    local ok, reason = run(state)
+    local problem = require("core.meter_status").action_problem(ok, reason)
+    if problem then status_message.problem(state, problem) end
   elseif a.type == 'meter_clear_warnings' then
     metering.clear_warnings(state)
   elseif a.type == 'meter_save_display_preset' or a.type == 'meter_load_display_preset'
@@ -2039,14 +2457,15 @@ local function handle_action(a)
       or a.type == 'meter_load_display_preset' and metering.load_display_preset
       or metering.reset_settings
     local ok, err = run(state.metering)
-    if not ok and err then state.status = err end
+    if not ok and err and a.type ~= 'meter_reset_settings' then status_message.problem(state, err) end
   elseif a.type == "set_spectrum_preference" then
     local ok, err = spectrum_core.set_preference(state.spectrum, a.key, a.value)
     if ok and a.commit ~= false then ok, err = spectrum.save(state.spectrum) end
-    if not ok then state.status = err end
+    if not ok then status_message.problem(state, err) end
   elseif a.type == "reset_spectrum_history" then
     spectrum_core.reset_history(state.spectrum)
   elseif a.type == "restore_monitor_filter" or a.type == "enable_monitor_filter" then
+    if not analysis_ready() then return end
     state.monitor_filter.on, state.monitor_filter.selected_id = false, nil
     local recover = a.type == "enable_monitor_filter" and monitoring_filter.enable or monitoring_filter.restore
     if recover() then
@@ -2079,7 +2498,7 @@ local function handle_action(a)
           -- that). Hence the live volume below reads the RECORD, not a.db: the
           -- fader and what you hear have to end up agreeing either way.
           local ok, msg = pins_service.commit_trim(state, state.selected)
-          if not ok then state.status = msg end
+          if not ok then status_message.problem(state, msg) end
         else
           commit()
         end
@@ -2098,9 +2517,9 @@ local function handle_action(a)
     -- When the fader's range clamped it, the full match was NOT set — say so
     -- (fail loud, never silent).
     if a.limited == "range" then
-      state.status = string.format(
+      status_message.info(state, string.format(
         "Normalized to +%g dB, the trim fader's maximum. Reaching the target needs more boost.",
-        match.TRIM_MAX)
+        match.TRIM_MAX))
     end
   -- ("match_all_pins" was handled here for a few hours on 2026-08-06 — built,
   -- Codex-hardened with a rollback, then removed the same day at the user's
@@ -2113,7 +2532,12 @@ local function handle_action(a)
     -- pin-vs-library split. Clamping lives in core/span.lua; the duration the
     -- handles move against is the record's own (what the picture draws by).
     local sel = state.selected
-    if sel and type(sel.duration) == "number" and sel.duration > 0 then
+    if a.id and (not sel or a.id ~= sel.id) then
+      -- The selection moved on, or was cleared, while a handle was held: the
+      -- edit is already in memory, so a Library save writes it. A project pin
+      -- is saved by its own commit, which needs the pin selected.
+      if a.commit and not is_pin_id(a.id) then commit() end
+    elseif sel and type(sel.duration) == "number" and sel.duration > 0 then
       local which = (a.which == "start") and "start" or "finish"
       if a.reset then
         span.set(sel, which, nil, sel.duration)
@@ -2125,7 +2549,7 @@ local function handle_action(a)
           -- Project data like the trim, with the same deal on a refused store:
           -- the handles go back to what the project holds (pins_service.commit_span).
           local ok, msg = pins_service.commit_span(state, sel)
-          if not ok then state.status = msg end
+          if not ok then status_message.problem(state, msg) end
         else
           commit()
         end
@@ -2171,7 +2595,7 @@ local function handle_action(a)
     state.drag = nil
     local refusal = pins_service.can_pin(state)
     if refusal then
-      state.status = refusal
+      status_message.problem(state, refusal)
       -- The Library info row can be showing the selected sound's facts, so a
       -- status-only refusal is easy to miss. An unsaved project needs one clear
       -- recovery action at the moment the user tries to pin.
@@ -2179,22 +2603,12 @@ local function handle_action(a)
         reaper_api.message(refusal, "yb-Reference · Save Project First")
       end
     else
-      local first_pin
+      local sounds = {}
       for _, id in ipairs(a.ids or { a.id }) do
         local s = find_sound(id)
-        if s then
-          local _, msg, pid = pins_service.pin_sound(state, s)
-          state.status = msg
-          if pid then analysis_service.added(state, find_sound(pid), a.progress_view or "browse") end
-          first_pin = first_pin or pid
-        end
+        if s then sounds[#sounds + 1] = s end
       end
-      if first_pin then
-        -- Adding or pinning never starts playback. Auto-audition remains a
-        -- browser-click preference, not an import side effect.
-        select_sound(first_pin, true)
-        walkthrough.event(state.walkthrough, "sound_pinned")
-      end
+      start_pinning(sounds, a.progress_view or "browse")
     end
   elseif a.type == "unpin" then
     unpin_sound(a.id)
@@ -2203,11 +2617,11 @@ local function handle_action(a)
   elseif a.type == "reset_pins" then
     -- The explicit escape from damaged pin data — only ever offered by the UI
     -- when a load error is standing.
-    local _, msg = pins_service.reset_pins(state)
-    state.status = msg
+    local ok, msg = pins_service.reset_pins(state)
+    status_message.report(state, ok, msg)
   elseif a.type == "set_pin_label" then
-    local _, msg = pins_service.set_pin_label(state, a.id, a.label)
-    state.status = msg
+    local ok, msg = pins_service.set_pin_label(state, a.id, a.label)
+    status_message.report(state, ok, msg)
   elseif a.type == "refile_sounds" or a.type == "refile_sound" then
     -- A sound dragged from the table dropped on a category (or Uncategorised):
     -- re-file it there. Pins aren't library records, so they have no category
@@ -2236,8 +2650,8 @@ local function handle_action(a)
         refresh_view()
         if saved then
           local c = a.category and categories.get(state.library, a.category)
-          state.status = string.format("%d sound%s filed under %s.", changed,
-            changed == 1 and "" or "s", c and c.name or "Uncategorised")
+          status_message.info(state, string.format("%d sound%s filed under %s.", changed,
+            changed == 1 and "" or "s", c and c.name or "Uncategorised"))
         end
       end
     end
@@ -2250,7 +2664,7 @@ local function handle_action(a)
     -- existing Library duplicate, is then pinned in the same background job.
     local refusal = pins_service.can_pin(state)
     if refusal then
-      state.status = refusal .. " Nothing was imported."
+      status_message.problem(state, refusal .. " Nothing was imported.")
       if not state.pins.load_error and not state.pins.dir then
         reaper_api.message(state.status, "yb-Reference · Save Project First")
       end
@@ -2267,18 +2681,10 @@ local function handle_action(a)
     elseif a.ev == "next" then
       walkthrough.next(state.walkthrough)
     elseif a.ev == "show" then
-      walkthrough.begin_welcome(state.walkthrough)
-      close_browser()
+      walkthrough.begin_stops(state.walkthrough)
+      library_before_tour = state.browser_open
+      close_browser(true)
       settings.close()
-    else
-      -- Anything else is a REAL-ACTION report the card noticed itself (today:
-      -- the match window standing open) — it goes to the state machine as the
-      -- event it is. Missing this door hung the tour on the match stop: the
-      -- card reported "match_opened" every frame, nothing listened, and since
-      -- the card returns BEFORE drawing when it reports, the tour looked like
-      -- it had vanished while the ring stayed on the button (user, live
-      -- 2026-08-10).
-      walkthrough.event(state.walkthrough, a.ev)
     end
   elseif a.type == "whatsnew_closed" then
     -- The card was dismissed. Only view cleanup — the seen-mark was already
@@ -2305,12 +2711,9 @@ local function handle_action(a)
     local snapshot, message = update(a.id, a.index, a.expected_description)
     state.hotkeys = snapshot
     if message then
-      state.status = message
+      status_message.problem(state, message)
       reaper_api.message(message, "yb-Reference · Hotkeys")
     end
-  elseif a.type == "set_open_library_on_startup" then
-    state.open_library_on_startup = a.enabled == true
-    reaper_api.set_open_library_on_startup(state.open_library_on_startup)
   elseif a.type == "preview_ui_scale" then
     -- Slider movement previews on the next complete frame. Persistence waits
     -- for release so one drag does not write the same preference repeatedly.
@@ -2328,8 +2731,14 @@ local function handle_action(a)
   elseif a.type == "set_accent_colour" then
     state.accent_colour = theme.set_accent(a.colour, true, reaper.ImGui_GetTime(ctx))
     reaper_api.set_accent_colour(state.accent_colour)
+  elseif a.type == "set_update_popup" then
+    state.update_popup.enabled = a.enabled == true
+    reaper_api.set_update_popup(state.update_popup.enabled)
+  elseif a.type == "skip_update" then
+    state.update_popup.skipped = a.version
+    reaper_api.set_update_skipped(a.version)
   elseif a.type == "start_update" then
-    -- Settings' Update-now button. The updater owns everything from here:
+    -- Update Now, in Settings or the update popup. The updater owns everything from here:
     -- the single-repo sync (ReaPack's Progress window appears), the verify,
     -- the fallback — Settings' UPDATES section reads the outcome from
     -- state.update. Refusals (pinned, not ReaPack-owned) surface there too.
@@ -2375,16 +2784,20 @@ local function handle_action(a)
     try(function() categories.reorder(state.library, a.id, a.to) end, refresh_view,
       "yb-Reference · Reorder Category")
   elseif a.type == "import_new_category" then
-    -- Files dropped on "+ New category" (2026-08-01): create the category,
-    -- then run the normal import into it. Named after the folder the files
-    -- came from — the closest thing a drop carries to an intended name; a
-    -- rename is one right-click away. `try` saves the new category even if
-    -- the import then fails; do_import saves and refreshes on its own.
-    local name = (a.paths[1] or ""):match("([^/\\]+)[/\\][^/\\]*$") or "New category"
-    local cat
-    try(function() cat = categories.add(state.library, name) end, refresh_view,
-      "yb-Reference · Add Category")
-    if cat then do_import(a.paths, cat.id) end
+    -- Files dropped on "+ New Category": create the category, then run the
+    -- normal import into it. Named after the folder the files came from; a
+    -- rename is one right-click away. Nothing is created unless an import will
+    -- really start. `try` saves the new category even if the import then
+    -- fails; do_import saves and refreshes on its own.
+    local plan, refusal = new_category_drop.plan(a.paths, reaper_api.is_audio_file, import_job ~= nil)
+    if not plan then
+      status_message.problem(state, refusal)
+    else
+      local cat
+      try(function() cat = categories.add(state.library, plan.name) end, refresh_view,
+        "yb-Reference · Add Category")
+      if cat then do_import(a.paths, cat.id) end
+    end
   elseif a.type == "rename_category" then
     try(function() categories.rename(state.library, a.id, a.name) end, nil, "yb-Reference · Rename Category")
   elseif a.type == "remove_category" then
@@ -2402,35 +2815,65 @@ local function handle_action(a)
   end
 end
 
--- Best-effort cleanup when REAPER unloads the script: stop playback and un-latch
--- reference mode so the master isn't left muted. Best-effort is the operative word —
--- this never runs on a crash, which is why reference mode also keeps a recovery note
--- on disk (lib/reference.lua). That note, not this, is the real safety net.
--- reference.cleanup() goes FIRST: it is the only one whose failure to run harms the
--- user (a master left muted). If a later destructor throws, the mute is already back.
--- That inverted order is why shutdown is written out by hand instead of going
--- through holders.release — and why a new holder owning a REAPER resource has to be
--- added here (and to the window-closed branch at the end of the loop) as well.
+-- Best-effort cleanup when the script ends: stop playback and un-latch reference
+-- mode so the master isn't left muted. Best-effort is the operative word — this
+-- never runs on a crash, which is why reference mode also keeps a recovery note on
+-- disk (lib/reference.lua). That note, not this, is the real safety net.
+-- One function serves every way the script ends: the window closing (the loop's
+-- last frame) and REAPER's atexit (quit, running the action again, a Lua error, a
+-- lost graphics context). It runs once; the atexit after a window close finds it
+-- done. reference.cleanup() goes FIRST: it is the only step whose failure to run
+-- harms the user (a master left muted). The temporary drag item comes next because
+-- it sits inside the user's project. A drag in flight leaves no item and no label
+-- behind on any of those exits; a REAPER hard crash cannot run this, a rare autosave
+-- during an active drag may retain the item, and there is no startup deletion
+-- because it could remove later user work. Steps that were always allowed to fail
+-- quietly stay quiet; any other failure is raised after every step has run. That
+-- inverted order is why shutdown is written out by hand instead of going through
+-- holders.release — and why a new holder owning a REAPER resource is added here.
+local shut_down = false
+local function shutdown(window_closed)
+  if shut_down then return end
+  shut_down = true
+  local settled = true
+  run_exit_steps({
+    function() settled = reference.cleanup() end,
+    dragout.hide_ghost,
+    function()
+      if analysis_helpers_started and meter_track_cleanup:input_ready() then
+        pcall(monitoring_filter.shutdown)
+      end
+    end,
+    function() pcall(panel_drag_cursor.shutdown) end,
+    function() pcall(metering.shutdown) end,
+    function() pcall(hotkeys.stop) end,
+    function() if import_job then import_job:cancel() end end,
+    preview.stop, peaks.cancel, wave_detail.close, loudness.cancel,
+    reaper_api.cancel_folder_picker,
+    dragout.hide_tag,
+    function() reaper_api.mark_action_running(CMD_ID, false) end,
+    function() stereo_settings.flush(state, true) end,
+    function() browser_geom_save:flush() end,
+    function()
+      local layout_saved, layout_error = panel_layout_settings.flush(state, true)
+      if not layout_saved then reaper_api.message(layout_error, "yb-Reference · Panel Layout") end
+    end,
+    -- Last chance for a Library change whose save failed earlier in the session.
+    function() pcall(save_before_closing) end,
+    -- The user is watching a window close, so a master the un-latch couldn't
+    -- restore is reported now instead of at the next launch. The journal entry
+    -- and marker stay for that launch to retry either way.
+    function()
+      local outstanding = window_closed and not settled and reference.pending()
+      if outstanding then
+        reaper_api.message(outstanding, "yb-Reference · Reference Mode Needs Attention")
+      end
+    end,
+  })
+end
+
 reaper_api.mark_action_running(CMD_ID, true)
-reaper.atexit(function()
-  reference.cleanup(); pcall(monitoring_filter.shutdown)
-  pcall(panel_drag_cursor.shutdown)
-  pcall(metering.shutdown)
-  pcall(hotkeys.stop)
-  if import_job then import_job:cancel() end
-  preview.stop(); peaks.cancel(); wave_detail.close(); loudness.cancel()
-  reaper_api.cancel_folder_picker()
-  dragout.hide_tag() -- a drag in flight when the script is closed leaves no label behind
-  -- ...and no throwaway item behind either. This runs on every way the script
-  -- ends, including a Lua error. A REAPER hard crash cannot run this cleanup;
-  -- a rare autosave during an active drag may retain the item. There is no
-  -- startup deletion because it could remove later user work.
-  dragout.hide_ghost()
-  reaper_api.mark_action_running(CMD_ID, false)
-  stereo_settings.flush(state, true)
-  local layout_saved, layout_error = panel_layout_settings.flush(state, true)
-  if not layout_saved then reaper_api.message(layout_error, "Panel Layout") end
-end)
+reaper.atexit(function() shutdown(false) end)
 
 state.hotkeys = hotkeys.start(root)
 local hotkeys_refresh_at = 0
@@ -2449,19 +2892,57 @@ local walk_pos_was = nil
 -- REAPER accepts the command but leaves the old loop alive, turn the status
 -- into a manual fallback instead of claiming that reopening is still underway.
 local update_restart_fallback_at = nil
-local monitor_filter_phase_was = state.monitor_filter.system.phase
+-- A settings save that keeps failing retries every frame. Reporting it once per
+-- distinct error keeps the card closable instead of raising it again at once.
+local reported_save_problems = {}
+local function report_save_problem(source, saved, err)
+  if saved then
+    reported_save_problems[source] = nil
+  elseif reported_save_problems[source] ~= err then
+    reported_save_problems[source] = err
+    status_message.problem(state, err)
+  end
+end
 
 local function loop()
+  -- ReaImGui reports renderer failures and can discard the context between
+  -- frames. Stopping here lets the registered exit cleanup restore audio.
+  if not reaper.ImGui_ValidatePtr(ctx, "ImGui_Context*") then return end
+
+  -- Retire old input grants before any shortcut or playback callback can
+  -- publish helper controls. Preview playback itself remains available.
+  state.meter_track_cleanup_problem=meter_track_cleanup:tick()
+  state.analysis_meter_start_error=meter_track_cleanup:input_status()
+  if not state.analysis_meter_start_error then analysis_ready() end
+  if state.meter_track_cleanup_problem then
+    local problem=state.meter_track_cleanup_problem
+    local key=table.concat({tostring(problem.project),problem.reason or '',
+      tostring(problem.track_guid or problem.track_number),tostring(problem.send_number)},'|')
+    if not cleanup_notices[key] then
+      cleanup_notices[key]=true
+      local warning=require('core.analysis_notice').legacy_cleanup(state)
+      reaper_api.message(warning.detail..'\n\nOpen Settings > Audio to show the affected track or master.',warning.title)
+    end
+  end
+
   -- The modern Windows folder dialog runs in a helper process. Polling its tiny
   -- result file keeps REAPER's defer loop alive while the dialog is open.
   poll_library_folder()
+  retry_unsaved_library()
 
   local delete_ids, delete_error = library_delete.tick(state)
   if delete_ids then delete_sounds(delete_ids) end
   if delete_error then
-    state.status = delete_error
+    status_message.problem(state, delete_error)
     reaper_api.message(delete_error, "yb-Reference · Delete Sounds")
   end
+
+  local leftover_job, leftover_error = leftover_wait.tick(state)
+  if leftover_job then
+    if leftover_job.kind == "add" then add_leftovers(leftover_job.names)
+    else trash_leftovers(leftover_job.names) end
+  end
+  if leftover_error then status_message.problem(state, leftover_error) end
 
   playback.refresh_reference()
 
@@ -2496,18 +2977,16 @@ local function loop()
   playback.advance()
 
   -- Playback transitions are settled before requesting a fresh analysis window.
-  local filter_view = spectrum.tick(state)
-  metering.tick(state)
-  local stereo_saved, stereo_save_error = stereo_settings.flush(state)
-  if not stereo_saved then state.status = stereo_save_error end
-  local layout_saved, layout_save_error = panel_layout_settings.flush(state)
-  if not layout_saved then state.status = layout_save_error end
-  if filter_view.phase ~= monitor_filter_phase_was then
-    if filter_view.phase ~= "ready" and filter_view.phase ~= "settling" then
-      state.status = filter_view.message
-    end
-    monitor_filter_phase_was = filter_view.phase
+  channel_settings:tick(state)
+  state.analysis_meter_start_error=meter_track_cleanup:input_status()
+  if not state.analysis_meter_start_error then
+    spectrum.tick(state)
+    metering.tick(state)
   end
+  channel_settings:capture(state)
+  report_save_problem("stereo", stereo_settings.flush(state))
+  browser_geom_save:tick(reaper.time_precise())
+  report_save_problem("layout", panel_layout_settings.flush(state))
 
   wave.step(state, sound_path)
 
@@ -2548,9 +3027,9 @@ local function loop()
     fb_failure_notice = {
       copied = reaper_api.set_clipboard(state.feedback.last_message or "")
     }
-    state.status = "Feedback delivery is unconfirmed. Open Settings \u{2192} Feedback to retry or email your message."
+    status_message.problem(state, "Feedback delivery is unconfirmed. Open Settings \u{2192} Feedback to retry or email your message.")
   elseif state.feedback.phase == "sent" and fb_last_phase ~= "sent" then
-    state.status = "Your feedback was received. Thank you."
+    status_message.info(state, "Your feedback was received. Thank you.")
   end
   fb_last_phase = state.feedback.phase
 
@@ -2574,7 +3053,7 @@ local function loop()
     -- the user switches project tabs must not show — it would be a picture of
     -- audio the release is about to refuse to add.
     local stale_pin = is_pin_id(state.drag.sound_id)
-      and state.drag.proj ~= (state.pins and state.pins.proj)
+      and state.drag.pins_session ~= (state.pins and state.pins.session)
     local gs = (target.over_arrange and not stale_pin)
       and find_sound(state.drag.sound_id) or nil
     -- The top slice of a track means "make a NEW track here" (2026-08-08,
@@ -2658,9 +3137,9 @@ local function loop()
       local cur = walkthrough.current(state.walkthrough)
       if type(cur) == "table" then
         if cur.window ~= "browser" and state.browser_open then
-          close_browser()
+          close_browser(true)
         elseif cur.window == "browser" and not state.browser_open then
-          state.browser_open = true
+          set_browser_open(true, true)
         end
         if cur.window == "settings" then
           settings.open(state, { section = "feedback" })
@@ -2672,6 +3151,12 @@ local function loop()
     end
   else
     walk_pos_was = nil
+    if library_before_tour ~= nil then
+      if library_before_tour ~= state.browser_open then
+        set_browser_open(library_before_tour, true)
+      end
+      library_before_tour = nil
+    end
   end
 
   -- Hand keyboard focus back to REAPER when the frame says the tool has no
@@ -2705,7 +3190,7 @@ local function loop()
   -- line entirely: the zone's own dashed outline and pill already name where the
   -- sound is going, in the place the user is looking.
   local cursor_ok, cursor_error = panel_drag_cursor.update(open and panel_grabbing and not state.drag)
-  if not cursor_ok then state.status = cursor_error end
+  if not cursor_ok then status_message.problem(state, cursor_error) end
   if state.drag then
     reaper_api.show_drag_cursor(state.drag.over_arrange or over_target)
     dragout.show_tag(state.drag.name, not over_target and state.drag.hint or nil)
@@ -2718,21 +3203,10 @@ local function loop()
   end
   if open then
     step_import()
+    step_leftover_check()
     reaper.defer(loop)
   else
-    -- Same order and the same reasoning as the atexit handler above (which is
-    -- also why this isn't a holders.release): the un-mute leads, everything else
-    -- follows.
-    reference.cleanup() -- window closed: never leave the project muted behind us
-    pcall(hotkeys.stop)
-    pcall(monitoring_filter.shutdown) -- return Monitoring FX to exact dry immediately
-    pcall(metering.shutdown)
-    if import_job then import_job:cancel() end
-    preview.stop()      -- then stop any sound still playing
-    peaks.cancel()      -- and free any half-finished waveform build
-    wave_detail.close() -- plus the selected waveform's visible-range reader
-    loudness.cancel()   -- and any half-finished loudness measurement
-    reaper_api.cancel_folder_picker()
+    shutdown(true) -- window closed: never leave the project muted behind us
   end
 end
 

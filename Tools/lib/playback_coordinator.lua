@@ -6,6 +6,7 @@ local holders = require("holders")
 local picker_preview = require("picker_preview")
 local api = require("reaper_api")
 local span = require("core.span")
+local status_message = require("core.status_message")
 local pitch = require("core.pitch")
 
 local coordinator = {}
@@ -16,7 +17,8 @@ local REF_PLAYING_MSG = "Reference mode is playing. Stop the transport to auditi
 function coordinator.new(state, callbacks, startup_alert)
   local playback = {}
   local reference_alerted = startup_alert
-  local recovery, urgent
+  -- outstanding_shown: the warning on screen while recovery is unsettled.
+  local recovery, urgent, recovery_shown, outstanding_shown
 
   function playback.play(s, position, slot, loop, resuming)
     if loop == nil then loop = state.loop end
@@ -30,8 +32,8 @@ function coordinator.new(state, callbacks, startup_alert)
     local ok = preview.play(callbacks.path(s), {
       db = trim_db + state.master_db, loop = loop, position = position,
       pitch = state.pitch[slot] or 0, channels = s.channels,
-      before_start = callbacks.before_start and function()
-        return callbacks.before_start(slot, s.id, resuming == true)
+      before_start = callbacks.before_start and function(evidence)
+        return callbacks.before_start(slot, s.id, resuming == true,evidence)
       end or nil,
     })
     -- Multichannel playback can disable Mono. Length comes from the actual
@@ -50,15 +52,15 @@ function coordinator.new(state, callbacks, startup_alert)
     if not ok then
       local folder = holders.is_pin(s.id)
         and "the project's References folder" or "the Library folder"
-      state.status = string.format(
-        "\"%s\" couldn't be played. Its audio file is missing or can't be read from %s.", s.name, folder)
+      status_message.problem(state, string.format(
+        "\"%s\" couldn't be played. Its audio file is missing or can't be read from %s.", s.name, folder))
     end
     return ok
   end
 
   function playback.audition_browse()
     if not state.browse then return end
-    if state.reference.active then state.status = REF_PLAYING_MSG; return end
+    if state.reference.active then status_message.info(state, REF_PLAYING_MSG); return end
     if state.auto_audition then playback.play(state.browse, 0, "browse") end
   end
 
@@ -67,7 +69,7 @@ function coordinator.new(state, callbacks, startup_alert)
   function playback.trigger(slot)
     local s = (slot == "browse") and state.browse or state.selected
     if slot == "browse" and state.reference.active then
-      state.status = REF_PLAYING_MSG
+      status_message.info(state, REF_PLAYING_MSG)
     elseif s then
       local loop = slot == "main" and state.reference.active and true or nil
       if playback.play(s, nil, slot, loop) then holders.clear_pause(state, slot) end
@@ -80,7 +82,7 @@ function coordinator.new(state, callbacks, startup_alert)
     if state.preview.playing and state.preview.slot == slot then
       holders.pause_playback(state, slot, state.preview.sound_id)
     elseif slot == "browse" and state.reference.active then
-      state.status = REF_PLAYING_MSG
+      status_message.info(state, REF_PLAYING_MSG)
     else
       local parked = holders.pause_of(state, slot)
       local s = parked and callbacks.find(parked.sound_id) or nil
@@ -102,7 +104,7 @@ function coordinator.new(state, callbacks, startup_alert)
   end
 
   function playback.seek(fraction, slot)
-    if slot == "browse" and state.reference.active then state.status = REF_PLAYING_MSG; return end
+    if slot == "browse" and state.reference.active then status_message.info(state, REF_PLAYING_MSG); return end
     local s
     if slot == "browse" then s = state.browse else s = state.selected end
     if not s then return end
@@ -114,7 +116,10 @@ function coordinator.new(state, callbacks, startup_alert)
       state.preview.position = pos
     elseif slot == "main" then
       local requested = fraction * (s.duration or 0)
-      if playback.play(s, requested, slot) then
+      -- A paused or stopped reference keeps Reference mode's looping when a
+      -- waveform click restarts it, exactly as Play and Resume do.
+      local loop = state.reference.active and true or nil
+      if playback.play(s, requested, slot, loop) then
         local pos = fraction * (state.preview.length or 0)
         preview.seek(pos)
         state.preview.position = pos
@@ -135,9 +140,12 @@ function coordinator.new(state, callbacks, startup_alert)
     if not state.reference.active then preview.set_loop(state.loop) end
   end
 
-  function playback.toggle_mono()
+  -- `slot` names the panel whose button was pressed. While nothing plays,
+  -- that panel's sound decides whether Mono is available.
+  function playback.toggle_mono(slot)
+    local idle = slot == "browse" and state.browse or state.selected
     local channels = state.preview.playing and (tonumber(state.preview.channels) or 0)
-      or (state.selected and (tonumber(state.selected.channels) or 0) or 0)
+      or (idle and (tonumber(idle.channels) or 0) or 0)
     if channels > 2 then return end
     -- All routes already exist; changing their gain avoids restarting audio.
     preview.set_mono(not state.mono)
@@ -195,13 +203,14 @@ function coordinator.new(state, callbacks, startup_alert)
       ref.latched = false
       if reference.latch_off() then
         ref.live, ref.pending, ref.owner_name = false, false, nil
-        state.status = "Reference mode is off. Your project plays normally again."
+        status_message.info(state, "Reference mode is off. Your project plays normally again.")
       else
         local view, recovered, needs_attention = reference.refresh()
         show_view(view)
         local message = recovered or reference.pending()
         if message then
-          state.status = message
+          status_message.problem(state, message)
+          if view.pending then outstanding_shown = message end
           if (needs_attention or view.pending) and message ~= reference_alerted then
             api.message(message, "yb-Reference · Reference Mode Needs Attention")
             reference_alerted = message
@@ -212,17 +221,17 @@ function coordinator.new(state, callbacks, startup_alert)
       -- Losing a target later must keep the latch: automatically unlatching
       -- could abruptly expose project audio. An empty initial latch is refused.
       if not state.selected then
-        state.status = "Select a reference first. Choose a sound or pin, then turn on the Latch button."
+        status_message.problem(state, "Select a reference first. Choose a sound or pin, then turn on the Latch button.")
         return
       end
       local ok, reason = reference.latch_on()
       if ok then
         local view = reference.refresh()
         show_view(view)
-        state.status = "Reference mode is on for " .. (view.owner_name or "this project") ..
-          ". Its master is muted. Press Play in Reaper to hear the selected reference."
+        status_message.info(state, "Reference mode is on for " .. (view.owner_name or "this project") ..
+          ". Its master is muted. Press Play in Reaper to hear the selected reference.")
       else
-        state.status = reason
+        status_message.problem(state, reason)
         api.message(reason, "yb-Reference · Reference Mode")
         if reference.pending() then reference_alerted = reason end
       end
@@ -238,25 +247,45 @@ function coordinator.new(state, callbacks, startup_alert)
     view, recovery, urgent, event = reference.refresh()
     show_view(view)
     if (was_current_latched and not ref.latched) or event.live_ended then
-      holders.stop_playback(state, "main")
+      -- Only the Reference View's own audio belongs to the latch. A Library
+      -- audition allowed while the transport was stopped keeps playing, and
+      -- its parked Reference View position is not this edge's to forget.
+      if state.preview.slot == "main" then holders.stop_playback(state, "main") end
       ref.active, ref.sound_id, ref.failed_id = false, nil, nil
     end
   end
 
   -- Run after pins/selection refresh. Recovery messages take precedence over
-  -- pin warnings, and hotkey requests have the same path as the Latch button.
+  -- pin warnings.
   function playback.sync_reference(pins_warning)
+    -- An unsettled recovery's warning asks the user to fix something, then
+    -- leave the project open so it can be verified. Once the sweep verifies
+    -- it, the warning goes. Only that exact text is removed, so a newer
+    -- message stays.
+    if state.reference.pending and recovery then
+      outstanding_shown = recovery
+    elseif not state.reference.pending and outstanding_shown then
+      status_message.resolve(state, outstanding_shown)
+      outstanding_shown = nil
+    end
     if recovery then
-      state.status = recovery
+      -- Said once per distinct message: the notice would otherwise come back
+      -- every frame after the user closed it.
+      if recovery ~= recovery_shown then
+        status_message.problem(state, recovery)
+        recovery_shown = recovery
+      end
       if urgent and recovery ~= reference_alerted then
         api.message(recovery, "yb-Reference · Reference Mode Needs Attention")
         reference_alerted = recovery
       end
     elseif pins_warning then
-      state.status = pins_warning
+      recovery_shown = nil
+      status_message.problem(state, pins_warning)
+    else
+      recovery_shown = nil
     end
     if not urgent then reference_alerted = nil end
-    if reference.take_toggle_request() then playback.toggle_reference() end
 
     local ref = state.reference
     local wanted = ref.latched and reference.transport_preview_wanted() or false
@@ -273,7 +302,7 @@ function coordinator.new(state, callbacks, startup_alert)
           ref.active, ref.sound_id, ref.failed_id = true, id, nil
         else
           ref.active, ref.sound_id, ref.failed_id = false, nil, id
-          state.status = "That reference couldn't be played. Its audio file may be missing or unreadable."
+          status_message.problem(state, "That reference couldn't be played. Its audio file may be missing or unreadable.")
         end
       end
     elseif ref.active or ref.failed_id then

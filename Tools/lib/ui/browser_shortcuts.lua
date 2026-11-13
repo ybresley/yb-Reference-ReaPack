@@ -3,7 +3,9 @@ local focus = require("ui.focus")
 local selection = require("core.selection")
 local shortcuts = {}
 
-function shortcuts.read(ctx, state, pane, file_drag_active)
+-- in_popup: the pane is inside a popup (the short Library's sound list), so
+-- only a menu opened from within it blocks the shortcuts, not the popup itself.
+function shortcuts.read(ctx, state, pane, file_drag_active, in_popup)
   -- Check the current child, not the Library root: text fields, the waveform,
   -- and the other pane must never inherit a stale deletion target.
   if not reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_ChildWindows()) then
@@ -12,9 +14,10 @@ function shortcuts.read(ctx, state, pane, file_drag_active)
   local mods = reaper.ImGui_GetKeyMods(ctx)
   -- Reserve the chord throughout a hold, including repeats and empty lists.
   if mods == reaper.ImGui_Mod_Ctrl() then focus.consume_key(reaper.ImGui_Key_A()) end
+  local popup_flags = reaper.ImGui_PopupFlags_AnyPopupId()
+  if not in_popup then popup_flags = popup_flags | reaper.ImGui_PopupFlags_AnyPopupLevel() end
   if state.drag or file_drag_active or reaper.ImGui_IsAnyItemActive(ctx)
-    or reaper.ImGui_IsPopupOpen(ctx, "",
-      reaper.ImGui_PopupFlags_AnyPopupId() | reaper.ImGui_PopupFlags_AnyPopupLevel()) then
+    or reaper.ImGui_IsPopupOpen(ctx, "", popup_flags) then
     return nil
   end
   for button = 0, 2 do

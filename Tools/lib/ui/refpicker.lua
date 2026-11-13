@@ -18,6 +18,7 @@ local widgets = require("ui.widgets")
 local tips = require("ui.tips")
 local pins = require("core.pins")
 local search = require("core.search")
+local techfacts = require("core.techfacts")
 local anchored_panel = require("ui.anchored_panel")
 local T = theme.tokens
 local M = theme.metrics
@@ -41,6 +42,10 @@ end
 -- (the same reasoning ui/window.lua's `edit` table had).
 local ui = {
   open_request = false, -- the slot was clicked this frame; open the list next
+  -- Whether the list was open on its last draw. The slot reads this rather
+  -- than asking ImGui: the list opens in the host's scope, not the card's, so
+  -- the card cannot see it by name.
+  list_open = false,
   anchor_x = nil, anchor_y = nil, anchor_w = nil, -- where the list opens (the slot's bottom-left)
   edit_mode = false,
   query = "", query_key = "", filtered = nil, filter_version = nil, filter_list = nil,
@@ -51,26 +56,28 @@ local ui = {
   drag_id = nil,        -- the pin being dragged by its handle
   drag_to = nil,        -- where it would land if released now
   preview_bloom_id = nil,
-  preview_bloom_proj = nil,
+  preview_bloom_session = nil,
   preview_bloom_frame = nil,
-  -- WHICH PROJECT the two id-keyed operations above belong to. Pin ids restart
+  -- WHICH PIN SET the two id-keyed operations above belong to. Pin ids restart
   -- at p1 in every project, so a label dialog left open (or a reorder still
   -- held) while the user switches REAPER project tabs would otherwise apply to
   -- the NEW project's p1 — renaming or moving a completely different sound
-  -- (Codex, 2026-08-06). Both are checked against the live project before they
-  -- act, and abandoned rather than guessed at.
-  owner_proj = nil,
+  -- (Codex, 2026-08-06). Both are checked against the live pin set before they
+  -- act, and abandoned rather than guessed at. The pin set's session is used
+  -- rather than the project pointer, which REAPER may keep while another file
+  -- opens into the same tab.
+  owner_session = nil,
 }
 
 -- Does an operation started earlier still belong to the project in front of the
 -- user? Anything id-keyed must ask this before it acts.
 local function same_project(state)
-  local proj = state.pins and state.pins.proj
-  return ui.owner_proj ~= nil and ui.owner_proj == proj
+  local session = state.pins and state.pins.session
+  return ui.owner_session ~= nil and ui.owner_session == session
 end
 
 local function claim_project(state)
-  ui.owner_proj = state.pins and state.pins.proj
+  ui.owner_session = state.pins and state.pins.session
 end
 
 local function clear_label_edit()
@@ -93,7 +100,7 @@ local LABEL_INPUT_FLAGS = reaper.ImGui_InputTextFlags_CharsUppercase
 
 local function request_preview_bloom(ctx, state, id)
   if not theme.motion.enabled then return end
-  ui.preview_bloom_id, ui.preview_bloom_proj = id, state.pins.proj
+  ui.preview_bloom_id, ui.preview_bloom_session = id, state.pins.session
   ui.preview_bloom_frame = reaper.ImGui_GetFrameCount(ctx)
 end
 
@@ -144,13 +151,8 @@ local REORDER_CURSOR = (reaper.ImGui_MouseCursor_ResizeNS and reaper.ImGui_Mouse
   or nil
 
 local CHEVRON_DOWN = "\u{25BE}"
-local CHEVRON_LEFT = "\u{2039}"
-local CHEVRON_RIGHT = "\u{203A}"
 
-local function fmt_duration(sec)
-  local s = math.floor((sec or 0) + 0.5)
-  return string.format("%d:%02d", math.floor(s / 60), s % 60)
-end
+local fmt_duration = require("core.duration_text").format
 
 -- Snap a drawing coordinate to a whole pixel. Centring text in a row lands on
 -- half pixels (a 15px line in a 34px row), and ImGui renders a glyph run at a
@@ -180,20 +182,7 @@ end
 -- — nothing may move because of state). Zero when there is nothing to count.
 function refpicker.count_width(ctx, state)
   local list = pin_list(state)
-  if not list or #list == 0 then return 0 end
-  local widest = string.format("%d/%d", #list, #list)
-  local small = theme.push_small_font(ctx)
-  local w = select(1, reaper.ImGui_CalcTextSize(ctx, widest))
-  if small then reaper.ImGui_PopFont(ctx) end
-  return w
-end
-
--- The arrows are a PAIR — that pairing is why the picker's shape B beat A in
--- the brief: one target, no aiming across the name. They are separated by a
--- hairline gap rather than welded together (2026-08-06, user-reported): at zero
--- they read as one wide button instead of two arrows.
-function refpicker.arrows_width(ctx)
-  return reaper.ImGui_GetFrameHeight(ctx) * 2 + M.PICK_ARROW_GAP
+  return widgets.count_width(ctx, list and #list or 0)
 end
 
 --------------------------------------------------------------- the name slot
@@ -204,6 +193,7 @@ end
 -- shown by name too — the slot answers "what is armed", not "which pin".
 local function slot_text(state)
   local ps = state.pins
+  if ps and ps.load_newer then return "This project's pinned references need a newer yb-Reference", true end
   if ps and ps.load_error then return "This project's pinned references couldn't be read", true end
   local sel = state.selected
   if sel then
@@ -225,7 +215,20 @@ end
 -- slot's click on release and pop the list open behind the drop.
 local slot_dragged = false
 
--- The flexible element of the control bar: the armed reference's name and the
+-- The armed sound's file details as one line for the slot's tooltip, rebuilt
+-- only when the selection's facts change (frame-allocation rule).
+local details = { source = nil, text = nil }
+local function details_text(state)
+  local facts = state.selected and state.selected_tech
+  if details.source ~= facts then
+    details.source = facts
+    details.text = nil
+    if facts then details.text = techfacts.line(facts, facts.duration) end
+  end
+  return details.text
+end
+
+-- The flexible element of the card's top row: the armed reference's name and the
 -- "opens a list" chevron. It does not change while reference mode is latched
 -- (2026-08-06, user's call): the latch button alone carries that state.
 --
@@ -235,13 +238,17 @@ local slot_dragged = false
 -- a reference no longer means opening the list first. The two gestures don't
 -- fight — ImGui only calls a press a DRAG once it passes its own movement
 -- threshold, so an ordinary click still opens the list.
-function refpicker.draw_slot(ctx, state, res, w)
+-- `lead_icon` names a glyph drawn in the accent colour before the name.
+function refpicker.draw_slot(ctx, state, res, w, lead_icon)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
   local latched = state.reference.latched
   local text, placeholder, label = slot_text(state)
+  -- A release demonstration's slot (reference_controls.draw) has no list of its
+  -- own, and must not move or open the live one.
+  local showcase = state.showcase == true
 
-  local open = ui.open_request or reaper.ImGui_IsPopupOpen(ctx, "refpicker_list")
+  local open = not showcase and (ui.open_request or ui.list_open)
   local clicked = widgets.panel_button_frame(ctx, "##refslot", w, ctrl, open)
   local held = reaper.ImGui_IsItemActive(ctx)
 
@@ -249,24 +256,33 @@ function refpicker.draw_slot(ctx, state, res, w)
   local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
   -- Remember the live anchor every frame, not only after a slot click: the L
   -- button is drawn just before this slot and may request the same popup.
-  ui.anchor_x, ui.anchor_y, ui.anchor_top, ui.anchor_w = x0, y1, y0, x1 - x0
+  if not showcase then ui.anchor_x, ui.anchor_y, ui.anchor_top, ui.anchor_w = x0, y1, y0, x1 - x0 end
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
   local col = placeholder and T.TEXT_QUATERNARY or T.TEXT_PRIMARY
 
   -- The chevron sits inside the slot's right edge, so the name is cut against
   -- it rather than under it.
   local chev_w = ctrl * 0.6
-  local shown = ellipsize(ctx, text, (x1 - x0) - pad_x * 2 - chev_w)
+  local lead_w = 0
+  if lead_icon then
+    local size = M.ICON_SM_FS
+    if icons.paint_glyph(ctx, res and res.icon_font, lead_icon, x0 + pad_x + size * 0.5,
+        (y0 + y1) * 0.5, T.ACCENT, size) then
+      lead_w = size + M.ITEM_SPACING_X
+    end
+  end
+  local text_x = x0 + pad_x + lead_w
+  local shown = ellipsize(ctx, text, (x1 - x0) - pad_x * 2 - chev_w - lead_w)
   local th = select(2, reaper.ImGui_CalcTextSize(ctx, shown))
   local text_y = (y0 + y1) * 0.5 - th * 0.5
   if label and shown:sub(1, #label) == label then
-    local label_x, label_y = px(x0 + pad_x), px(text_y)
+    local label_x, label_y = px(text_x), px(text_y)
     local label_w = reaper.ImGui_CalcTextSize(ctx, label)
     reaper.ImGui_DrawList_AddText(dl, label_x, label_y, col, label)
     reaper.ImGui_DrawList_AddText(dl, px(label_x + label_w), label_y,
       T.TEXT_TERTIARY, shown:sub(#label + 1))
   else
-    reaper.ImGui_DrawList_AddText(dl, x0 + pad_x, text_y, col, shown)
+    reaper.ImGui_DrawList_AddText(dl, text_x, text_y, col, shown)
   end
 
   local cx = x1 - pad_x - chev_w * 0.5
@@ -280,6 +296,7 @@ function refpicker.draw_slot(ctx, state, res, w)
   -- in the browser's sidebar (which files it into the library) — the same
   -- destinations, and the same action, the list's rows report.
   local action
+  if showcase then return nil end
   if state.deps.drag_out and state.selected_id and not state.drag
     and held and reaper.ImGui_IsMouseDragging(ctx, 0) then
     action = { type = "drag_sound", id = state.selected_id, target = "main" }
@@ -297,7 +314,12 @@ function refpicker.draw_slot(ctx, state, res, w)
   if reaper.ImGui_IsItemHovered(ctx) then
     local ps = state.pins
     local slot_tip
-    if ps and ps.load_error then
+    if ps and ps.load_newer then
+      slot_tip =
+        "This project's pinned references were saved by a newer version of yb-Reference.\n" ..
+        "Update yb-Reference to use them. Pinning is paused, and the saved project\n" ..
+        "remains unchanged."
+    elseif ps and ps.load_error then
       slot_tip =
         "This project's pinned references couldn't be read, so pinning is paused.\n" ..
         "Open the list to start with no pinned references. The saved project remains\n" ..
@@ -312,8 +334,11 @@ function refpicker.draw_slot(ctx, state, res, w)
       -- (user's call, 2026-08-06) — a chevron on a button already says it, and
       -- a tooltip that only restates what is on screen is noise following the
       -- cursor. Same rule the list's rows follow.
+      -- The file details, which a short card leaves out of its details line.
       local sel = state.selected
       local tip = (shown ~= text) and text or nil
+      local facts = details_text(state)
+      if facts then tip = tip and (tip .. "\n" .. facts) or facts end
       if sel and sel.note and sel.note ~= "" then
         tip = tip and (tip .. "\n" .. sel.note) or sel.note
       end
@@ -336,57 +361,35 @@ end
 
 --------------------------------------------------------------- arrows + count
 
--- Previous / next, as one joined pair. They WRAP (the list is a loop, so with
--- two references one arrow is an A/B toggle), and with 0 or 1 pins they stay
--- exactly where they are and go dim — nothing here ever disappears.
-function refpicker.draw_arrows(ctx, state, res)
-  local action
-  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
-  local font = res and res.icon_font
+-- Previous / next, joined at (x, y), `width` wide. They WRAP (the list is a
+-- loop, so with two references one arrow is an A/B toggle), and with 0 or 1
+-- pins they stay where they are and go dim.
+function refpicker.draw_arrows(ctx, state, res, x, y, width)
   local list = pin_list(state)
-  local live = list ~= nil and #list > 1
-
-  if not live then reaper.ImGui_BeginDisabled(ctx) end
-  if reaper.ImGui_Button(ctx, (font and icons.NAMES["chevron-left"] and "" or CHEVRON_LEFT) .. "##refprev", ctrl, ctrl) then
-    action = { type = "step_reference", delta = -1 }
-  end
-  icons.paint_over_item(ctx, font, "chevron-left")
-  tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx),
-    tips.with_shortcut(state, "previous", "Previous reference"))
-  reaper.ImGui_SameLine(ctx, 0, M.PICK_ARROW_GAP) -- a pair, not one welded button
-  if reaper.ImGui_Button(ctx, (font and icons.NAMES["chevron-right"] and "" or CHEVRON_RIGHT) .. "##refnext", ctrl, ctrl) then
-    action = { type = "step_reference", delta = 1 }
-  end
-  icons.paint_over_item(ctx, font, "chevron-right")
-  tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx),
+  local delta = widgets.step_arrows(ctx, res and res.icon_font, "ref", x, y, width,
+    list ~= nil and #list > 1,
+    tips.with_shortcut(state, "previous", "Previous reference"),
     tips.with_shortcut(state, "next", "Next reference"))
-  if not live then reaper.ImGui_EndDisabled(ctx) end
-
-  return action
+  return delta and { type = "step_reference", delta = delta } or nil
 end
 
--- "2/6" — where the armed reference sits in the list. Sits BETWEEN the name
--- slot and the arrows since 2026-08-07 (the horizontal-layout brief reversed
--- the old after-the-arrows seat: "name · 1/3" reads as one fact), in its
--- reserved width so it can grow a digit without moving the arrows. A dash for
--- the position when what's armed isn't one of this project's pins (a library
--- sound picked in the browser).
-function refpicker.draw_count(ctx, state, w)
+-- "2/6": where the armed reference sits in the list, centred at (x, y) in a
+-- width `w` that fits the widest count. A dash for the position when what's
+-- armed isn't one of this project's pins (a library sound picked in the
+-- browser). Rebuilt only when the position or total changes.
+local live_count = { index = nil, total = nil, text = nil }
+-- A release demonstration keeps its own, so the two never rebuild each other's.
+local showcase_count = { index = nil, total = nil, text = nil }
+function refpicker.draw_count(ctx, state, x, y, w)
   local list = pin_list(state)
   if not list or #list == 0 or w <= 0 then return end
-  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  local count = state.showcase and showcase_count or live_count
   local i = pins.index_of(state.pins.data, state.selected_id)
-  local text = string.format("%s/%d", i and tostring(i) or "\u{2013}", #list)
-
-  local small = theme.push_small_font(ctx)
-  local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
-  reaper.ImGui_Dummy(ctx, w, ctrl)
-  local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
-  local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
-  -- The current position needs strong contrast at this small text size.
-  reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx),
-    (x0 + x1) * 0.5 - tw * 0.5, (y0 + y1) * 0.5 - th * 0.5, T.TEXT_PRIMARY, text)
-  if small then reaper.ImGui_PopFont(ctx) end
+  if count.index ~= i or count.total ~= #list then
+    count.index, count.total = i, #list
+    count.text = (i and tostring(i) or "\u{2013}") .. "/" .. #list
+  end
+  widgets.draw_count(ctx, count.text, x, y, w)
 end
 
 --------------------------------------------------------------- the list popup
@@ -471,6 +474,8 @@ end
 local EMPTY_MESSAGE = "No pinned references yet. Drag an audio file here or open the Library."
 local LOAD_MESSAGE = "Couldn't load this project's pinned references. " ..
   "The button below starts a new, empty list. Saving the project then replaces the old list."
+local NEWER_MESSAGE = "These pinned references were saved by a newer version of yb-Reference. " ..
+  "Update yb-Reference to use them. The saved project remains unchanged."
 local PREVIEW_BLOCKED = "Preview is unavailable while Reference mode follows Reaper playback. Stop the timeline to preview."
 
 local function measure_popup(ctx, list)
@@ -506,11 +511,14 @@ local function popup_geometry(ctx, state, res, list)
   local height = chrome_h + math.min(ui.opening_rows, M.PICK_LIST_ROWS) * M.PICK_ROW_H
   local minimum = chrome_h + M.PICK_ROW_H
   if not list or #list == 0 then
-    local message = state.pins and state.pins.load_error and LOAD_MESSAGE or EMPTY_MESSAGE
+    local newer = state.pins and state.pins.load_newer
+    local message = newer and NEWER_MESSAGE
+      or state.pins and state.pins.load_error and LOAD_MESSAGE or EMPTY_MESSAGE
     local wrap_w = math.max(1, math.min(ui.measured_width,
       right - left - M.PICK_SCREEN_MARGIN * 2) - M.WINDOW_PAD * 2)
     local text_h = select(2, reaper.ImGui_CalcTextSize(ctx, message, nil, nil, false, wrap_w))
-    height = M.WINDOW_PAD * 2 + text_h + frame_h + M.ITEM_SPACING_Y * 2 + 4
+    -- Newer-version data has no button under its message: only an update helps.
+    height = M.WINDOW_PAD * 2 + text_h + (newer and 0 or frame_h + M.ITEM_SPACING_Y) + M.ITEM_SPACING_Y + 4
     minimum = height
   end
   return anchored_panel.place(ctx, res, anchor, {
@@ -643,10 +651,10 @@ local function draw_row(ctx, state, res, p, w)
   else
     if not state.picker_preview_blocked and not state.drag then
       if row_hovered and reaper.ImGui_IsMouseClicked(ctx, 1) then
-        action = { type = "preview_pin", id = p.id, proj = state.pins.proj }
+        action = { type = "preview_pin", id = p.id, session = state.pins.session }
         request_preview_bloom(ctx, state, p.id)
       elseif preview_clicked then
-        action = { type = "preview_pin", id = p.id, proj = state.pins.proj }
+        action = { type = "preview_pin", id = p.id, session = state.pins.session }
         request_preview_bloom(ctx, state, p.id)
       end
     end
@@ -756,14 +764,14 @@ local function draw_row(ctx, state, res, p, w)
     preview_bounds.left, preview_bounds.top = px(cx - ctrl * 0.5), px(cy - ctrl * 0.5)
     preview_bounds.right, preview_bounds.bottom = px(cx + ctrl * 0.5), px(cy + ctrl * 0.5)
     local bloom_trigger = theme.motion.enabled and ui.preview_bloom_id == p.id
-      and ui.preview_bloom_proj == state.pins.proj
+      and ui.preview_bloom_session == state.pins.session
       and ui.preview_bloom_frame + 1 == reaper.ImGui_GetFrameCount(ctx)
       and playing and not blocked
-    widgets.play_bloom(ctx, "picker_" .. tostring(state.pins.proj) .. "_" .. p.id,
+    widgets.play_bloom(ctx, "picker_" .. tostring(state.pins.session) .. "_" .. p.id,
       playing and not blocked, preview_bounds, bloom_trigger)
-    if theme.motion.enabled and ui.preview_bloom_id == p.id and ui.preview_bloom_proj == state.pins.proj
+    if theme.motion.enabled and ui.preview_bloom_id == p.id and ui.preview_bloom_session == state.pins.session
       and ui.preview_bloom_frame < reaper.ImGui_GetFrameCount(ctx) then
-      ui.preview_bloom_id, ui.preview_bloom_proj, ui.preview_bloom_frame = nil, nil, nil
+      ui.preview_bloom_id, ui.preview_bloom_session, ui.preview_bloom_frame = nil, nil, nil
     end
     local color = playing and T.ACCENT_HOVER or T.TEXT_SECONDARY
     if not icons.paint_glyph(ctx, font, "play", cx, cy, color) then
@@ -886,6 +894,7 @@ function refpicker.draw_popup(ctx, state, res)
       | reaper.ImGui_WindowFlags_NoScrollWithMouse())
   reaper.ImGui_PopStyleColor(ctx, 1)
   reaper.ImGui_PopStyleVar(ctx, 1)
+  ui.list_open = opened
   if opened then
     if not same_project(state) then
       reaper.ImGui_CloseCurrentPopup(ctx)
@@ -896,7 +905,11 @@ function refpicker.draw_popup(ctx, state, res)
     end
     local width = math.max(1, select(1, reaper.ImGui_GetContentRegionAvail(ctx)))
     local ps = state.pins
-    if ps and ps.load_error then
+    if ps and ps.load_newer then
+      reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + width)
+      reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, NEWER_MESSAGE)
+      reaper.ImGui_PopTextWrapPos(ctx)
+    elseif ps and ps.load_error then
       reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + width)
       reaper.ImGui_TextColored(ctx, T.TEXT_SECONDARY, LOAD_MESSAGE)
       reaper.ImGui_PopTextWrapPos(ctx)
@@ -907,7 +920,7 @@ function refpicker.draw_popup(ctx, state, res)
       end
     elseif not list or #list == 0 then
       reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + width)
-      reaper.ImGui_TextColored(ctx, T.TEXT_QUATERNARY, EMPTY_MESSAGE)
+      reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, EMPTY_MESSAGE)
       reaper.ImGui_PopTextWrapPos(ctx)
       reaper.ImGui_Dummy(ctx, 0, 4)
       if reaper.ImGui_Button(ctx, "Open Library##empty_refpicker", width) then
@@ -930,7 +943,7 @@ function refpicker.draw_popup(ctx, state, res)
       end
       local visible = filtered_pins(state, list)
       if #visible > 0 and not ui.edit_mode and not state.drag then
-        preview_owner = ps.proj
+        preview_owner = ps.session
       end
       local footer_h = reaper.ImGui_GetFrameHeight(ctx) + M.ITEM_SPACING_Y * 2 + 1
       local list_h = math.max(1, select(2, reaper.ImGui_GetContentRegionAvail(ctx)) - footer_h)

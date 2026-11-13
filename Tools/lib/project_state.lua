@@ -44,6 +44,13 @@ function project_state.read_pins(proj)
   return v
 end
 
+-- REAPER's counter of project changes. It moves on edits, undo/redo and loads,
+-- so the caller re-reads the stored pin text only when this number moves rather
+-- than allocating a fresh copy of that text every frame.
+function project_state.change_count(proj)
+  return reaper.GetProjectStateChangeCount(proj)
+end
+
 -- Store the pin text and READ IT BACK — a write we merely asked for isn't proof
 -- (the same rule reference.lua applies to its marker). A failed write must be
 -- reported, not assumed away: the caller's in-memory list would otherwise drift

@@ -14,7 +14,11 @@
 --      As", through a rename, and it works for a never-saved project — because it is
 --      stored in the same place as the mute itself. If the mute survived, the marker
 --      survived; if the marker is gone, the mute went with it. A file path can't do
---      this: renaming the project would strand it.
+--      this: renaming the project would strand it. Because the two are saved
+--      together, a valid marker found in any open project is honoured as soon as
+--      that project is seen, whether or not the journal still names it: a file
+--      saved during a latch keeps its mute after a normal un-latch, and a journal
+--      entry for a later latch of the same file never reached that file.
 --    * A queue on disk (the journal) saying which obligations are outstanding,
 --      plus each project's path. Needed because a project that isn't open can't be
 --      scanned for markers. One active latch may hand over to another project while
@@ -37,11 +41,12 @@
 -- the PROJECT while the reference preview stays audible.
 --
 -- Known limitation (documented, not an oversight): if two copies of yb-Reference run
--- at once, the second sees the first's live marker and restores it. The latch then
--- stops working in the first window (its restore-if-unchanged check correctly declines
--- to re-mute), which is visible rather than dangerous. REAPER's own "script already
--- running" prompt makes this rare, so it isn't worth an ownership lease and the
--- staleness bugs that come with one.
+-- at once, each sees the other's live marker as a stranded one and restores it. The
+-- latch then stops working in the first window (its marker is gone, so it lets go
+-- and settles its own entry), which is visible rather than dangerous: the master
+-- ends up unmuted, never stranded. REAPER's own "script already running" prompt and
+-- the Dev Hub's one-copy rule make this rare, so it isn't worth an ownership lease
+-- and the staleness bugs that come with one.
 
 local reference = {}
 
@@ -56,25 +61,22 @@ local JOURNAL_BAK = JOURNAL .. ".bak"
 local PROJ_SECTION = "yb-Reference"
 local PROJ_KEY     = "ref_recovery"
 
--- The companion action (a separate one-line script the user binds to a hotkey) pulses
--- this ExtState value to "1"; the main script sees it, toggles the latch, and clears
--- it. The main script also clears it at startup and exit, so a press made while the
--- tool was closed can't silently latch on the next launch.
-local EXT_SECTION = "yb-Reference"
-local EXT_TOGGLE  = "ref_toggle_request"
-
 -- Live latch state. At most one OPEN project drives reference playback. Closed
 -- owners leave this slot and keep only their journal entry, so another project
 -- can latch without overwriting their recovery.
+-- `old_paths` holds the files the live latch was saved under before a Save As.
 local latch = {
   on = false, proj = nil, path = "", prev_mute = nil, token = nil,
-  preview_allowed = false,
+  preview_allowed = false, old_paths = {},
 }
 
 -- The last verified journal contents. Every active or queued obligation is one
 -- entry. The file is loaded during startup recovery before latching is possible.
 local journal_entries = {}
 local journal_loaded = false
+-- True while journal_entries holds a link to another file that the journal on
+-- disk lacks because saving it failed. The recovery sweep retries the save.
+local journal_dirty = false
 
 -- Set only for a genuine safety failure: unreadable journal, refused restore, or
 -- journal rewrite that could not be verified. A normally closed project is queued,
@@ -176,19 +178,35 @@ end
 -- entries in the SAME permanent file. Windows project paths cannot contain tabs
 -- or newlines, so the format is reversible without escaping and an old journal
 -- can be loaded and rewritten as v2 the first time another project is added.
+--
+-- Version 3 adds `also` lines: other files a held entry is known to have
+-- reached, such as the old name of a project saved under a new one. They keep
+-- that link after the tab carrying the marker closes. Version 3 is written only
+-- while some entry has such a line, so an older copy of the tool reading it
+-- reports a damaged journal rather than quietly losing the link.
 local function journal_parse(txt)
   if type(txt) ~= "string" then return nil, "unreadable" end
 
-  if txt:match("^version=2\r?\n") then
-    local entries, seen = {}, {}
+  local version = txt:match("^version=([23])\r?\n")
+  if version then
+    local entries, by_token = {}, {}
     for line in txt:gmatch("[^\r\n]+") do
-      if line ~= "version=2" then
+      if line ~= "version=" .. version then
         local prev, token, project = line:match("^entry=([01])\t([^\t]+)\t(.*)$")
-        if not token or seen[token] then return nil, "damaged" end
-        seen[token] = true
-        entries[#entries + 1] = {
-          prev = tonumber(prev), token = token, project = project,
-        }
+        local also_token, also_path = nil, nil
+        if not token and version == "3" then
+          also_token, also_path = line:match("^also=([^\t]+)\t(.+)$")
+        end
+        if token then
+          if by_token[token] then return nil, "damaged" end
+          local e = { prev = tonumber(prev), token = token, project = project, also = {} }
+          by_token[token] = e
+          entries[#entries + 1] = e
+        elseif also_token and by_token[also_token] then
+          table.insert(by_token[also_token].also, also_path)
+        else
+          return nil, "damaged"
+        end
       end
     end
     return entries
@@ -201,11 +219,11 @@ local function journal_parse(txt)
   if set ~= 1 or (prev ~= 0 and prev ~= 1) or not token or token == "" then
     return nil, "damaged"
   end
-  return { { prev = prev, token = token, project = project } }
+  return { { prev = prev, token = token, project = project, also = {} } }
 end
 
 local function journal_encode(entries)
-  local out = { "version=2\n" }
+  local out, version = {}, "2"
   for i = 1, #entries do
     local e = entries[i]
     if (e.prev ~= 0 and e.prev ~= 1) or type(e.token) ~= "string" or e.token == ""
@@ -214,8 +232,13 @@ local function journal_encode(entries)
       return nil
     end
     out[#out + 1] = ("entry=%d\t%s\t%s\n"):format(e.prev, e.token, e.project)
+    for _, p in ipairs(e.also or {}) do
+      if type(p) ~= "string" or p == "" or p:find("[\t\r\n]") then return nil end
+      out[#out + 1] = ("also=%s\t%s\n"):format(e.token, p)
+      version = "3"
+    end
   end
-  return table.concat(out)
+  return "version=" .. version .. "\n" .. table.concat(out)
 end
 
 local function read_file(path)
@@ -269,7 +292,7 @@ local function ensure_journal_loaded()
       "yoni.ybtools@gmail.com before deleting the journal."
     return false, err
   end
-  journal_entries, journal_loaded = entries, true
+  journal_entries, journal_loaded, journal_dirty = entries, true, false
   return true
 end
 
@@ -281,7 +304,7 @@ local function journal_save(entries)
     os.remove(JOURNAL)
     os.remove(JOURNAL_BAK)
     if file_exists(JOURNAL) or file_exists(JOURNAL_BAK) then return false end
-    journal_entries = {}
+    journal_entries, journal_dirty = {}, false
     return true
   end
 
@@ -312,7 +335,7 @@ local function journal_save(entries)
   end
 
   os.remove(JOURNAL_BAK)
-  journal_entries = entries
+  journal_entries, journal_dirty = entries, false
   return true
 end
 
@@ -346,7 +369,7 @@ local function journal_update_path(token, path)
     if e.token == token then
       found = true
       if e.project ~= path then
-        e = { prev = e.prev, token = e.token, project = path }
+        e = { prev = e.prev, token = e.token, project = path, also = e.also }
         changed = true
       end
     end
@@ -359,22 +382,110 @@ end
 
 -- A valid pointer is not enough ownership proof: REAPER may replace a tab and
 -- later present the same pointer value for a different project. The marker token
--- is the identity that was written before the mute. A changed path with no token
--- means the old project is gone; the same path with a missing/damaged token is a
--- safety failure, because quietly calling that project clean could strand its mute.
+-- is the identity that was written before the mute. Without our token, the latched
+-- project is gone from this tab: another project took the pointer, or the same
+-- file was reopened into it with no marker or an older one. Its entry then waits
+-- in the queue, where the recovery sweep judges the reopened copy; a muted master
+-- without a marker stays a visible failure there. Only an unreadable marker on
+-- the same path is an error here, because nothing can say what it described.
 local function live_owner_state(proj, old_path, token)
   if not project_alive(proj) then return "gone" end
   local path = path_for_project(proj)
   if path == nil then return "gone" end
   local marker, marker_state = marker_read(proj)
   if marker and marker.token == token then return "owned", path end
-  if path ~= old_path then return "gone", path end
+  if path ~= old_path or marker_state ~= "damaged" then return "gone", path end
   return "marker_error", path, marker_state
+end
+
+-- One wording for damaged markers a journal entry may describe, whether the
+-- latch finds one as it lets go or a sweep finds it on a later frame. The same
+-- text lets the app's one-alert-per-message rule show it once.
+local function damaged_marker_message(names)
+  if #names == 1 then
+    return "Reference mode found a damaged recovery marker inside " .. names[1] ..
+      ". Its journal entry was kept. Keep the project open, check its master track, then email " ..
+      "yoni.ybtools@gmail.com."
+  end
+  return "Reference mode found damaged recovery markers in " .. #names .. " open projects. " ..
+    "Their journal entries were kept. Keep the projects open, check their master tracks, then " ..
+    "email yoni.ybtools@gmail.com."
+end
+
+-- Shared with the sweep for the same reason: un-latching and the next frame's
+-- retry must say the same thing.
+local MARKER_NOT_CLEARED = "Reference mode restored a project's master track to its previous mute state, " ..
+  "but couldn't clear its recovery marker. Save the project or restart Reaper to retry recovery cleanup."
+
+-- The recovery sweep, defined below. Latch off calls it too.
+local recover_entries
+
+-- Whether a tab other than proj has the file at path open.
+-- Whether another open tab may carry this latch's mute: a tab of the same
+-- file, or a tab of any file whose marker names this latch, such as the old
+-- file after Save As.
+local function shares_latch(proj, path, token)
+  local i = 0
+  while true do
+    local p, p_path = reaper.EnumProjects(i)
+    if not p then return false end
+    if p ~= proj then
+      if path ~= "" and (p_path or "") == path then return true end
+      local m = marker_read(p)
+      if m and m.token == token then return true end
+    end
+    i = i + 1
+  end
+end
+
+-- Open tabs of a file the latch was saved under before Save As that may still
+-- carry its mute: muted without a marker, or holding a damaged one. Neither
+-- their file name nor their marker ties them to the latch, so only the latch
+-- remembers them.
+local function unsettled_old_tabs(proj, old_paths, prev)
+  local found, i = {}, 0
+  while true do
+    local p, p_path = reaper.EnumProjects(i)
+    if not p then return found end
+    p_path = p_path or ""
+    if p ~= proj and old_paths[p_path] then
+      local _, state = marker_read(p)
+      if state == "damaged" or (state == "absent" and prev == 0 and get_master_mute(p) == 1) then
+        found[#found + 1] = p_path
+      end
+    end
+    i = i + 1
+  end
+end
+
+-- Save files into an entry as `also` links, so the recovery sweep judges
+-- their tabs. The links stay in memory if the save fails, and the sweep
+-- retries it.
+local function journal_link(token, paths)
+  if not ensure_journal_loaded() then return false end
+  for i, e in ipairs(journal_entries) do
+    if e.token == token then
+      local also, known, grew = {}, { [e.project] = true }, false
+      for _, p in ipairs(e.also or {}) do also[#also + 1], known[p] = p, true end
+      for _, p in ipairs(paths) do
+        if p ~= "" and not known[p] then
+          known[p] = true
+          also[#also + 1] = p
+          grew = true
+        end
+      end
+      if not grew then return true end
+      journal_entries[i] = { prev = e.prev, token = e.token, project = e.project, also = also }
+      journal_dirty = true
+      return journal_save(journal_entries)
+    end
+  end
+  return false
 end
 
 local function clear_live_latch()
   latch.on, latch.proj, latch.path, latch.prev_mute, latch.token,
-    latch.preview_allowed = false, nil, "", nil, nil, false
+    latch.preview_allowed, latch.old_paths = false, nil, "", nil, nil, false, {}
 end
 
 function reference.is_latched() return latch.on end
@@ -417,13 +528,14 @@ function reference.latch_on()
     if not ok then return false, pending end
   end
 
-  -- A marker already sitting in this project is a crash survivor: the project was
-  -- saved while latched, then crashed, and was only reopened after startup recovery
-  -- had already settled the disk note (an unsaved-at-the-time project's note carries
-  -- no path, so recovery can't wait for it). That marker's prior value is the truth
-  -- about this master — the CURRENT mute is our own crash residue, and recording it
-  -- as "prior" would restore the mute on un-latch and strand the master muted with
-  -- both records gone. Adopting the surviving value makes pressing REF the rescue.
+  -- A marker already sitting in this project is a survivor: the project was saved
+  -- while latched and reopened later. The open-project sweep in refresh (run just
+  -- above) normally restores and clears it as soon as the project opens; this is
+  -- the fallback for any marker it has not settled. That marker's prior value is
+  -- the truth about this master — the CURRENT mute is our own residue, and
+  -- recording it as "prior" would restore the mute on un-latch and strand the
+  -- master muted with both records gone. Adopting the surviving value makes
+  -- pressing REF the rescue.
   --
   -- Adopted ONLY while the residue is still in place (master still muted). If the
   -- master is unmuted, the user already resolved the crash by hand, and their
@@ -477,8 +589,8 @@ function reference.latch_on()
       "Try the Latch button again. If it still fails, send feedback from Settings."
   end
 
-  latch.on, latch.proj, latch.path, latch.prev_mute, latch.token =
-    true, proj, path, prev, token
+  latch.on, latch.proj, latch.path, latch.prev_mute, latch.token, latch.old_paths =
+    true, proj, path, prev, token, {}
   -- Latching is an explicit request: if this project's transport is already
   -- rolling, the reference may start immediately. Leaving the project later
   -- disarms this until the user returns and stops/starts its transport.
@@ -491,12 +603,19 @@ end
 function reference.latch_off()
   if not latch.on then return true end
   local proj, path, prev, token = latch.proj, latch.path, latch.prev_mute, latch.token
+  local old_paths = latch.old_paths
   local owner_state = live_owner_state(proj, path, token)
   clear_live_latch()
 
-  -- The project we muted has been closed. If it was saved while latched, that mute is
-  -- in the file and outlives us, so the note MUST stay — dropping it here is what
-  -- would strand the user's master for good.
+  -- A tab of a file this latch was saved under before Save As may still be
+  -- muted with its marker lost or damaged. The entry links that file, so the
+  -- sweep judges its tabs from now on.
+  local stale = unsettled_old_tabs(proj, old_paths, prev)
+  if #stale > 0 then journal_link(token, stale) end
+
+  -- The project we muted has been closed or replaced in its tab. If it was saved
+  -- while latched, that mute is in the file and outlives us, so the note MUST stay —
+  -- dropping it here is what would strand the user's master for good.
   if owner_state == "gone" then
     -- The entry was written before the mute and is already in the queue. This
     -- is routine recovery, not an error, so another project may latch now.
@@ -504,9 +623,7 @@ function reference.latch_off()
   end
 
   if owner_state == "marker_error" then
-    pending = "Reference mode lost its verified recovery marker inside " ..
-      project_name(path) .. ". Its journal entry was kept. Keep the project open, check its " ..
-      "master track, then email yoni.ybtools@gmail.com."
+    pending = damaged_marker_message({ project_name(path) })
     return false, pending
   end
 
@@ -521,9 +638,17 @@ function reference.latch_off()
   -- Both records have to be provably gone before the obligation is forgotten — the
   -- note is kept either way, so the next run retries the cleanup.
   if not marker_clear(proj) then
-    pending = "Reference mode restored the project's master track to its previous mute state, but couldn't " ..
-      "clear its recovery marker. Save the project or restart Reaper to retry recovery cleanup."
+    pending = MARKER_NOT_CLEARED
     return false
+  end
+  -- Another tab may have been opened from a save made while latched, so it
+  -- carries this mute too: a tab of this file, whose marker may since be gone
+  -- or damaged, or the old file after Save As. The sweep judges every tab,
+  -- and it runs now rather than next frame: closing the tool has no next
+  -- frame, and must still put such a tab back or report it.
+  if #stale > 0 or shares_latch(proj, path, token) then
+    recover_entries(false, false)
+    return pending == nil, pending
   end
   if not journal_remove(token) then
     pending = "Reference mode restored the project's master track to its previous mute state, but couldn't " ..
@@ -546,73 +671,202 @@ local function recovery_message(names)
   return nil
 end
 
--- Restore queued entries whose projects are open. `include_unknown` is true at
--- startup: project markers are authoritative and must be honoured even when an
--- old/pathless journal could not name them. During a live latch, only tokens in
--- the queue are touched, so recovering A can never stop or restore active B.
-local function recover_entries(include_unknown, stop_previews)
+-- A damaged marker that no journal entry expects describes nothing this tool is
+-- still holding, so it never blocks Reference mode, in session or at startup.
+-- It could still be a latch saved into the file long ago, so startup mentions
+-- it once.
+local function unexpected_damage_message(names)
+  if #names == 1 then
+    return "Reference mode found a damaged recovery marker inside " .. names[1] ..
+      ". Check that its master track isn't left muted."
+  elseif #names > 1 then
+    return "Reference mode found damaged recovery markers in " .. #names .. " open projects. " ..
+      "Check that their master tracks aren't left muted."
+  end
+  return nil
+end
+
+-- Restore every open project whose marker describes a mute we left, then settle
+-- the queued entries those projects prove. A valid marker is the authority for
+-- its own project (see the header): it is honoured whether or not the journal
+-- names its token, at startup and in session alike. Only the live latch's own
+-- token is skipped, so recovering A can never stop or restore active B.
+-- A damaged marker is a blocking failure where a queued entry may describe it.
+-- `startup` also mentions one that no entry expects, without blocking.
+function recover_entries(startup, stop_previews)
   local journal_ok = ensure_journal_loaded()
-  if not journal_ok and not include_unknown then return pending, true end
   if stop_previews and reaper.APIExists("CF_Preview_StopAll") then
     reaper.CF_Preview_StopAll()
   end
 
-  local by_token, by_path, pathless_count, active_token =
-    {}, {}, 0, latch.on and latch.token or nil
+  local by_path, entry_for, pathless_count = {}, {}, 0
+  local active_token = latch.on and latch.token or nil
   for i = 1, #journal_entries do
     local e = journal_entries[i]
-    by_token[e.token] = e
-    if e.token ~= active_token and e.project ~= "" then
-      by_path[e.project] = by_path[e.project] or {}
-      by_path[e.project][#by_path[e.project] + 1] = e
-    elseif e.token ~= active_token then
-      pathless_count = pathless_count + 1
+    if e.token ~= active_token then
+      entry_for[e.token] = e
+      if e.project ~= "" then by_path[e.project] = true else pathless_count = pathless_count + 1 end
+      for _, p in ipairs(e.also or {}) do by_path[p] = true end
     end
   end
 
-  local resolved, seen, clean_paths, names = {}, {}, {}, {}
-  local failed_restore, failed_marker, failed_marker_data, missing_marker_data = 0, 0, 0, 0
-  local i = 0
+  -- Every open tab is read first, so each judgement below sees all of them,
+  -- whatever their order. A valid marker that a queued entry names also makes
+  -- its own path an expected one: after Save As the entry names the new file,
+  -- but copies of the old file may carry the same mute.
+  local tabs, open_paths, i = {}, {}, 0
   while true do
     local proj, path = reaper.EnumProjects(i)
     if not proj then break end
     path = path or ""
     local m, marker_state = marker_read(proj)
-    local expected_here = by_path[path]
-    local recover_marker = m and m.token ~= active_token and by_token[m.token]
-    local marker_expected_here = false
-    if m and expected_here then
-      for j = 1, #expected_here do
-        if expected_here[j].token == m.token then marker_expected_here = true; break end
-      end
-    end
-    if marker_state == "absent" then
-      clean_paths[path] = { mute = get_master_mute(proj) }
-    elseif marker_state == "damaged" then
-      -- Non-empty but unreadable is never "clean". If a queued entry names this
-      -- project (or this is the startup sweep), losing it silently could strand a mute.
-      if expected_here or pathless_count > 0 or include_unknown then
-        failed_marker_data = failed_marker_data + 1
-      end
-    elseif m.token ~= active_token and ((expected_here and not marker_expected_here)
-      or (pathless_count > 0 and not recover_marker)) then
-      -- A valid marker with the wrong token is equally unsafe: do not choose one
-      -- record over the other and certainly do not delete the journal by path.
-      failed_marker_data = failed_marker_data + 1
-    elseif m.token ~= active_token and (recover_marker or include_unknown) then
-      seen[m.token] = true
-      local ok = true
-      if get_master_mute(proj) == 1 then ok = set_master_mute(proj, m.prev) end
-      if not ok then
-        failed_restore = failed_restore + 1
-      elseif not marker_clear(proj) then
-        failed_marker = failed_marker + 1
-      else
-        resolved[m.token] = true
-        names[#names + 1] = project_name(path)
-      end
-    end
+    tabs[#tabs + 1] = { proj = proj, path = path, m = m, state = marker_state }
+    if path ~= "" then open_paths[path] = true end
+    if m and entry_for[m.token] and path ~= "" then by_path[path] = true end
     i = i + 1
+  end
+
+  local seen, clean_paths, settled_paths, names = {}, {}, {}, {}
+  local failed_restore, failed_marker, missing_marker_data = 0, 0, 0
+  local damaged, unexpected_damaged, damaged_paths = {}, {}, {}
+  local markers, restore_failed = {}, {}
+  for _, t in ipairs(tabs) do
+    if t.state == "absent" then
+      -- REAPER can open one file in several tabs. Any of them still muted
+      -- counts, so a clean copy can never hide a master left muted in another.
+      local mute, clean = get_master_mute(t.proj), clean_paths[t.path]
+      if not clean then
+        clean_paths[t.path] = { mute = mute }
+      elseif mute == 1 then
+        clean.mute = 1
+      end
+    elseif t.state == "damaged" then
+      -- Non-empty but unreadable is never "clean". If a queued entry may describe
+      -- this project, losing it silently could strand a mute.
+      if by_path[t.path] or pathless_count > 0 then
+        damaged[#damaged + 1] = project_name(t.path)
+        -- Another tab of this file can't settle its entries: this marker may be
+        -- the one they describe.
+        damaged_paths[t.path] = true
+      elseif startup then
+        unexpected_damaged[#unexpected_damaged + 1] = project_name(t.path)
+      end
+    elseif t.m.token ~= active_token then
+      local token = t.m.token
+      seen[token] = true
+      -- Restore-if-unchanged: only a master still holding the mute is put back.
+      -- A marker whose prior value was already muted changes nothing.
+      if get_master_mute(t.proj) == 1 and t.m.prev == 0 then
+        if set_master_mute(t.proj, 0) then
+          -- A marker the user already resolved by hand is cleared quietly, and
+          -- nothing is announced as restored. Neither the unmute nor the
+          -- cleared marker dirties the project, so a restored one is marked
+          -- changed: closing then asks to save, and the saved file stops
+          -- carrying the mute for a launch without this tool. MarkProjectDirty
+          -- adds no undo point, so Undo can't re-mute it.
+          names[#names + 1] = project_name(t.path)
+          reaper.MarkProjectDirty(t.proj)
+        else
+          failed_restore = failed_restore + 1
+          restore_failed[token] = true
+        end
+      end
+      markers[token] = markers[token] or {}
+      table.insert(markers[token], t)
+    end
+  end
+
+  -- Every file an entry is tied to: the one it names, plus any it was found to
+  -- have reached and saved as `also`.
+  local function entry_paths(e)
+    local paths = {}
+    if e.project ~= "" then paths[e.project] = true end
+    for _, p in ipairs(e.also or {}) do paths[p] = true end
+    return paths
+  end
+
+  -- Whether any of these files has a copy that may still carry the mute:
+  -- muted without a marker, or holding a damaged one. The second value says
+  -- it is a muted copy, which gets its own warning. The third lists the files
+  -- with such a copy.
+  local function unsettled(paths, prev)
+    local any, muted, which = false, false, {}
+    for p in pairs(paths) do
+      local clean = clean_paths[p]
+      if damaged_paths[p] then
+        any = true
+        which[#which + 1] = p
+      elseif clean and clean.mute == 1 and prev == 0 then
+        any, muted = true, true
+        which[#which + 1] = p
+      end
+    end
+    return any, muted, which
+  end
+
+  -- One tab's marker proves only that tab. Another tab of the same file, or of
+  -- the file the entry names after Save As, may carry the same mute. Until
+  -- every such copy is settled, the entry stays with its warning and the
+  -- marker stays too. The marker's files, and every file seen with such a
+  -- copy, are also saved into the entry as `also` links, so the link survives
+  -- that tab closing or a restart. Projects that were never saved all share
+  -- the empty file name without being copies of each other, so only a real
+  -- file name ties tabs together.
+  local held, held_muted, held_entry = {}, {}, {}
+  for token, list in pairs(markers) do
+    local e = entry_for[token]
+    if e then
+      local paths = entry_paths(e)
+      for _, t in ipairs(list) do
+        if t.path ~= "" then paths[t.path] = true end
+      end
+      local which
+      held[token], held_muted[token], which = unsettled(paths, e.prev)
+      -- A linked file may have been closed with its unsettled copy saved as
+      -- it was, still muted. While no tab of it is open, the entry waits for
+      -- it to reopen.
+      for _, p in ipairs(e.also or {}) do
+        if not open_paths[p] then held[token] = true end
+      end
+      if held[token] then
+        local also, known, grew = {}, {}, false
+        for _, p in ipairs(e.also or {}) do
+          also[#also + 1], known[p] = p, true
+        end
+        local function link(p)
+          if p ~= "" and not known[p] then
+            known[p] = true
+            also[#also + 1] = p
+            grew = true
+          end
+        end
+        for _, t in ipairs(list) do
+          if t.path ~= e.project then link(t.path) end
+        end
+        for _, p in ipairs(which) do link(p) end
+        if grew then
+          held_entry[token] = { prev = e.prev, token = e.token, project = e.project, also = also }
+        end
+      end
+    end
+  end
+
+  local resolved = {}
+  for token, list in pairs(markers) do
+    if not held[token] and not restore_failed[token] then
+      local cleared = true
+      for _, t in ipairs(list) do
+        if not marker_clear(t.proj) then cleared = false end
+      end
+      if cleared then
+        resolved[token] = true
+        -- The marker proves which latch this file was saved under, so any
+        -- other entry for its path is a later latch that never reached it.
+        for _, t in ipairs(list) do settled_paths[t.path] = true end
+      else
+        failed_marker = failed_marker + 1
+      end
+    end
   end
 
   -- A damaged disk journal may hide obligations for closed projects, so it must
@@ -627,27 +881,44 @@ local function recover_entries(include_unknown, stop_previews)
   local remaining, changed = {}, false
   for i = 1, #journal_entries do
     local e = journal_entries[i]
-    local clean = e.project ~= "" and clean_paths[e.project] or nil
     if e.token == active_token then
       remaining[#remaining + 1] = e
+    elseif held[e.token] then
+      if held_entry[e.token] then
+        -- Kept in memory at once, so a failed save below can't lose the new
+        -- link before a later sweep, which retries the save.
+        e = held_entry[e.token]
+        journal_entries[i], journal_dirty = e, true
+      end
+      remaining[#remaining + 1] = e
+      if held_muted[e.token] then missing_marker_data = missing_marker_data + 1 end
     elseif resolved[e.token] then
       changed = true
-    elseif not seen[e.token] and clean then
-      -- An absent marker only proves a clean reload when the master is not still
-      -- holding the mute we set. With prior=0/current=1, deleting the journal could
-      -- strand exactly the mute it describes, so keep it and fail visibly.
-      if e.prev == 0 and clean.mute == 1 then
+    elseif seen[e.token] then
+      remaining[#remaining + 1] = e
+    else
+      -- No marker for this entry is open. Every file it is tied to must be open
+      -- and proven: an absent marker with the master not still holding our
+      -- mute, or a later marker that settled that path. With prior=0/current=1,
+      -- deleting the journal could strand exactly the mute it describes, so it
+      -- is kept and fails visibly. A file that isn't open keeps the entry
+      -- queued until it is.
+      local paths = entry_paths(e)
+      local any, muted = unsettled(paths, e.prev)
+      local proven = next(paths) ~= nil
+      for p in pairs(paths) do
+        if not clean_paths[p] and not settled_paths[p] then proven = false end
+      end
+      if muted then missing_marker_data = missing_marker_data + 1 end
+      if any or not proven then
         remaining[#remaining + 1] = e
-        missing_marker_data = missing_marker_data + 1
       else
         changed = true
       end
-    else
-      remaining[#remaining + 1] = e
     end
   end
 
-  if changed and not journal_save(remaining) then
+  if (changed or journal_dirty) and not journal_save(remaining) then
     pending = "Reference mode restored a project's master track to its previous mute state, but couldn't " ..
       "update its recovery journal (" .. JOURNAL .. "). Do not delete the journal. Restart " ..
       "yb-Reference to retry."
@@ -660,14 +931,11 @@ local function recover_entries(include_unknown, stop_previews)
     return pending, true
   end
   if failed_marker > 0 then
-    pending = "Reference mode restored a project's master track to its previous mute state, but couldn't " ..
-      "clear its recovery marker. Save the project or restart Reaper to retry recovery cleanup."
+    pending = MARKER_NOT_CLEARED
     return pending, true
   end
-  if failed_marker_data > 0 then
-    pending = "Reference mode found a damaged or mismatched recovery marker in an open project. " ..
-      "Its journal entry was kept. Keep the project open, check its master track, then email " ..
-      "yoni.ybtools@gmail.com."
+  if #damaged > 0 then
+    pending = damaged_marker_message(damaged)
     return pending, true
   end
   if missing_marker_data > 0 then
@@ -678,13 +946,21 @@ local function recover_entries(include_unknown, stop_previews)
   end
 
   pending = nil
-  return recovery_message(names), false
+  -- The third value asks for the notice to be shown at once. A damaged marker
+  -- may hide a master still muted, and a startup check that stops the tool
+  -- before its window opens would otherwise drop the notice unseen. A restore
+  -- needs no alert: that master is already back.
+  local restored, notice = recovery_message(names), unexpected_damage_message(unexpected_damaged)
+  if restored and notice then return restored .. " " .. notice, false, true end
+  return restored or notice, false, notice ~= nil
 end
 
 -- Startup recovery runs before every dependency gate. It stops previews left by
 -- the dead instance, honours every open marker, and leaves closed entries queued.
 function reference.recover()
   if latch.on then return nil end
+  -- Returns the message, whether it blocks Reference Mode, and whether it must
+  -- be shown before the startup checks run.
   journal_loaded = false
   return recover_entries(true, true)
 end
@@ -697,10 +973,43 @@ local function queued_count()
   return n
 end
 
+-- What the last frame saw of every open tab, in tab order: its pointer, its path
+-- and the raw text of its marker. The recovery sweep only has new work when one of
+-- these changes, so idle frames compare a few strings instead of rescanning every
+-- project. The marker text is part of it because reopening a file into the same
+-- tab can keep both the pointer and the path while replacing the marker.
+local seen_proj, seen_path, seen_marker, seen_count = {}, {}, {}, 0
+
+local function open_projects_changed()
+  local changed, n = false, 0
+  while true do
+    local proj, path = reaper.EnumProjects(n)
+    if not proj then break end
+    n = n + 1
+    path = path or ""
+    local _, marker = reaper.GetProjExtState(proj, PROJ_SECTION, PROJ_KEY)
+    marker = marker or ""
+    if seen_proj[n] ~= proj or seen_path[n] ~= path or seen_marker[n] ~= marker then
+      seen_proj[n], seen_path[n], seen_marker[n] = proj, path, marker
+      changed = true
+    end
+  end
+  if n ~= seen_count then
+    for j = n + 1, seen_count do seen_proj[j], seen_path[j], seen_marker[j] = nil, nil, nil end
+    seen_count = n
+    changed = true
+  end
+  return changed
+end
+
+-- Set when the open projects change, cleared only once a sweep has actually run,
+-- so a frame that had to skip the sweep cannot lose the change.
+local sweep_due = false
+
 -- Called once per frame. A closed live owner becomes an ordinary queued entry;
--- reopened queued projects restore automatically. The returned latch state is
--- deliberately CURRENT-PROJECT-specific, so every other tab's L button stays
--- off and usable.
+-- reopened projects carrying a marker restore automatically, whether or not the
+-- journal still names them. The returned latch state is deliberately
+-- CURRENT-PROJECT-specific, so every other tab's L button stays off and usable.
 function reference.refresh()
   ensure_journal_loaded()
   local current, current_path = current_project()
@@ -717,6 +1026,7 @@ function reference.refresh()
       end
       if owner_path ~= latch.path then
         if journal_update_path(latch.token, owner_path) then
+          if latch.path ~= "" then latch.old_paths[latch.path] = true end
           latch.path = owner_path
         else
           pending = "Reference mode couldn't update its recovery journal after " ..
@@ -732,8 +1042,12 @@ function reference.refresh()
     end
   end
 
+  -- An outstanding failure is re-checked every frame: the user may unmute by hand
+  -- or a refused write may start working, and neither changes what is compared.
+  if open_projects_changed() or live_ended then sweep_due = true end
   local msg, urgent
-  if not immediate_error and (queued_count() > 0 or pending) then
+  if not immediate_error and (sweep_due or pending) then
+    sweep_due = false
     msg, urgent = recover_entries(false, false)
     current, current_path = current_project()
   end
@@ -748,7 +1062,7 @@ function reference.refresh()
     { live_ended = live_ended }
 end
 
---------------------------------------------------------------- transport + hotkey
+--------------------------------------------------------------- transport
 
 -- Should the live owner's transport be driving reference audio THIS frame?
 -- Deliberately current-project-specific, and edge-aware across tab switches:
@@ -772,27 +1086,13 @@ function reference.transport_preview_wanted()
   return latch.preview_allowed
 end
 
--- Read and clear the companion hotkey's toggle pulse.
-function reference.take_toggle_request()
-  if reaper.GetExtState(EXT_SECTION, EXT_TOGGLE) == "1" then
-    reaper.DeleteExtState(EXT_SECTION, EXT_TOGGLE, false)
-    return true
-  end
-  return false
-end
-
--- Clear any stale toggle pulse (at startup and exit, so a press made while the tool was
--- closed can't latch it on launch).
-function reference.clear_toggle_request()
-  reaper.DeleteExtState(EXT_SECTION, EXT_TOGGLE, false)
-end
-
 -- Best-effort exit cleanup (window closed or script unloaded normally). Never runs on a
 -- crash — that is what the records are for — but on a clean exit it restores the master
--- immediately rather than leaving it to the next startup.
+-- immediately rather than leaving it to the next startup. Returns false when the
+-- un-latch could not settle; reference.pending() then says what is outstanding.
 function reference.cleanup()
-  if latch.on then reference.latch_off() end
-  reference.clear_toggle_request()
+  if latch.on then return (reference.latch_off()) end
+  return true
 end
 
 return reference

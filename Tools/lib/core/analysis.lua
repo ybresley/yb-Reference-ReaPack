@@ -63,10 +63,13 @@ end
 -- The ids of every sound waiting to be measured, in library order. `exclude_id` is
 -- the sound already being measured right now — without it, rebuilding the queue
 -- (after an import, say) would line up a second pass over a sound mid-flight.
-function analysis.queue(lib, exclude_id)
+-- `skip_failed` leaves out sounds that already failed: they are retried once per
+-- launch, not again after every import.
+function analysis.queue(lib, exclude_id, skip_failed)
   local ids = {}
   for _, s in ipairs(lib.sounds) do
-    if analysis.needs(s) and s.id ~= exclude_id then
+    if analysis.needs(s) and s.id ~= exclude_id
+      and not (skip_failed and s.analysis == "failed") then
       ids[#ids + 1] = s.id
     end
   end
@@ -83,6 +86,17 @@ function analysis.apply(sound, result)
   end
   sound.analysis = "done"
   return sound
+end
+
+-- Would recording this result change nothing? A sound that failed before, with
+-- no readings left, failing again stays exactly as it is, so there is nothing to
+-- save.
+function analysis.fails_again(sound, result)
+  if result or sound.analysis ~= "failed" then return false end
+  for _, field in ipairs(analysis.FIELDS) do
+    if sound[field] ~= nil then return false end
+  end
+  return true
 end
 
 -- REAPER couldn't read the file at all. Clear any stale numbers so the list can't

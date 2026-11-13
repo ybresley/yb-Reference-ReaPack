@@ -41,19 +41,23 @@ function demo.duration(topic)
   return durations[topic] or durations.meter_overview
 end
 
-local function ease(value)
+-- With Interface Animations off a demo still plays its steps, but each move
+-- lands at once instead of gliding there.
+local function ease(value, still)
   value = math.max(0, math.min(1, value))
+  if still then return value > 0 and 1 or 0 end
   return value * value * (3 - 2 * value)
 end
 
 local function travel(from, to, elapsed, start, duration, out)
   out.from, out.to = from, to
-  out.progress = from == to and 1 or ease((elapsed - start) / duration)
+  out.progress = from == to and 1 or ease((elapsed - start) / duration, out.still)
 end
 
-function demo.sample(topic, elapsed, out)
+function demo.sample(topic, elapsed, out, still)
   out = out or {}
   for key in pairs(out) do out[key] = nil end
+  out.still = still or nil
   local phase = math.max(0, tonumber(elapsed) or 0) % demo.duration(topic)
   out.phase = phase
   if topic == 'meter_customization' then

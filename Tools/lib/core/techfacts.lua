@@ -1,26 +1,21 @@
--- techfacts: one sound's technical facts as a line of text — "48 kHz · 24-bit ·
--- WAV · stereo". Pure formatting, shared by the browser's info row and the
--- Reference View bar (2026-08-07, the horizontal-layout brief): two copies of the
--- same wording would drift the day one of them is edited, exactly the reason
--- widgets.ellipsize exists.
+-- techfacts: one sound's technical facts as text — "48 kHz · 24-bit · WAV ·
+-- stereo". Pure formatting, shared by the Library's headings and the
+-- Reference card, so the wording cannot drift between them.
 --
 -- Core module: plain Lua, no reaper.*. The info table itself comes from
 -- reaper_api.source_info — the caller passes it in as data.
 
 local techfacts = {}
 
--- Facts joined by a spaced middle dot — the browser info row's voice.
--- (A WIDEST reservation string lived here for one day — the 2026-08-08
--- bar-space brief removed the bar's held seat, so the line is measured at its
--- real width and drawn only into genuinely spare room.)
+-- Facts are joined by a spaced middle dot.
 local SEP = "  \u{00B7}  "
+techfacts.SEP = SEP
 
 -- info = { rate?, bits?, format?, channels? } (reaper_api.source_info's shape).
--- Every field is optional — a fact that isn't there is simply left out, and a
--- nil info (file couldn't be opened) returns nil so callers show nothing.
-function techfacts.format(info)
-  if not info then return nil end
+-- Every field is optional. Missing source information yields no facts.
+function techfacts.parts(info, channels_first)
   local parts = {}
+  if not info then return parts end
   if info.rate and info.rate > 0 then
     parts[#parts + 1] = string.format("%g kHz", info.rate / 1000)
   end
@@ -30,10 +25,17 @@ function techfacts.format(info)
   -- nothing rather than a "0 ch" that reads as a fact.
   local ch = info.channels or 0
   if ch > 0 then
-    parts[#parts + 1] = ch == 1 and "mono" or (ch == 2 and "stereo" or (ch .. " ch"))
+    local label = ch == 1 and "mono" or (ch == 2 and "stereo" or (ch .. " ch"))
+    table.insert(parts, channels_first and 1 or #parts + 1, label)
   end
-  if #parts == 0 then return nil end
-  return table.concat(parts, SEP)
+  return parts
+end
+
+-- The facts and an optional duration as one line, or nil when there are none.
+function techfacts.line(parts, duration)
+  local text = table.concat(parts, SEP)
+  if duration then text = text ~= "" and (text .. SEP .. duration) or duration end
+  return text ~= "" and text or nil
 end
 
 return techfacts

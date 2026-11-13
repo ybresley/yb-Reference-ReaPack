@@ -45,7 +45,7 @@ local function clear(state)
   end
   state.head = 0
   state.last_sequence = nil
-  state.display_gain, state.overflow_clip, state.overrun_until = nil, nil, nil
+  state.display_gain, state.overflow_clip = nil, nil
   state.held_clips = {lissajous = {}, polar_sample = {}}
   state.frozen, state.frozen_at, state.resume_at = false, nil, nil
 end
@@ -56,7 +56,7 @@ function stereo.new()
     status = 'waiting', frozen = false,
     held_clips = {lissajous = {}, polar_sample = {}} }
   for i = 1, MAX_LAYERS do
-    state.layers[i] = { left = {}, right = {}, polar_x = {}, polar_y = {},
+    state.layers[i] = { polar_x = {}, polar_y = {},
       lissajous_x = {}, lissajous_y = {},
       clip_indices = {}, clip_count = 0, count = 0, at = 0 }
   end
@@ -65,6 +65,7 @@ end
 
 function stereo.reset(state)
   clear(state)
+  state.capture_failure_since, state.capture_failed = nil, false
   state.status = 'waiting'
 end
 
@@ -84,6 +85,14 @@ function stereo.display_time(state, now)
   return state.frozen and state.frozen_at or now
 end
 
+function stereo.shift_time(state, elapsed)
+  for _, layer in ipairs(state.layers) do layer.at = layer.at + elapsed end
+  for _, view in pairs(state.held_clips) do
+    for _, clip in pairs(view) do clip.at = clip.at + elapsed end
+  end
+  if state.overflow_clip then state.overflow_clip.at = state.overflow_clip.at + elapsed end
+end
+
 function stereo.set_frozen(state, frozen, now)
   frozen = frozen == true
   now = finite(now) and now or state.now or 0
@@ -92,11 +101,7 @@ function stereo.set_frozen(state, frozen, now)
     state.frozen, state.frozen_at = true, now
   else
     local elapsed = math.max(0, now - state.frozen_at)
-    for _, layer in ipairs(state.layers) do layer.at = layer.at + elapsed end
-    for _, view in pairs(state.held_clips) do
-      for _, clip in pairs(view) do clip.at = clip.at + elapsed end
-    end
-    if state.overflow_clip then state.overflow_clip.at = state.overflow_clip.at + elapsed end
+    stereo.shift_time(state, elapsed)
     state.frozen, state.frozen_at, state.resume_at = false, nil, now
     return elapsed
   end
@@ -124,13 +129,30 @@ local function update_frame(state, frame, context)
   state.now = now
   local source_changed = state.source_key ~= context.source_key
   local session_changed = context.session and state.session ~= context.session
-  local resumed_epoch = context.playing and state.epoch ~= context.epoch
-  if source_changed or session_changed or resumed_epoch then clear(state) end
+  -- Play starts a new picture even for the same source. Resume after a pause
+  -- continues the same measurement, keeping the picture and any Freeze.
+  local restarted = context.playing and state.epoch ~= context.epoch
+    and (context.measurement == nil or state.measurement ~= context.measurement)
+  if source_changed or session_changed or restarted then
+    clear(state)
+    state.capture_failure_since, state.capture_failed = nil, false
+  end
   if context.status == 'unavailable' or context.status == 'invalid' then clear(state) end
-  state.source_key, state.epoch, state.session =
-    context.source_key, context.epoch, context.session
+  state.source_key, state.epoch, state.session, state.measurement =
+    context.source_key, context.epoch, context.session, context.measurement
   state.playing = context.playing == true
   state.status = context.status or 'waiting'
+  local awaiting = state.status == 'waiting' and context.expecting_capture ~= false
+    and (context.expecting_capture or state.last_sequence ~= nil)
+  if not state.playing or state.status == 'unavailable' or (state.status == 'waiting' and not awaiting) then
+    state.capture_failure_since, state.capture_failed = nil, false
+  elseif state.status == 'invalid' or state.status == 'stale' or state.status == 'skipped' or awaiting then
+    state.capture_failure_since = state.capture_failure_since or now
+  end
+  local delay = awaiting and state.last_sequence == nil and (context.first_capture_delay or 1) or 1
+  state.capture_failed = state.capture_failure_since ~= nil
+    and (state.capture_failed or now - state.capture_failure_since >= delay)
+  if state.capture_failed and state.status == 'waiting' then state.status = 'stale' end
   if not frame or (not state.playing and not frame.final and not finite(frame.at))
       or frame.sequence == state.last_sequence then return end
   local count = frame.count
@@ -142,6 +164,7 @@ local function update_frame(state, frame, context)
   for i = 1, count do
     if not finite(left[i]) or not finite(right[i]) then return end
   end
+  state.capture_failure_since, state.capture_failed = nil, false
   if state.frozen or (state.resume_at and finite(frame.at) and frame.at < state.resume_at) then
     state.last_sequence = frame.sequence
     return
@@ -150,7 +173,6 @@ local function update_frame(state, frame, context)
   local layer = state.layers[head]
   layer.clip_count, layer.peak = 0, 0
   for i = 1, count do
-    layer.left[i], layer.right[i] = left[i], right[i]
     layer.peak = math.max(layer.peak, math.abs(left[i]), math.abs(right[i]))
     -- Captured samples do not move. Project once for both scope views;
     -- only brightness and panel dimensions change during subsequent drawing.
@@ -184,7 +206,6 @@ local function update_frame(state, frame, context)
     end
   end
   if finite(frame.missed_packets) and frame.missed_packets > 0 then
-    state.overrun_until = now + 3
     local clip = frame.overflow_clip
     if clip and finite(clip.left) and finite(clip.right) and finite(clip.at)
         and (math.abs(clip.left) >= 1 or math.abs(clip.right) >= 1) then
@@ -199,6 +220,9 @@ local function update_frame(state, frame, context)
 end
 
 local fade_cache, fade_order = {}, {}
+-- The scope asks for its curve every frame. Remember the last choice so an
+-- unchanged appearance needs no new cache key.
+local last_fade = {}
 
 function stereo.fade_curve(prefs)
   if not prefs or (prefs.brightness == 1 and prefs.history == 1 and prefs.trail == 'long') then
@@ -206,8 +230,16 @@ function stereo.fade_curve(prefs)
   end
   local brightness, history = prefs.brightness or 1, prefs.history or 1
   local duration = TRAIL_SECONDS[prefs.trail] or VISIBLE_SECONDS
+  if last_fade.curve and last_fade.brightness == brightness
+      and last_fade.history == history and last_fade.duration == duration then
+    return last_fade.curve
+  end
+  last_fade.brightness, last_fade.history, last_fade.duration = brightness, history, duration
   local key = brightness .. ':' .. history .. ':' .. duration
-  if fade_cache[key] then return fade_cache[key] end
+  if fade_cache[key] then
+    last_fade.curve = fade_cache[key]
+    return last_fade.curve
+  end
   local curve = {}
   for index = 0, VISIBLE_SECONDS * OPACITY_STEPS_PER_SECOND do
     local age = index / OPACITY_STEPS_PER_SECOND
@@ -228,6 +260,7 @@ function stereo.fade_curve(prefs)
   end
   if #fade_order >= 4 then fade_cache[table.remove(fade_order, 1)] = nil end
   fade_order[#fade_order + 1], fade_cache[key] = key, curve
+  last_fade.curve = curve
   return curve
 end
 

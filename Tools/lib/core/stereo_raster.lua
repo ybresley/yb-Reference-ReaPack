@@ -90,9 +90,9 @@ local function configure_mask(cache, radius, polar, step, cols)
     local half = 1
     while half * half < total do half = half * 2 end
     cache.mask_half = half
-    cache.mask_decisions = {}
+    cache.mask_decisions, cache.mask_decision_count = {}, 0
   else
-    cache.mask_half, cache.mask_decisions = nil, nil
+    cache.mask_half, cache.mask_decisions, cache.mask_decision_count = nil, nil, nil
   end
 end
 
@@ -123,7 +123,13 @@ local function selected(cache, cell)
   repeat mapped = permute(mapped, cache.mask_half)
   until mapped < cache.mask_total
   local keep = mapped < MAX_DRAW_CELLS
+  -- A large plot can visit far more cells than it may draw. Start the memo
+  -- again at that size rather than keeping every cell ever hit.
+  if cache.mask_decision_count >= MAX_DRAW_CELLS then
+    cache.mask_decisions, cache.mask_decision_count = {}, 0
+  end
   cache.mask_decisions[cell] = keep
+  cache.mask_decision_count = cache.mask_decision_count + 1
   return keep
 end
 
@@ -288,6 +294,8 @@ local function continue_rebuild(cache, model)
   end
 end
 
+local function newest_first(a, b) return a.id > b.id end
+
 local function update_map(cache, model, now)
   local removed_visible = false
   local oldest_survivor
@@ -303,8 +311,7 @@ local function update_map(cache, model, now)
       local layer = model.layers[index]
       if not valid_layer(layer) or layer.capture_id ~= slot.capture_id then
         if oldest_survivor and slot.at >= oldest_survivor
-            and core.opacity({count = 1, at = slot.at}, now)
-              > core.VISIBLE_OPACITY then
+            and core.opacity_at(slot.at, now) > core.VISIBLE_OPACITY then
           removed_visible = true
         end
         remove_slot(cache, slot)
@@ -312,26 +319,35 @@ local function update_map(cache, model, now)
     end
   end
   local previous_id = cache.last_capture_id
-  local incoming = {}
+  -- Usually one capture arrives per frame. Find the newest without building a
+  -- list; only a catch-up needs the ordered queue of the others.
+  local incoming, newest_index, newest_id = 0, nil, nil
   for age_order = 1, core.MAX_LAYERS do
     local index = (model.head + age_order - 1) % core.MAX_LAYERS + 1
     local layer = model.layers[index]
     if valid_layer(layer) and (not previous_id
         or layer.capture_id > previous_id) then
-      incoming[#incoming + 1] = {index = index, id = layer.capture_id}
+      incoming = incoming + 1
+      if not newest_id or layer.capture_id > newest_id then
+        newest_index, newest_id = index, layer.capture_id
+      end
     end
   end
-  if #incoming > 0 then
-    table.sort(incoming, function(a, b) return a.id > b.id end)
-    local newest = incoming[1]
-    project(cache, newest.index, model.layers[newest.index])
-    if #incoming > 1 then
+  if incoming > 0 then
+    project(cache, newest_index, model.layers[newest_index])
+    if incoming > 1 then
       local queue = {}
-      local seen = {[newest.id] = true}
-      for i = 2, #incoming do
-        local entry = incoming[i]
-        queue[#queue + 1], seen[entry.id] = entry, true
+      for age_order = 1, core.MAX_LAYERS do
+        local index = (model.head + age_order - 1) % core.MAX_LAYERS + 1
+        local layer = model.layers[index]
+        if index ~= newest_index and valid_layer(layer)
+            and (not previous_id or layer.capture_id > previous_id) then
+          queue[#queue + 1] = {index = index, id = layer.capture_id}
+        end
       end
+      table.sort(queue, newest_first)
+      local seen = {[newest_id] = true}
+      for i = 1, #queue do seen[queue[i].id] = true end
       local old = cache.rebuild_queue
       if old then
         for i = cache.rebuild_cursor, #old do
@@ -351,7 +367,9 @@ end
 
 local function refresh_output(cache, model, now)
   clear_clips(cache)
-  local captures = {}
+  -- Reused every frame; it only marks captures still held by the model.
+  local captures = cache.captures
+  for id in pairs(captures) do captures[id] = nil end
   for index = 1, core.MAX_LAYERS do
     local layer = model.layers[index]
     if valid_layer(layer) then
@@ -415,7 +433,7 @@ function raster.new()
     sample_x = {}, sample_y = {},
     projected = {}, clip_count = 0, clip_cells = {}, clip_seen = {},
     mask_left = {}, mask_right = {}, mask_prefix = {},
-    cols = 0, dot_size = 1}
+    captures = {}, cols = 0, dot_size = 1}
 end
 
 function raster.shift_time(cache, elapsed)
@@ -433,7 +451,7 @@ local map_fields = {
   'capture_times', 'sample_times', 'sample_x', 'sample_y',
   'projected', 'clip_count', 'clip_cells', 'clip_seen',
   'mask_left', 'mask_right', 'mask_prefix', 'mask_total', 'mask_half',
-  'mask_decisions', 'cols', 'dot_size', 'radius', 'polar',
+  'mask_decisions', 'mask_decision_count', 'cols', 'dot_size', 'radius', 'polar',
   'source_key', 'epoch', 'session', 'last_capture_id',
   'rebuild_queue', 'rebuild_cursor', 'needs_reveal',
   'preferences', 'view_prefs', 'trace',

@@ -222,8 +222,7 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
     local recovery = helper_status.describe(system)
     settings_tip = recovery.title .. '.\n' .. recovery.detail
   elseif system.range_error then
-    settings_tip = 'Full monitoring: the filter range was not applied.\n' .. system.range_error
-      .. '\nChoose a supported range to dismiss this notice.'
+    settings_tip = 'Spectrum and Filter Settings. Listening is full range.'
   end
   local settings_open = settings.panel_is_open()
   local settings_clicked, settings_hovered = widgets.plot_settings_button(ctx, font,
@@ -231,7 +230,7 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
   if settings_clicked then
     local x, y = reaper.ImGui_GetItemRectMin(ctx)
     local _, bottom = reaper.ImGui_GetItemRectMax(ctx)
-    settings.toggle_at(x, y, bottom)
+    settings.toggle_at(x, y, bottom, system.rejected_range and 'filter' or nil)
   end
   if system.range_error then
     local right = reaper.ImGui_GetItemRectMax(ctx)
