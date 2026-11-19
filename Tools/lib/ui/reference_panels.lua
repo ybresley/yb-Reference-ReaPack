@@ -7,7 +7,7 @@ local icon_motion = require('ui.icon_motion')
 local tips = require('ui.tips')
 local T, M = theme.tokens, theme.metrics
 local panels = {}
-local names = {waveform='Waveform', spectrum='Spectrum', stereo='Stereo'}
+local names = {waveform='Waveform', spectrum='Spectrum', stereo='Scope'}
 local faces, drag, last_mode = {}, nil, nil
 local metrics = {}
 

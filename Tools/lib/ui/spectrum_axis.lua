@@ -33,25 +33,36 @@ function axis.draw(ctx, dl, model, input)
   local fmin = math.max(0.001, tonumber(input.fmin) or 10)
   local fmax = math.max(fmin * 1.001, tonumber(input.fmax) or 22050)
   local mx, my = tonumber(input.mx), tonumber(input.my)
-  local pointer_on_axis = input.eligible == true and mx and my
+  local pointer_in_column = input.eligible == true and mx and my
     and mx >= gx and mx <= gx + gw
-    and my > graph_bottom and my <= ruler_bottom
+    and my >= gy and my <= ruler_bottom
+  -- Over the graph the ruler shows only the frequency; the graph's own readout
+  -- draws its guide and dot, so the ruler adds those only for axis hover.
+  local pointer_on_axis = pointer_in_column and my > graph_bottom
 
   local small = theme.push_small_font(ctx)
   local readout, readout_width, readout_x
   local readout_frequency, trace_y
-  if pointer_on_axis then
+  if pointer_in_column then
     local fraction = math.max(0, math.min(1, (mx - gx) / gw))
     readout_frequency = mathx.fraction_frequency(fraction, fmin, fmax)
     readout = string.format('%.0f Hz', readout_frequency)
+    if input.note_names then readout = readout .. ' · ' .. mathx.frequency_note(readout_frequency) end
     readout_width = reaper.ImGui_CalcTextSize(ctx, readout)
-    -- Match the waveform ruler's cursor clearance and flip at the left edge.
-    local pointer_gap = M.ITEM_SPACING_X * 3
-    readout_x = mx - readout_width - pointer_gap
-    if readout_x < gx then readout_x = mx + pointer_gap end
-    readout_x = math.max(gx, math.min(gx + gw - readout_width, readout_x))
+    if pointer_on_axis then
+      -- The pointer sits on the label row here, so match the waveform ruler's
+      -- cursor clearance and flip at the left edge.
+      local pointer_gap = M.ITEM_SPACING_X * 3
+      readout_x = mx - readout_width - pointer_gap
+      if readout_x < gx then readout_x = mx + pointer_gap end
+      readout_x = math.max(gx, math.min(gx + gw - readout_width, readout_x))
+    else
+      -- Over the graph the pointer is clear of the ruler, so centre the value
+      -- under its marker like the static labels.
+      readout_x = axis_geometry.label_left(mx, readout_width, gx, gx + gw)
+    end
 
-    if input.draw_live and type(model) == 'table' and type(model.live) == 'table' then
+    if pointer_on_axis and input.draw_live and type(model) == 'table' and type(model.live) == 'table' then
       local count = math.max(0, math.floor(tonumber(model.count) or #model.live))
       local measured_min, measured_max = model.fmin or fmin, model.fmax or fmax
       local db = readout_frequency >= measured_min and readout_frequency <= measured_max

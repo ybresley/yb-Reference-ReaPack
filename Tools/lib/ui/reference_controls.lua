@@ -17,6 +17,7 @@ local theme = require("ui.theme")
 local tips = require("ui.tips")
 local widgets = require("ui.widgets")
 local match = require("core.match")
+local own_level = require("core.own_level")
 local card_plan = require("core.card_plan")
 local icons = require("ui.icons")
 local refpicker = require("ui.refpicker")
@@ -232,6 +233,34 @@ local function draw_wave(ctx, state, x, y, w, bars)
   return action, wave_id, wave_cols
 end
 
+-- With no reference selected, the details, readings and waveform have nothing
+-- to show. Their space stays blank, with one message centred in it when a
+-- drop there can pin. The message wraps by whole words and is rebuilt only
+-- when its text, the width or the font changes.
+local empty_cache = { lines = {} }
+local function draw_empty(ctx, state, x, y0, y1, w)
+  local msg = refpicker.empty_message(state)
+  if not msg or y1 <= y0 then return end
+  local c, font = empty_cache, reaper.ImGui_GetFontSize(ctx)
+  if c.msg ~= msg or c.w ~= w or c.font ~= font then
+    c.msg, c.w, c.font = msg, w, font
+    c.lines, c.widths, c.widest = widgets.wrap_words(ctx, msg, w), {}, 0
+    for i, text in ipairs(c.lines) do
+      c.widths[i] = reaper.ImGui_CalcTextSize(ctx, text)
+      c.widest = math.max(c.widest, c.widths[i])
+    end
+  end
+  local line_h = reaper.ImGui_GetTextLineHeight(ctx)
+  -- A card too short or too narrow for the whole message shows none of it.
+  if #c.lines * line_h > y1 - y0 or c.widest > w then return end
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local top = (y0 + y1 - #c.lines * line_h) * 0.5
+  for i, text in ipairs(c.lines) do
+    reaper.ImGui_DrawList_AddText(dl, snap(x + (w - c.widths[i]) * 0.5), snap(top + (i - 1) * line_h),
+      T.TEXT_SECONDARY, text)
+  end
+end
+
 --------------------------------------------------------------- bottom row
 
 local main_slot = { slot = "main" }
@@ -286,6 +315,13 @@ local function draw_trim(ctx, state, x, y, w)
   local id = state.showcase and "showcase_trim" or "trim"
   if sel then
     opts.tip = TRIM_TIP
+    -- A pin held at the Reaper Measurement says so on its Trim label, in
+    -- colour only, so the bar keeps its shape.
+    local own = state.own_level
+    if own and own_level.is_held(own, state.pins and state.pins.data and state.pins.data.pins, sel.id) then
+      opts.label_colour = T.ACCENT
+      opts.tip = "Locked to the target. Moving the trim releases this reference.\n" .. TRIM_TIP
+    end
     local db, commit = widgets.db_bar(ctx, id, sel.trim_db, opts)
     if db ~= nil then action = { type = "set_trim", db = db, commit = commit } end
   else
@@ -329,7 +365,9 @@ function controls.draw(ctx, state, res, g)
   y = y + ctrl
 
   local wave_action, wave_id, wave_cols, readings_action
-  if p.wave > 0 then
+  if p.wave > 0 and not state.selected then
+    draw_empty(ctx, state, x, y + gap, bottom_y - gap, w)
+  elseif p.wave > 0 then
     if p.facts then
       draw_facts(ctx, state, x, y + gap, w)
       y = y + gap + M.STRIP_FACTS_H
@@ -350,10 +388,11 @@ function controls.draw(ctx, state, res, g)
   local listening_end = snap(x + 8 * cell_w + group_gap)
   local playback_action = draw_playback(ctx, state, res and res.icon_font, x, playback_end, bottom_y)
   local listening_action = draw_listening(ctx, state, res, listening_x, listening_end, bottom_y)
-  -- The tour points at Play and the latch together, then at the rest.
-  walkthrough_ui.note_rect(ctx, state.walkthrough, "latch", x, bottom_y,
-    widgets.segment_edge(listening_x, listening_end, 4, 1), bottom_y + ctrl)
-  walkthrough_ui.note_rect(ctx, state.walkthrough, "transport", x, bottom_y, listening_end, bottom_y + ctrl)
+  -- The tour points at playback and the latch together, then at the rest of
+  -- the row through the trim bar, so the two rings never overlap.
+  local latch_end = widgets.segment_edge(listening_x, listening_end, 4, 1)
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "latch", x, bottom_y, latch_end, bottom_y + ctrl)
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "transport", latch_end, bottom_y, x + w, bottom_y + ctrl)
   local trim_action = draw_trim(ctx, state, x + column_x, bottom_y, trim_w)
   action = action or readings_action or wave_action or playback_action or listening_action
     or trim_action

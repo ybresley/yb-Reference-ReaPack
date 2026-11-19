@@ -20,6 +20,13 @@ function coordinator.new(state, callbacks, startup_alert)
   -- outstanding_shown: the warning on screen while recovery is unsettled.
   local recovery, urgent, recovery_shown, outstanding_shown
 
+  -- The Library's Vol bar belongs to Library auditions only. A reference in
+  -- the Reference View, the picker or Reference mode plays at its trim alone,
+  -- so a control the Reference View does not show can never change its level.
+  local function library_volume(slot)
+    return slot == "browse" and state.master_db or 0
+  end
+
   function playback.play(s, position, slot, loop, resuming)
     if loop == nil then loop = state.loop end
     -- Exact positions belong to the user's seek or pause. Only an ordinary
@@ -30,7 +37,7 @@ function coordinator.new(state, callbacks, startup_alert)
     end
     local trim_db = (slot == "browse") and 0 or (s.trim_db or 0)
     local ok = preview.play(callbacks.path(s), {
-      db = trim_db + state.master_db, loop = loop, position = position,
+      db = trim_db + library_volume(slot), loop = loop, position = position,
       pitch = state.pitch[slot] or 0, channels = s.channels,
       before_start = callbacks.before_start and function(evidence)
         return callbacks.before_start(slot, s.id, resuming == true,evidence)
@@ -163,7 +170,9 @@ function coordinator.new(state, callbacks, startup_alert)
 
   function playback.set_master(db)
     state.master_db = db
-    if state.preview.playing then preview.set_volume_db(state.preview.trim_db + db) end
+    if state.preview.playing and state.preview.slot == "browse" then
+      preview.set_volume_db(state.preview.trim_db + db)
+    end
   end
 
   -- Called after persistence has accepted the edit or restored the saved value.
@@ -171,7 +180,7 @@ function coordinator.new(state, callbacks, startup_alert)
   function playback.trim_changed(s)
     if state.preview.playing and state.preview.slot == "main" and state.preview.sound_id == s.id then
       state.preview.trim_db = s.trim_db
-      preview.set_volume_db(s.trim_db + state.master_db)
+      preview.set_volume_db(s.trim_db)
     end
   end
 

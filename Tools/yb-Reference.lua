@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.6.0
+-- @version 0.7.0
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -26,12 +26,17 @@
 --   [main] yb-Reference_ToggleReferenceMode.lua
 --   [main] yb-Reference_Hotkey_PlayPause.lua
 --   [main] yb-Reference_Hotkey_PauseResume.lua
+--   [main] yb-Reference_Hotkey_Stop.lua
 --   [nomain] yb-Reference_PlayPause.lua
 --   [main] yb-Reference_Hotkey_ToggleFilterSub.lua
 --   [main] yb-Reference_Hotkey_ToggleFilterBass.lua
 --   [main] yb-Reference_Hotkey_ToggleFilterLowMid.lua
 --   [main] yb-Reference_Hotkey_ToggleFilterMid.lua
 --   [main] yb-Reference_Hotkey_ToggleFilterHigh.lua
+--   [main] yb-Reference_Hotkey_TogglePanelReference.lua
+--   [main] yb-Reference_Hotkey_TogglePanelSpectrum.lua
+--   [main] yb-Reference_Hotkey_TogglePanelScope.lua
+--   [main] yb-Reference_Hotkey_TogglePanelLoudness.lua
 --   [main] yb-Reference_Hotkey_ToggleMono.lua
 --   [nomain] yb-Reference_ToggleMono.lua
 --   [main] yb-Reference_Hotkey_ToggleLoop.lua
@@ -45,59 +50,48 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update adds surround analysis, a combined Reference panel and a
---   Library that can stay beside Reference View, along with Reference mode and
---   metering fixes.
+--   This update lets you match references to your own project's loudness,
+--   simplifies the Reference View layout settings and adds new hotkeys, along
+--   with a crash fix and other fixes.
 --    
 --   Highlights
---     • Surround: Reference View now measures surround audio up to 7.1.
---       Meters, loudness and Spectrum follow every speaker, each project
---       remembers its speaker layout, and the Surround Field shows where
---       neighbouring speakers are in or out of phase.
---     • Reference Panel: The Waveform panel and the bottom bar are now one
---       Reference panel beside the analysis panels. It keeps the picker,
---       stored readings, waveform and playback controls together, and folds
---       its parts in a fixed order as the window gets smaller.
---     • Docked Library: The Library can stay open beside Reference View, with
---       its own waveform and audition controls, including a new Mono button.
---       Review Files lists audio in the Library folder that isn't part of your
---       Library, so you can add it or move it to the trash.
+--     • Loudness: The Loudness panel can now measure your project, from the
+--       time selection, the selected item or one pass of playback, and use
+--       that reading as a normalize target. Lock a target to keep every pinned
+--       reference at it, including pins added later.
+--         The measurement and lock last for the session and clear when another
+--         project's pins load.
 --    
 --   Changes
---     • Updates: When a new version is out, a popup shows its date and
---       overview, with Release Notes, Skip This Version and Update Now.
---       Skipping a version keeps the popup away until a newer one. Turn the
---       popup off from the popup itself or in Settings → Updates.
---     • Loudness: When the meter panel is short, the Readings column keeps two
---       readings instead of hiding. Right-click it to choose which two.
---     • Loudness: Meter bars keep even spacing at every width, with their
---       labels above the values.
---     • Loudness: Very short meter panels now keep their readings, with each
---       label beside its value. The shortest show one or two readings. Click a
---       label to choose another.
---     • Library: The Library reopens open or closed, as you left it. Open
---       Library on Startup is removed.
---     • Library: Adding audio together with other files, such as licences or
---       artwork, no longer reports the other files as errors.
---     • Appearance: Tooltips appear beside the control or area they describe
---       and stay still while the pointer moves. They now wait half a second
---       before appearing.
---     • Dialogs: Info messages, such as Reference mode turning off, now have a
---       close button.
+--     • Loudness: The Item measurement reads the selected item with its FX and
+--       volume, or the raw file alone. A folder item is measured as one sound.
+--     • Loudness: The meter maximum now shows TP or P to say which peak it
+--       measures. Click the label to switch Peak Measurement.
+--         The default warning ceiling is now 0. A saved −1 moves to 0 once,
+--         unless a preset sets its own.
+--     • Loudness: The Loudness panel now stays open until you close it with
+--       its button or Escape.
+--     • Appearance: Reference View now has one panel arrangement, chosen from
+--       tiles that show its shape, and the Reference panel can be hidden from
+--       Show Panels.
+--     • Appearance: The Stereo panel is now called Scope, because it also
+--       shows surround audio.
+--     • Hotkeys: New hotkeys stop playback and show or hide the Reference,
+--       Spectrum, Scope and Loudness panels.
+--     • Spectrum Analyser: The hovered frequency now appears on the frequency
+--       ruler instead of in a box over the trace. Turn on Note Names in
+--       Spectrum settings to add the nearest note.
+--     • Library: With no sound selected, the Library preview shows where to
+--       drop files instead of an empty waveform.
 --    
 --   Fixes
---     • Latch Mode: Reference mode no longer leaves a project muted after Save
---       As, with the project open in two tabs, or when yb-Reference closes
---       while latched.
---         A project that still needs unmuting by hand now says so.
---     • Projects: After Save As, a pin no longer picks up a different sound of
---       the same size.
---     • Loudness: The meter now connects after Reaper restarts, instead of
---       reporting that it was changed or not added by yb-Reference.
---     • Spectrum Analyser: The spectrum line no longer thins out or disappears
---       in dense high-frequency detail.
---     • Window: A graphics failure now closes yb-Reference without a second
---       script error.
+--     • Window: The Reference panel no longer stops yb-Reference with a script
+--       error.
+--     • Reference Playback: Typing a Vol or Trim value no longer changes the
+--       level with each keystroke. The level changes on Enter, and Escape
+--       leaves it as it was.
+--     • Setup: Each walkthrough step now highlights only the part it
+--       describes, and the walkthrough no longer closes a docked Library.
 --    
 --   ------------------------------------------------
 --    
@@ -634,7 +628,6 @@ local spectrum_core = require("core.spectrum")
 local spectrum = require("spectrum")
 local metering = require('metering')
 local reference_layout_core = require("core.reference_layout")
-local layout_prototype = require("core.layout_prototype")
 local panel_layout_settings = require("panel_layout_settings")
 local reference_panels = require("reference_panels")
 local stereo_core = require("core.stereo")
@@ -655,6 +648,8 @@ local playback_coordinator = require("playback_coordinator")
 local dragout    = require("dragout")  -- dropping a sound onto the arrange view
 local pins_core    = require("core.pins")     -- per-project pin records (pure)
 local pins_service = require("pins_service")  -- pin/unpin/adopt + project switch handling
+local own_level = require("core.own_level")   -- the user's own measured level (pure)
+local own_level_service = require("own_level_service") -- measuring it, and Level Lock
 local updater      = require("updater")       -- in-app update check + one-button update
 local monitoring_filter = require("monitor_filter") -- permanent fail-open Monitoring FX helper
 local changelog    = require("core.changelog") -- CHANGELOG.md -> the What's New card + Settings history
@@ -774,7 +769,11 @@ local state = {
   -- 2026-08-06). App preferences like loud_unit: stored garbage falls back
   -- quietly (core/match.lua decodes), never crashes the tool.
   match          = { presets = match.decode_presets(reaper_api.get_match_presets()),
-                     target  = match.decode_target(reaper_api.get_match_target()) },
+                     target  = match.decode_target(reaper_api.get_match_target()),
+                     presets_open = reaper_api.get_match_presets_open() },
+  -- The user's own measured level and Level Lock. Kept for this session
+  -- only, except for what Measure Item hears, which is a remembered choice.
+  own_level      = own_level.new(reaper_api.get_item_sound()),
   -- The browser audition strip's dragged height; nil = the default token
   -- (ui/browser.lua clamps it to the window each frame, so a value saved on a
   -- big screen can't crush the sound list on a small one).
@@ -2036,12 +2035,12 @@ local function poll_library_folder()
 end
 
 -- Every route that closes the Library converges here (the toggle button, the
--- ✕, Esc, and the walkthrough's own auto-advance) so the teardown is written
--- once. Closing the window stops only what the Library itself started —
--- holders.stop_browse_audition already refuses to touch a main-slot
--- reference, so this never needs to ask which is which.
-local function close_browser(tour)
-  set_browser_open(false, tour)
+-- ✕ and Esc) so the teardown is written once. Closing the window stops only
+-- what the Library itself started — holders.stop_browse_audition already
+-- refuses to touch a main-slot reference, so this never needs to ask which is
+-- which. The tutorial never closes the Library.
+local function close_browser()
+  set_browser_open(false)
   holders.stop_browse_audition(state)
 end
 
@@ -2254,11 +2253,8 @@ local function handle_action(a)
       reaper_api.set_browser_wave_h(h)
     end
   elseif a.type == "layout_prototype" then
-    local ok, err = panel_layout_settings.apply(state, a)
+    local _, err = panel_layout_settings.apply(state, a)
     if err then status_message.problem(state, err) end
-    if ok and a.operation and a.operation.type == "edit" and a.operation.value then
-      settings.close()
-    end
   elseif a.type == "reference_panels" then
     local operation = a.operation
     local prefs, err
@@ -2309,7 +2305,7 @@ local function handle_action(a)
       state.stereo_view = a.value
       -- A wider view can trigger a compact layout. Keep the view the user just
       -- selected visible without changing the full arrangement or enabled set.
-      if not layout_prototype.current(state.layout_prototype) and not state.reference_panels_error then
+      if not state.layout_prototype and not state.reference_panels_error then
         local prefs = reference_layout_core.update(state.reference_panels,
           {type="set_single", id="stereo"})
         if prefs then
@@ -2491,6 +2487,11 @@ local function handle_action(a)
     -- (a.commit) so dragging the slider doesn't hammer the disk every frame.
     if state.selected then
       state.selected.trim_db = a.db
+      -- A trim set by hand takes this pin out of the lock. A trim set by
+      -- choosing a target does not: the lock follows that target.
+      if not a.from_target and is_pin_id(state.selected.id) then
+        own_level_service.release(state, state.selected.id)
+      end
       if a.commit then
         if is_pin_id(state.selected.id) then
           -- A pin's trim is project data, and a refused store puts the record
@@ -2511,7 +2512,10 @@ local function handle_action(a)
     -- aimed at. Setting the trim IS a committed set_trim — one
     -- code path, so a matched trim persists and colours live audio exactly
     -- like a dragged one, and the fader's reset undoes it the same way.
-    handle_action({ type = "set_trim", db = a.db, commit = true })
+    own_level_service.choose_target(state,
+      { kind = "fixed", unit = a.unit, value = a.value },
+      state.selected and state.selected.id)
+    handle_action({ type = "set_trim", db = a.db, commit = true, from_target = true })
     state.match.target = { unit = a.unit, value = a.value }
     reaper_api.set_match_target(match.encode_target(state.match.target))
     -- When the fader's range clamped it, the full match was NOT set — say so
@@ -2521,6 +2525,25 @@ local function handle_action(a)
         "Normalized to +%g dB, the trim fader's maximum. Reaching the target needs more boost.",
         match.TRIM_MAX))
     end
+  elseif a.type == "measure_own_selection" then
+    own_level_service.measure_selection(state)
+  elseif a.type == "measure_own_item" then
+    own_level_service.measure_item(state)
+  elseif a.type == "set_item_sound" then
+    own_level_service.set_item_sound(state, a.value)
+  elseif a.type == "measure_own_playback" then
+    own_level_service.toggle_listening(state)
+  elseif a.type == "set_own_unit" then
+    own_level_service.set_unit(state, a.unit)
+  elseif a.type == "normalize_to_own" then
+    own_level_service.choose_target(state, { kind = "own" },
+      state.selected and state.selected.id)
+    handle_action({ type = "set_trim", db = a.db, commit = true, from_target = true })
+  elseif a.type == "set_level_lock" then
+    own_level_service.set_lock(state, a.on, a.target)
+  elseif a.type == "set_match_presets_open" then
+    state.match.presets_open = a.open == true
+    reaper_api.set_match_presets_open(state.match.presets_open)
   -- ("match_all_pins" was handled here for a few hours on 2026-08-06 — built,
   -- Codex-hardened with a rollback, then removed the same day at the user's
   -- ask (the button felt off in the match window). core/match.bulk and its
@@ -2683,7 +2706,6 @@ local function handle_action(a)
     elseif a.ev == "show" then
       walkthrough.begin_stops(state.walkthrough)
       library_before_tour = state.browser_open
-      close_browser(true)
       settings.close()
     end
   elseif a.type == "whatsnew_closed" then
@@ -2884,8 +2906,8 @@ local hotkeys_refresh_at = 0
 local walk_browser_was = false
 local walk_feedback_was = false
 -- ...and the walkthrough's own POSITION edge keeps the correct host visible:
--- main-window stops close the Library so it cannot cover their target, while
--- going Back to a browser stop reopens it. nil while inactive so a replay can't
+-- a Library stop reopens a closed Library. The tour never closes it, so a
+-- docked Library keeps its place beside the stops that follow. nil while inactive so a replay can't
 -- inherit a stale position.
 local walk_pos_was = nil
 -- A successful self-restart should terminate this instance immediately. If
@@ -2983,6 +3005,8 @@ local function loop()
     spectrum.tick(state)
     metering.tick(state)
   end
+  -- After the meter, so a listening pass reads this update's values.
+  if own_level_service.tick(state) then playback.trim_changed(state.selected) end
   channel_settings:capture(state)
   report_save_problem("stereo", stereo_settings.flush(state))
   browser_geom_save:tick(reaper.time_precise())
@@ -3136,9 +3160,7 @@ local function loop()
     if walk_pos_was ~= state.walkthrough.pos then
       local cur = walkthrough.current(state.walkthrough)
       if type(cur) == "table" then
-        if cur.window ~= "browser" and state.browser_open then
-          close_browser(true)
-        elseif cur.window == "browser" and not state.browser_open then
+        if cur.window == "browser" and not state.browser_open then
           set_browser_open(true, true)
         end
         if cur.window == "settings" then

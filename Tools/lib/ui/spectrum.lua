@@ -48,8 +48,7 @@ end
 
 local function clear_live_readout(live_readout)
   live_readout.active, live_readout.alpha, live_readout.last_time = nil, nil, nil
-  live_readout.mx, live_readout.yy, live_readout.bx, live_readout.by = nil, nil, nil, nil
-  live_readout.text, live_readout.tw, live_readout.th = nil, nil, nil
+  live_readout.mx, live_readout.yy = nil, nil
 end
 
 local function fade_live_readout(live_readout, now, visible)
@@ -91,19 +90,8 @@ local function prepare_live_readout(ctx, live_readout, now, eligible, data)
     local db = mathx.sample_log_values(data.model.live, data.count, hz, data.fmin, data.fmax)
     db = db and mathx.tilted_db(db, hz, data.model.prefs.tilt)
     if db and db >= data.bottom then
-      local text = string.format('%.0f Hz · %s · %.1f dB', hz, mathx.frequency_note(hz), db)
-      local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
       local yy = data.gy + mathx.db_fraction(db, 6, data.bottom) * data.gh
       live_readout.mx, live_readout.yy = data.mx, yy
-      -- Clear the whole arrow, including its tail; flip before clamping at an edge.
-      local box_w, box_h = tw + data.pad * 2, th + data.pad
-      local gap_x, gap_y = M.ITEM_SPACING_X * 3, M.ITEM_SPACING_Y * 4
-      local bx, by = data.mx + gap_x, data.my + gap_y
-      if bx + box_w > data.gx + data.gw then bx = data.mx - box_w - gap_x end
-      if by + box_h > data.gy + data.gh then by = data.my - box_h - data.pad end
-      live_readout.bx = clamp(bx, data.gx, math.max(data.gx, data.gx + data.gw - box_w))
-      live_readout.by = clamp(by, data.gy, math.max(data.gy, data.gy + data.gh - box_h))
-      live_readout.text, live_readout.tw, live_readout.th = text, tw, th
       live_readout.active = true
     else
       eligible = false
@@ -125,11 +113,6 @@ local function draw_live_readout(dl, live_readout, data)
     theme.fade(T.TEXT_PRIMARY, 0.3 * alpha), theme.scale)
   reaper.ImGui_DrawList_AddCircleFilled(dl, live_readout.mx, live_readout.yy, M.UPDATE_DOT_R,
     theme.fade(T.TEXT_PRIMARY, alpha))
-  reaper.ImGui_DrawList_AddRectFilled(dl, live_readout.bx, live_readout.by,
-    live_readout.bx + live_readout.tw + data.pad * 2, live_readout.by + live_readout.th + data.pad,
-    theme.fade(T.BG_POPUP, alpha), 3 * theme.scale)
-  reaper.ImGui_DrawList_AddText(dl, live_readout.bx + data.pad, live_readout.by + data.pad / 2,
-    theme.fade(T.TEXT_PRIMARY, alpha), live_readout.text)
   reaper.ImGui_DrawList_PopClipRect(dl)
 end
 
@@ -479,13 +462,14 @@ function spectrum.draw(ctx, state, width, height, res, input_exclusion, footer_h
     model.history_epoch, model.prefs.tilt, draw_live
   live_input.fmin, live_input.fmax, live_input.bottom = fmin, measured_max, bottom
   live_input.gx, live_input.gy, live_input.gw, live_input.gh = gx, gy, trace_width, gh
-  live_input.mx, live_input.my, live_input.pad, live_input.count = mx, my, pad, count
+  live_input.mx, live_input.count = mx, count
   hover_peaks.draw_labels(ctx, dl, gx, gy, trace_width, gh, bottom, input_exclusion,
     controls_drawn and overlay_bounds or nil, show_clear and clear_bounds or nil)
   axis_input.gx, axis_input.gy, axis_input.gw, axis_input.gh = gx, gy, gw, gh
   axis_input.axis, axis_input.fmin, axis_input.fmax, axis_input.bottom = axis, fmin, fmax, bottom
   axis_input.mx, axis_input.my = mx, my
   axis_input.draw_live = draw_live
+  axis_input.note_names = model.prefs.note_names == 'on'
   axis_input.level_right = x + width - M.SPECTRUM_BAND_GAP
   axis_input.eligible = hovered and not input_excluded and not overlay_hot
     and not settings.is_open() and not entry.is_open() and not reaper.ImGui_IsAnyItemActive(ctx)

@@ -274,12 +274,11 @@ function view.measure(ctx, v, w, h, docked)
   options.loudness_min_height = 228 * theme.scale
   options.previous_mode = v.previous_mode
   options.stereo_side_width = v.panels.stereo_preferences.show_correlation and M.STEREO_CORRELATION_W or 0
-  local prefs = layout.current(v.model)
+  local prefs = v.model
   local geometry
   if g.shared then
     local card = v.card_info
     card.width, card.natural, card.minimum = g.strip.w + g.gap, sizes.card_natural, sizes.card_minimum
-    card.column = false
     geometry = layout.measure_with_card(g.panels.w, g.panels.h, prefs, options, card)
     g.reference.h = math.max(geometry.card_h, sizes.card_minimum)
     g.strip.h = math.min(g.strip.h, geometry.card_h)

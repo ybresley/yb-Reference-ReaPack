@@ -320,6 +320,14 @@ end
 -- Previous and next as one joined pair at (x, y), `w` wide. Dim but still in
 -- place when `live` is false, so nothing ever disappears. `id` keeps pairs
 -- apart. Returns -1 or 1 for the arrow clicked this frame.
+-- A momentary press has no ON state to show, so its icon line flashes the
+-- accent and fades back to rest instead.
+local function step_icon_face(ctx, key, clicked)
+  local progress = widgets.motion_event(ctx, key, true, theme.motion.BUTTON_BLOOM, clicked)
+  if not progress or progress >= 1 then return nil end
+  return { color = theme.blend(T.ACCENT_HOVER, T.TEXT_SECONDARY, progress ^ 2) }
+end
+
 function widgets.step_arrows(ctx, font, id, x, y, w, live, prev_tip, next_tip)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local left_w = math.floor(w / 2 + 0.5)
@@ -331,14 +339,14 @@ function widgets.step_arrows(ctx, font, id, x, y, w, live, prev_tip, next_tip)
       left_w, ctrl) then
     delta = -1
   end
-  icons.paint_over_item(ctx, font, "chevron-left")
+  icons.paint_over_item(ctx, font, "chevron-left", step_icon_face(ctx, "step_" .. id .. "_prev", delta == -1))
   tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx), prev_tip)
   reaper.ImGui_SetCursorScreenPos(ctx, x + left_w, y)
   if reaper.ImGui_Button(ctx, (font and icons.NAMES["chevron-right"] and "" or "\u{203A}") .. "##" .. id .. "_next",
       w - left_w, ctrl) then
     delta = 1
   end
-  icons.paint_over_item(ctx, font, "chevron-right")
+  icons.paint_over_item(ctx, font, "chevron-right", step_icon_face(ctx, "step_" .. id .. "_next", delta == 1))
   tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx), next_tip)
   if not live then reaper.ImGui_EndDisabled(ctx) end
   widgets.end_segment(ctx, x, y, x + w, y + ctrl, 2)
@@ -377,7 +385,9 @@ function widgets.begin_segment(ctx, x0, y0, x1, y1)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0)
 end
 
-function widgets.end_segment(ctx, x0, y0, x1, y1, cells)
+-- `edges`, when given, lists the inner cell boundaries of a group whose cells
+-- are not equal; otherwise the hairlines fall between equal cells.
+function widgets.end_segment(ctx, x0, y0, x1, y1, cells, edges)
   reaper.ImGui_PopStyleColor(ctx)
   reaper.ImGui_PopStyleVar(ctx, 2)
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
@@ -385,7 +395,7 @@ function widgets.end_segment(ctx, x0, y0, x1, y1, cells)
   local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
   local line = theme.fade(T.STROKE_SECONDARY, alpha)
   for i = 1, cells - 1 do
-    local dx = widgets.segment_edge(x0, x1, cells, i) + 0.5
+    local dx = (edges and edges[i] or widgets.segment_edge(x0, x1, cells, i)) + 0.5
     reaper.ImGui_DrawList_AddLine(dl, dx, y0 + 1, dx, y1 - 1, line)
   end
   reaper.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, line, rounding)
@@ -747,6 +757,23 @@ end
 -- the binary search would otherwise be a dozen CalcTextSize calls a frame for a
 -- string that almost never changes. Bounded: the whole cache is dropped once it
 -- grows past a project's worth of names.
+-- Breaks `text` between words into lines no wider than `width` in the current
+-- font. A single word wider than `width` keeps a line to itself. Measures each
+-- candidate line, so callers cache the result.
+function widgets.wrap_words(ctx, text, width)
+  local lines, line = {}, ""
+  for word in text:gmatch("%S+") do
+    local candidate = line == "" and word or line .. " " .. word
+    if line ~= "" and reaper.ImGui_CalcTextSize(ctx, candidate) > width then
+      lines[#lines + 1], line = line, word
+    else
+      line = candidate
+    end
+  end
+  lines[#lines + 1] = line
+  return lines
+end
+
 local ell_cache, ell_n = {}, 0
 -- `cut` says WHERE the ellipsis goes:
 --   nil / "end"  "Some long name…"        — the default; a name is read front-first
@@ -1107,29 +1134,33 @@ local function db_number_gesture(ctx, id, value, opts, to_t, to_db, reset, click
   end
 end
 
--- The typed-entry field shared by the dB controls, at the cursor. Typing
--- applies each valid value live; Enter or leaving the field commits it,
--- Escape cancels and right-click resets to `default`. Returns (value, commit)
--- when something changed this frame, whether the field ended, and whether it
--- is hovered.
+-- The typed-entry field shared by the dB controls, at the cursor. Typing only
+-- edits the text: a half-typed number such as "1" on the way to "12" must not
+-- reach the audio. Enter or leaving the field applies it, Escape cancels and
+-- right-click resets to `default`. Returns (value, commit) when something
+-- changed this frame, whether the field ended, and whether it is hovered.
 local function db_entry_field(ctx, id, edit, value, min, max, default, entry_w, entry_pad, frame_pad_y)
   if edit.focus then
     reaper.ImGui_SetKeyboardFocusHere(ctx)
     edit.focus = false
   end
+  -- The bar is the field's frame, so the field paints no box of its own, and
+  -- its text sits right-aligned against " dB" where the reading normally is.
+  -- InputText has no alignment option; the left padding does it instead.
+  local text_w = select(1, reaper.ImGui_CalcTextSize(ctx, edit.text))
+  local left_pad = math.max(entry_pad, entry_w - entry_pad - text_w)
   reaper.ImGui_SetNextItemWidth(ctx, entry_w)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), T.ACCENT)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), entry_pad, frame_pad_y)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBg(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgHovered(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBgActive(), 0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding(), left_pad, frame_pad_y)
   local changed, text = numeric_input.text(ctx, "##" .. id .. "_value",
     edit.text, "signed_decimal", DB_AUTO_SELECT)
-  reaper.ImGui_PopStyleVar(ctx)
-  reaper.ImGui_PopStyleColor(ctx)
-  local result, commit
-  if changed then
-    edit.text = text
-    local typed = parse_db_entry(text, min, max)
-    if typed ~= nil and typed ~= (value or 0) then result, commit = typed, false end
-  end
+  reaper.ImGui_PopStyleVar(ctx, 2)
+  reaper.ImGui_PopStyleColor(ctx, 4)
+  if changed then edit.text = text end
   local field_active = reaper.ImGui_IsItemActive(ctx)
   if field_active then edit.active = true end
   local hovered = reaper.ImGui_IsItemHovered(ctx)
@@ -1146,7 +1177,7 @@ local function db_entry_field(ctx, id, edit, value, min, max, default, entry_w, 
   elseif submit or deactivated then
     return parse_db_entry(edit.text, min, max) or (value or 0), true, true, hovered
   end
-  return result, commit, false, hovered
+  return nil, nil, false, hovered
 end
 
 -- Pitch accepts either drag direction, so an axis-specific resize cursor would
@@ -1165,9 +1196,10 @@ end
 -- the value's position along the taper. A line marks that position and a short
 -- tick marks 0 dB. The bar is a relative control: dragging left or right moves
 -- the value from where it was (Alt for fine adjustment), so grabbing it never
--- jumps. A click without a drag opens exact entry over the value; Enter or
--- leaving the field applies it and Escape cancels. Right-click resets.
--- opts = { min, max, default, width, label, taper, edit_key, tip }.
+-- jumps. A click without a drag opens exact entry over the value; the level
+-- stays put while typing, Enter or leaving the field applies the number and
+-- Escape cancels. Right-click resets.
+-- opts = { min, max, default, width, label, label_colour, taper, edit_key, tip }.
 -- Returns (value, commit) when something changed this frame, else nil.
 function widgets.db_bar(ctx, id, value, opts)
   opts = opts or {}
@@ -1259,7 +1291,19 @@ function widgets.db_bar(ctx, id, value, opts)
       end
     end
   end
-  local value_left = value_x or inner1 - uw
+  -- Exact entry covers the number only; the unit and label stay where they are.
+  local entry_w, entry_pad, ex
+  if edit then
+    local min_w = reaper.ImGui_CalcTextSize(ctx, decibels.format(min))
+    local max_w = reaper.ImGui_CalcTextSize(ctx, decibels.format(max))
+    entry_pad = math.min(pad_x, M.FRAME_PAD_Y)
+    entry_w = math.max(min_w, max_w) + entry_pad * 2
+    ex = x1 - pad_x - uw - entry_w + entry_pad
+    -- The value line can't step aside for typed text, so it hides under the
+    -- field rather than strike through the number being typed.
+    if line_crosses(line_x, clear, ex, x1 - pad_x) then line_x = nil end
+  end
+  local value_left = value_x or ex or inner1 - uw
   local label_x
   if opts.label then
     local lw = select(1, reaper.ImGui_CalcTextSize(ctx, opts.label))
@@ -1275,16 +1319,11 @@ function widgets.db_bar(ctx, id, value, opts)
       fade(hot and T.ACCENT_HOVER or T.ACCENT, alpha), 1.5)
   end
   if label_x then
-    reaper.ImGui_DrawList_AddText(dl, label_x, ty, fade(T.TEXT_SECONDARY, alpha), opts.label)
+    reaper.ImGui_DrawList_AddText(dl, label_x, ty,
+      fade(opts.label_colour or T.TEXT_SECONDARY, alpha), opts.label)
   end
 
   if edit then
-    -- The field covers the number only; the unit and label stay where they are.
-    local min_w = reaper.ImGui_CalcTextSize(ctx, decibels.format(min))
-    local max_w = reaper.ImGui_CalcTextSize(ctx, decibels.format(max))
-    local entry_pad = math.min(pad_x, M.FRAME_PAD_Y)
-    local entry_w = math.max(min_w, max_w) + entry_pad * 2
-    local ex = x1 - pad_x - uw - entry_w + entry_pad
     reaper.ImGui_SetCursorScreenPos(ctx, ex, y0)
     if edit.focus then focus.keep_zone(ex, y0, x1, y1) end
     local frame_pad_y = select(2, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))

@@ -206,8 +206,17 @@ local function slot_text(state)
   if state.reference.latched then return "NO TARGET", false end
   local list = pin_list(state)
   if list and #list > 0 then return "Choose a reference", true end
-  if ps and ps.dir then return "Drag a sound or audio file here to pin it", true end
+  if ps and ps.dir then return "No pinned references yet", true end
   return "Save your project to pin references here", true
+end
+
+-- The line for the middle of the Reference card while nothing is selected, or
+-- nil when a drop there could not pin: the project is unsaved, or its pinned
+-- references could not be read.
+function refpicker.empty_message(state)
+  local ps = state.pins
+  if state.selected or not ps or ps.load_newer or ps.load_error or not ps.dir then return nil end
+  return "Drag an audio file here to pin it to the project."
 end
 
 -- Has a drag STARTED on the slot during the current mouse hold? A drag that

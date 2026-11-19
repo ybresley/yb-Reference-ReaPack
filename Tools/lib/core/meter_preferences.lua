@@ -3,7 +3,7 @@ local preferences = {}
 local json = require('vendor.json')
 local targets = require('core.meter_targets')
 
-preferences.VERSION = 6
+preferences.VERSION = 7
 preferences.OPTIONS = {
   view = { 'all', 'pictures', 'meters' },
   mode = { 'LUFS', 'K-20', 'K-14', 'K-12' },
@@ -51,7 +51,7 @@ function preferences.defaults()
   return { view='all', visible=true, show_meters=true,
     show_loudness=true, show_lr=true,
     show_history=true, mode='LUFS', colours='Accent Fade', target=-16,
-    ceiling=-1, range=-48, seconds=10, preset='',
+    ceiling=0, range=-48, seconds=10, preset='',
     loudness_scale='Expanded', readings='Absolute',
     show_m=true, show_s=true, show_i=true, show_lra=true,
     history_position='Automatic', extra_readings=true,
@@ -181,6 +181,11 @@ local function migrate(prefs,version)
   end
   if version<5 then result.peak_measurement='True Peak' end
   if version<6 then result.target_difference_measurement='Integrated' end
+  -- -1 was the default before version 7. A preset that sets its own -1 keeps it.
+  if version<7 and result.ceiling==-1 then
+    local preset=type(result.preset)=='string' and targets.get(result.preset)
+    if not (preset and preset.ceiling~=nil) then result.ceiling=0 end
+  end
   for key,value in pairs(FIXED) do result[key]=value end
   return result
 end
@@ -191,7 +196,8 @@ function preferences.decode(text)
   local ok,data=pcall(json.decode,text)
   if not ok or type(data)~='table' then return nil,'Saved meter settings are invalid.' end
   if data.version~=1 and data.version~=2 and data.version~=3
-      and data.version~=4 and data.version~=5 and data.version~=preferences.VERSION then
+      and data.version~=4 and data.version~=5 and data.version~=6
+      and data.version~=preferences.VERSION then
     return nil,'Saved meter settings use an unsupported version.'
   end
   if type(data.preferences)~='table' then return nil,'Saved meter settings are invalid.' end

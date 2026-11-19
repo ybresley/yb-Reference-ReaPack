@@ -390,7 +390,8 @@ local BASE = {
   -- the dropdown clipped "LUFS-M" (user-reported 2026-08-06), so it took the
   -- width the number box didn't need — the total is unchanged.
   MATCH_UNIT_W   = 100,
-  MATCH_VAL_W    = 50,
+  -- The number box holds "-23.5" and no more, so the row has room for its lock.
+  MATCH_VAL_W    = 44,
   -- (The preset list's size bound is core/match.lua's PRESET_MAX — a data
   -- policy, not a pixel.)
   -- The browser popup's compact audition strip (Phase 5.7 Stage 3). The
@@ -548,6 +549,7 @@ local BASE = {
   SET_LAYOUT_MINI_W = 40,
   SET_LAYOUT_MINI_H = 22,
   SET_LAYOUT_PREVIEW_H = 105,
+  SET_LAYOUT_PREVIEW_MAX_H = 240, -- the Panel Positions preview takes the view's shape up to this height
   SET_LAYOUT_MINI_GAP = 5,
   SET_LAYOUT_GRID_GAP = 6,
   -- A taller fixed surface keeps the grouped Settings layout comfortable while

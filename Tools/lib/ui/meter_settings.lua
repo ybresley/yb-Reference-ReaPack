@@ -4,6 +4,7 @@ local tips = require('ui.tips')
 local anchored_panel = require('ui.anchored_panel')
 local focus = require('ui.focus')
 local targets = require('core.meter_targets')
+local readings = require('core.meter_readings')
 local preferences = require('core.meter_preferences')
 local icons = require('ui.icons')
 local pointer = require('ui.meter_hover')
@@ -39,6 +40,17 @@ local PAGE_GROUPS = {
   {{'session_runs',2},{'session_preset',3}},
 }
 
+-- Preset ceilings are published true-peak limits. Say so when the warning
+-- compares them with sample peaks, which can stay below a passed limit.
+local function target_details(model)
+  local preset = targets.active(model.prefs)
+  local text = targets.details(preset)
+  if preset and preset.ceiling ~= nil and readings.peak_measurement(model) == 'Sample Peak' then
+    text = text .. '\nThe preset ceiling is a true-peak limit. Sample peaks can stay below it while true peaks pass it.'
+  end
+  return text
+end
+
 local function measure_page(ctx, model, width, view)
   view = view or ui
   local pad, gap = M.WINDOW_PAD, M.ITEM_SPACING_Y
@@ -55,7 +67,7 @@ local function measure_page(ctx, model, width, view)
     local id, rows = spec[1], spec[2]
     local group_height = pad*2 + rows*frame + (rows-1)*gap
     if id == 'loudness_target' then
-      group_height = group_height + gap + text_height(targets.details(targets.active(model.prefs)),pad*4)
+      group_height = group_height + gap + text_height(target_details(model),pad*4)
     elseif id == 'session_preset' then
       group_height = group_height + gap + text_height(SAVED_DISPLAY_HINT,pad*4)
       if model.display_preset_error then
@@ -112,7 +124,7 @@ local HINTS = {
   clip_hold='Until Cleared keeps clipping marks until you clear warnings.',
   keep_integrated='Keeps the integrated reading visible after playback stops. Stopping and starting playback begins a new measurement. Jumping to another position during playback keeps the current measurement.',
   target='Custom loudness target in LUFS. Editing this value changes the selected preset to Custom.',
-  ceiling='Warning threshold for the maximum true peak. This does not limit or change the audio.',
+  ceiling='Warning threshold for the peak maximum, measured as chosen in Peak Measurement on the L/R page. This does not limit or change the audio.',
   yellow_lead='Starts fading from the accent colour to yellow this far below the target. Reaches yellow at the target.',
   red_span='Reaches full red this far above the target. The fade from yellow to red begins at the target.',
   loudness_scale='Expanded gives louder levels more space. Target +9 and +18 set the top of the scale that far above your target.',
@@ -247,10 +259,10 @@ local function target_row(ctx, prefs)
   return action
 end
 
-local function input_row(ctx, prefs, key, label, low, high)
+local function input_row(ctx, prefs, key, label, low, high, unit)
   row_label(ctx, label, key, M.SPECTRUM_OPTION_W)
   R.ImGui_SetNextItemWidth(ctx, M.SPECTRUM_OPTION_W)
-  local format = key=='target' and '%.1f LUFS' or '%.1f dBTP'
+  local format = '%.1f ' .. unit
   local changed, value = R.ImGui_InputDouble(ctx, '##meter_' .. key, prefs[key], 0, 0, format)
   if changed and value >= low and value <= high then return set(key, value) end
 end
@@ -293,7 +305,7 @@ local function display_page(ctx, prefs, model)
   end)
 end
 
-local function loudness_page(ctx, prefs)
+local function loudness_page(ctx, prefs, model)
   local disabled = not prefs.show_loudness or not prefs.show_meters
   local no_display = disabled and not prefs.show_history
   local action = group(ctx, 'loudness_bars', 'Meters', true, function()
@@ -309,11 +321,13 @@ local function loudness_page(ctx, prefs)
   end)
   return accept(action, group(ctx, 'loudness_target', 'Target', false, function()
     local result = target_row(ctx,prefs)
-    result = accept(result,input_row(ctx,prefs,'target','Custom Target',-60,0))
-    result = accept(result,input_row(ctx,prefs,'ceiling','True-Peak Warning',-24,3))
+    result = accept(result,input_row(ctx,prefs,'target','Custom Target',-60,0,'LUFS'))
+    -- The effective measurement, which is Sample Peak at unsupported sample rates.
+    local _, peak_unit = readings.peak_maximum_label(model)
+    result = accept(result,input_row(ctx,prefs,'ceiling','Peak Warning',-24,3,peak_unit))
     result = accept(result,option_row(ctx,prefs,'tolerance','Target Tolerance'))
     R.ImGui_PushTextWrapPos(ctx,0)
-    R.ImGui_TextDisabled(ctx,targets.details(targets.active(prefs)))
+    R.ImGui_TextDisabled(ctx,target_details(model))
     R.ImGui_PopTextWrapPos(ctx)
     return result
   end))
@@ -395,7 +409,7 @@ end
 
 local DRAW_PAGE = {
   function(ctx, model) return display_page(ctx, model.prefs,model) end,
-  function(ctx, model) return loudness_page(ctx, model.prefs) end,
+  function(ctx, model) return loudness_page(ctx, model.prefs, model) end,
   function(ctx, model) return lr_page(ctx, model.prefs) end,
   function(ctx, model) return history_page(ctx, model.prefs) end,
   function(ctx, model) return appearance_page(ctx, model.prefs,model) end,

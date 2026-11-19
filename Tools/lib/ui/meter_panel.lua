@@ -142,7 +142,23 @@ local function readings_column(ctx,dl,r,model,placement,embedded,presentation)
   if not embedded then
     drawing.surface(dl,{x=r.x,y=r.y,w=r.w,h=placement.height})
   end
-  local centre=r.x+(r.w-20*s)/2
+  -- Beside the meters the strip starts 8px in from the column's edge, where
+  -- panel.paint puts its background. Alone it fills the column.
+  local left=r.x+(embedded and 8*s or 0)
+  local right=r.x+r.w
+  local strip_centre=(left+right)/2
+  local label_width=math.max(0,right-left-12*s)
+  -- The unit hangs right of the value the way the sign hangs left, so the value
+  -- column sits half that overhang left of centre. Every row uses the widest
+  -- unit on show, which keeps the digits of all three rows in one column.
+  local unit_font=theme.push_release_font(ctx,style.readings_unit_size*s)
+  local unit_overhang=0
+  for _,key in ipairs(keys) do
+    local width=R.ImGui_CalcTextSize(ctx,READING_UNITS[key])
+    unit_overhang=math.max(unit_overhang,width)
+  end
+  if unit_font then R.ImGui_PopFont(ctx) end
+  local centre=strip_centre-(unit_overhang+5*s)/2
   local values=model.values or {}
   local measurement=model.prefs.target_difference_measurement or 'Integrated'
   local selected=1
@@ -167,7 +183,6 @@ local function readings_column(ctx,dl,r,model,placement,embedded,presentation)
     local body_width=R.ImGui_CalcTextSize(ctx,body)
     if font then R.ImGui_PopFont(ctx) end
     local label=READING_LABELS[key]
-    local label_width=r.w-20*s
     if key=='target' then
       local suffix=' ('..MEASUREMENTS[selected][1]..')'
       local label_font=theme.push_release_font(ctx,style.readings_label_size*s)
@@ -176,14 +191,14 @@ local function readings_column(ctx,dl,r,model,placement,embedded,presentation)
       if label_font then R.ImGui_PopFont(ctx) end
     end
     if key=='target' and not presentation then
-      R.ImGui_SetCursorScreenPos(ctx,centre-label_width/2,y)
+      R.ImGui_SetCursorScreenPos(ctx,strip_centre-label_width/2,y)
       local next_measurement=MEASUREMENTS[selected%#MEASUREMENTS+1][2]
       if widgets.text_button(ctx,'##target_difference',label,label_width,metrics.label,style.readings_label_size*s,
           'Click to switch to '..next_measurement..'.') then
         action={type='meter_set_preference',key='target_difference_measurement',value=next_measurement}
       end
     else
-      drawing.text(ctx,dl,centre,y,label,T.TEXT_SECONDARY,style.readings_label_size*s,'center',label_width)
+      drawing.text(ctx,dl,strip_centre,y,label,T.TEXT_SECONDARY,style.readings_label_size*s,'center',label_width)
     end
     local value_y=y+metrics.label+style.readings_label_gap*s
     drawing.text(ctx,dl,centre,value_y,value,colour,style.readings_value_size*s,'number')
@@ -338,8 +353,7 @@ end
 local seam_drag
 
 local function split_state(state)
-  local key=state.layout_prototype and state.layout_prototype.active or 'default'
-  return state.layout_meter_splits and state.layout_meter_splits[key]
+  return state.layout_meter_splits
 end
 
 local function seam_input(ctx,geometry,x,y,width,height,variant,swap_blocked)
@@ -464,10 +478,13 @@ function panel.paint(ctx,model,geometry,x,y,presentation,channel_layout_notice)
   end
   if shared and not geometry.surface_painted then drawing.surface(dl,shared) end
   local action
+  -- History beside the meters shares their grey surface, gap included, so the
+  -- group reads as one panel. Stacked below, the meters' readings strip stays
+  -- on the window background.
   if geometry.surface_painted then
     for _,seam in ipairs(geometry.seams or {}) do
-      if seam.axis=='y' or seam.key=='history_x' then
-        local footer=seam.axis=='y' and (geometry.footer_height or theme.metrics.RULER_H) or 0
+      if seam.axis=='y' then
+        local footer=geometry.footer_height or theme.metrics.RULER_H
         drawing.rect(dl,x+seam.x,y+seam.y-footer,seam.w,seam.h+footer,T.BG_WINDOW)
       end
     end
@@ -554,7 +571,7 @@ function panel.draw(ctx,state,res,x,y,width,height,geometry,footer_height,blocke
   end
   local error_hover=error and R.ImGui_IsMouseHoveringRect(ctx,
     x+8*s,error_top,x+width-8*s,error_top+error_height)
-  local variant=state.layout_prototype and state.layout_prototype.active or 'default'
+  local variant=state.layout_prototype and 'arranged' or 'default'
   local panels={}
   for _,key in ipairs({'loudness','lr','readings','history'}) do
     local r=geometry[key]

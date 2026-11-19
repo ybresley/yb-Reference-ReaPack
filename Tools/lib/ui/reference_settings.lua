@@ -20,9 +20,9 @@ local MODES = {
 local PANELS = {
   { id = "waveform", label = "Waveform" },
   { id = "spectrum", label = "Spectrum" },
-  { id = "stereo", label = "Stereo" },
+  { id = "stereo", label = "Scope" },
 }
-local PANEL_NAMES = { waveform = "Waveform", spectrum = "Spectrum", stereo = "Stereo" }
+local PANEL_NAMES = { waveform = "Waveform", spectrum = "Spectrum", stereo = "Scope" }
 local swap_panel
 
 local function enabled(enabled, id)
@@ -185,7 +185,7 @@ local function position_choices(ctx, layout, mode,
           reaper.ImGui_HoveredFlags_AllowWhenDisabled
           and reaper.ImGui_HoveredFlags_AllowWhenDisabled() or 0)
         tips.show(ctx, not valid and hovered, mode == "vertical"
-          and "Stereo stays beside the stacked panels." or "Stereo stays in a smaller position.")
+          and "Scope stays beside the stacked panels." or "Scope stays in a smaller position.")
       end
     end
     reaper.ImGui_EndPopup(ctx)
@@ -193,9 +193,9 @@ local function position_choices(ctx, layout, mode,
   local note = "Click a panel to swap its position."
   if #visible == 3 then
     if mode == "top" or mode == "bottom" then
-      note = "Stereo stays in a smaller position. Click a panel to swap positions."
+      note = "Scope stays in a smaller position. Click a panel to swap positions."
     elseif mode == "vertical" then
-      note = "Stereo stays beside Waveform and Spectrum. Click either stacked panel to swap them."
+      note = "Scope stays beside Waveform and Spectrum. Click either stacked panel to swap them."
     end
   end
   setting_note(ctx, note)

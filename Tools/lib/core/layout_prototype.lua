@@ -1,11 +1,10 @@
--- Saved panel arrangements for Reference View. The waveform lives in the
+-- The saved panel arrangement for Reference View. The waveform lives in the
 -- Reference card, so the panels are the spectrum, stereo image and loudness.
 -- The UI supplies the space beside the card and draws the returned frames.
 local layout = {}
 
 local IDS = {'spectrum', 'stereo', 'loudness'}
 local VALID_ID = {spectrum=true, stereo=true, loudness=true}
-local VALID_VARIANT = {automatic=true, map=true, direct=true}
 local VALID_MODE = {auto=true, row=true, stack=true, grid=true,
   top=true, bottom=true, left=true, right=true}
 
@@ -15,20 +14,14 @@ local function copy(list)
   return result
 end
 
-local function variant(mode)
-  return {mode=mode, enabled=copy(IDS), order=copy(IDS),
-    shares={x=0.5, y=0.5}}
-end
+-- `reference` shows the Reference card beside the panels.
+-- Spectrum, Stereo or Loudness must stay visible; the Reference card alone is
+-- not a useful view.
+layout.LAST_PANEL = 'Keep Spectrum, Scope or Loudness visible.'
 
 function layout.new()
-  return {active='automatic', editing=false, variants={
-    automatic=variant('auto'), map=variant('auto'), direct=variant('grid'),
-  }}
-end
-
-function layout.current(model)
-  if type(model) ~= 'table' then return nil end
-  return model.variants and model.variants[model.active] or nil
+  return {mode='auto', enabled=copy(IDS), order=copy(IDS),
+    shares={x=0.5, y=0.5}, reference=true}
 end
 
 local function finite(value)
@@ -76,30 +69,23 @@ function layout.valid_share(key, value)
   return valid_split_key(key, axis)
 end
 
-function layout.apply(model, op)
-  if type(model) ~= 'table' or type(op) ~= 'table' then
+function layout.apply(prefs, op)
+  if type(prefs) ~= 'table' or type(op) ~= 'table' then
     return nil, 'Invalid layout action.'
   end
-  if op.type == 'variant' then
-    if not VALID_VARIANT[op.id] then return nil, 'Invalid layout approach.' end
-    model.active = op.id
-    model.editing = false
-    return model
-  end
-  if op.type == 'edit' then
-    if type(op.value) ~= 'boolean' then return nil, 'Invalid edit state.' end
-    model.editing = op.value
-    return model
-  end
-  local prefs = layout.current(model)
-  if not prefs then return nil, 'Choose a layout control mode first.' end
   if op.type == 'reset' then
-    model.variants[model.active] = variant(model.active == 'direct' and 'grid' or 'auto')
-    model.editing = false
+    -- In place: the caller's state keeps this table.
+    for key, value in pairs(layout.new()) do prefs[key] = value end
+  elseif op.type == 'reference' then
+    if type(op.value) ~= 'boolean' then return nil, 'Invalid Reference panel choice.' end
+    prefs.reference = op.value
+  elseif op.type == 'toggle' and op.id == 'reference' then
+    -- The hotkey can't know the card's state when it is pressed, so it flips it.
+    prefs.reference = prefs.reference == false
   elseif op.type == 'toggle' then
     if not VALID_ID[op.id] then return nil, 'Invalid panel.' end
     if enabled(prefs, op.id) then
-      if #prefs.enabled == 1 then return nil, 'Keep at least one panel visible.' end
+      if #prefs.enabled == 1 then return nil, layout.LAST_PANEL end
       for i, id in ipairs(prefs.enabled) do
         if id == op.id then table.remove(prefs.enabled, i); break end
       end
@@ -135,7 +121,7 @@ function layout.apply(model, op)
   else
     return nil, 'Invalid layout action.'
   end
-  return model
+  return prefs
 end
 
 local function clamp(value, low, high)
@@ -569,7 +555,6 @@ end
 --   width     the card's column, including the gap after it
 --   natural   the card's height when it is not stretched
 --   minimum   the card's smallest height
---   column    true to keep the card a full-height column, as while editing
 -- The card covers however many rows from the top bring it closest to its
 -- natural height; the panels in those rows narrow to make room, and the rows
 -- below run the full width. When the leftmost panel runs the full height, or
@@ -578,28 +563,26 @@ end
 -- height.
 function layout.measure_with_card(width, height, prefs, options, card)
   options = options or {}
-  if not card.column then
-    local g = layout.measure(width, height, prefs, options)
-    local rows = not g.temporary and #g.panels > 1 and left_rows(g, height)
-    if rows and #rows > 1 then
-      local best
-      for i = 1, #rows - 1 do
-        if rows[i] >= card.minimum
-            and (not best or math.abs(rows[i] - card.natural) < math.abs(rows[best] - card.natural)) then
-          best = i
-        end
+  local g = layout.measure(width, height, prefs, options)
+  local rows = not g.temporary and #g.panels > 1 and left_rows(g, height)
+  if rows and #rows > 1 then
+    local best
+    for i = 1, #rows - 1 do
+      if rows[i] >= card.minimum
+          and (not best or math.abs(rows[i] - card.natural) < math.abs(rows[best] - card.natural)) then
+        best = i
       end
-      -- The last row only competes as the full-height column below.
-      if best and math.abs(rows[best] - card.natural) <= math.abs(height - card.natural) then
-        local gap = math.max(0, options.gap or 8*(options.scale or 1))
-        if narrow(g, rows[best], card.width, gap, options) then
-          g.card_h = rows[best]
-          return g
-        end
+    end
+    -- The last row only competes as the full-height column below.
+    if best and math.abs(rows[best] - card.natural) <= math.abs(height - card.natural) then
+      local gap = math.max(0, options.gap or 8*(options.scale or 1))
+      if narrow(g, rows[best], card.width, gap, options) then
+        g.card_h = rows[best]
+        return g
       end
     end
   end
-  local g = layout.measure(math.max(0, width - card.width), height, prefs, options)
+  g = layout.measure(math.max(0, width - card.width), height, prefs, options)
   shift(g, card.width)
   g.card_h = height
   return g

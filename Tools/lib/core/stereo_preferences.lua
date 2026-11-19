@@ -6,7 +6,7 @@ local choices = {
   trail = {short = true, medium = true, long = true},
   trace = {dots = true, lines = true},
 }
-local invalid = 'Saved stereo settings are invalid.'
+local invalid = 'Saved Scope settings are invalid.'
 
 local function finite(value)
   return type(value) == 'number' and value == value and math.abs(value) < math.huge
@@ -25,7 +25,7 @@ end
 function preferences.normalize(value)
   if type(value) ~= 'table' then return nil, invalid end
   if value.version ~= nil and value.version ~= 1 and value.version ~= 2 then
-    return nil, 'Saved stereo settings use an unsupported version.'
+    return nil, 'Saved Scope settings use an unsupported version.'
   end
   local result = preferences.defaults()
   for _, key in ipairs({'show_clipping', 'show_correlation'}) do
@@ -74,7 +74,7 @@ function preferences.decode(text)
   local ok, value = pcall(json.decode, text)
   if not ok or type(value) ~= 'table' then return nil, invalid end
   if value.version ~= 1 and value.version ~= 2 then
-    return nil, 'Saved stereo settings use an unsupported version.'
+    return nil, 'Saved Scope settings use an unsupported version.'
   end
   return preferences.normalize(value)
 end

@@ -26,6 +26,8 @@ local COMMANDS = {
     script = "yb-Reference_Hotkey_PlayPause.lua", intent = { type = "trigger_play", target = "main" } },
   { id = "pause", label = "Pause / Resume", section = "Reference View",
     script = "yb-Reference_Hotkey_PauseResume.lua", intent = { type = "toggle_pause", target = "main" } },
+  { id = "stop", label = "Stop", section = "Reference View",
+    script = "yb-Reference_Hotkey_Stop.lua", intent = { type = "stop_play", target = "main" } },
   { id = "latch", label = "Latch", section = "Reference View",
     -- Keep the 0.4.0 action path so existing Latch assignments remain attached.
     script = "yb-Reference_ToggleReferenceMode.lua", intent = { type = "toggle_reference" } },
@@ -47,6 +49,18 @@ local COMMANDS = {
     script = "yb-Reference_Hotkey_ToggleFilterMid.lua", intent = { type = "toggle_monitor_filter_preset", id = "mid" } },
   { id = "filter_high", label = "High", section = "Filter Bands",
     script = "yb-Reference_Hotkey_ToggleFilterHigh.lua", intent = { type = "toggle_monitor_filter_preset", id = "high" } },
+  { id = "panel_reference", label = "Show / Hide Reference", section = "Panels",
+    script = "yb-Reference_Hotkey_TogglePanelReference.lua",
+    intent = { type = "layout_prototype", operation = { type = "toggle", id = "reference" } } },
+  { id = "panel_spectrum", label = "Show / Hide Spectrum", section = "Panels",
+    script = "yb-Reference_Hotkey_TogglePanelSpectrum.lua",
+    intent = { type = "layout_prototype", operation = { type = "toggle", id = "spectrum" } } },
+  { id = "panel_stereo", label = "Show / Hide Scope", section = "Panels",
+    script = "yb-Reference_Hotkey_TogglePanelScope.lua",
+    intent = { type = "layout_prototype", operation = { type = "toggle", id = "stereo" } } },
+  { id = "panel_loudness", label = "Show / Hide Loudness", section = "Panels",
+    script = "yb-Reference_Hotkey_TogglePanelLoudness.lua",
+    intent = { type = "layout_prototype", operation = { type = "toggle", id = "loudness" } } },
   { id = "library", label = "Open / Close Library", section = "Windows",
     script = "yb-Reference_Hotkey_ToggleLibrary.lua", intent = { type = "toggle_browser" } },
   { id = "settings", label = "Open / Close Settings", section = "Windows",
@@ -169,9 +183,13 @@ local function touch_lease()
   return true
 end
 
+-- Panel intents nest their operation, so copy deeply: the handler must never
+-- receive a table it could change for every later press.
 local function copy_intent(intent)
   local result = {}
-  for key, value in pairs(intent) do result[key] = value end
+  for key, value in pairs(intent) do
+    result[key] = type(value) == "table" and copy_intent(value) or value
+  end
   return result
 end
 

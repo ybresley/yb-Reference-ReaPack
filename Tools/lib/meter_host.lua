@@ -25,6 +25,9 @@ local PAIR_PACKET, PAIR_VALUES = 156100, 156108
 local CHANNEL_FIELDS = {'rms','peak','peak_age','live_peak','true_peak',
   'true_peak_age','live_true_peak','crest','field_rms'}
 local STOPPED_MONITORING = "Monitor while stopped (output)"
+-- Optional like output 39: a helper loaded before this output existed keeps
+-- measuring until REAPER reloads it, without the Sample Peak maximum.
+local SAMPLE_PEAK_MAX = "Sample Peak Max (output)"
 
 local CREST_NAMES = {
   rms_l = "RMS Left (output)",
@@ -73,6 +76,7 @@ for _, key in ipairs({ 'capture_mode', 'reset_request', 'reset_policy',
     'loop_start', 'loop_end', 'loop_enabled' }) do
   PROTOCOL_ONE_NAMES[key] = OLD_CREST_NAMES[key]
 end
+OUTPUT_NAMES.sp_max = SAMPLE_PEAK_MAX
 for key, value in pairs(CREST_NAMES) do
   if key ~= "control_protocol" and key ~= "instance_token" then
     OUTPUT_NAMES[key] = value
@@ -147,7 +151,9 @@ local function saved_identity(R)
   return { guid = guid, original = original, label = CREST_LABEL }
 end
 
-local function find_params(R, snap, fx, names, optional)
+-- Returns the required parameters and every parameter index by cleaned name,
+-- so callers can look up optional outputs.
+local function find_params(R, snap, fx, names)
   local available = {}
   local count = R.TrackFX_GetNumParams(snap.master, fx)
   if type(count) ~= "number" then return nil end
@@ -160,12 +166,14 @@ local function find_params(R, snap, fx, names, optional)
     found[key] = available[clean_name(name)]
     if found[key] == nil then return nil end
   end
-  return found, optional and available[clean_name(optional)]
+  return found, available
 end
 
 local function validate_params(R, snap, entry)
-  local params, stopped = find_params(R, snap, entry.fx, CREST_NAMES, STOPPED_MONITORING)
+  local params, available = find_params(R, snap, entry.fx, CREST_NAMES)
   if not params then return nil, "crest_parameters_missing" end
+  local stopped = available[clean_name(STOPPED_MONITORING)]
+  params.sp_max = available[clean_name(SAMPLE_PEAK_MAX)]
   local protocol = R.TrackFX_GetParam(snap.master, entry.fx, params.control_protocol)
   local token = R.TrackFX_GetParam(snap.master, entry.fx, params.instance_token)
   if protocol ~= 4 or not valid_counter(token) then
@@ -968,6 +976,8 @@ function host.new(R, options)
     result.correlations=accept_pairs(pair_header,pair_values,channel_header,self.control,readings.sequence)
     local basic_only = result.lra_valid == -2
     result.sample_rate_supported, result.true_peak_available = not basic_only, not basic_only
+    -- False only for a helper loaded before output 40, so the panel can ask for a restart.
+    result.sample_peak_max_available = params.sp_max ~= nil
     result.loudness_available=channel_header.known==1 and not basic_only
     if basic_only then
       local known, rate
@@ -1000,7 +1010,7 @@ function host.new(R, options)
       -- Unsupported calculations are distinct from a damaged audio packet.
       -- Raw RMS already waits for its complete 400 ms window in the helper.
       result.lra_seconds,result.lra,result.lra_low,result.lra_high=nil,nil,nil,nil
-      result.tp_max,result.crest,result.crest_l,result.crest_r=nil,nil,nil,nil
+      result.tp_max,result.sp_max,result.crest,result.crest_l,result.crest_r=nil,nil,nil,nil,nil
       for _,side in ipairs({'l','r'}) do
         result['true_peak_'..side],result['live_true_peak_'..side],result['true_peak_age_'..side]=nil,nil,nil
       end

@@ -25,7 +25,7 @@ local LOOP = "\u{21BB}" -- ↻
 local SOFT_ACTIVE_FACE = { color = T.ACCENT_HOVER }
 
 local BAR_OPTS = { min = -60, max = 0, default = 0, label = "Vol",
-  tip = "Master preview volume.\n"
+  tip = "Library preview volume. References play at their own trim.\n"
     .. "Drag left or right \u{00B7} Alt for fine adjustment \u{00B7} click to type \u{00B7} right-click to reset" }
 
 -- Play, pause, stop and loop as one joined group from x0 to x1: the Reference
@@ -199,7 +199,8 @@ function transport.draw_stop(ctx, state, font, opts)
   if use_icon then icons.paint_over_item(ctx, font, "square") end
   local hovered = reaper.ImGui_IsItemHovered(ctx)
   if dim then reaper.ImGui_EndDisabled(ctx) end
-  tips.show(ctx, hovered, "Stop and return to the start")
+  tips.show(ctx, hovered, tips.with_shortcut(state, slot == "main" and "stop" or nil,
+    "Stop and return to the start"))
 
   if clicked then return { type = "stop_play", target = slot } end
   return nil

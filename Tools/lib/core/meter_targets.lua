@@ -20,7 +20,7 @@ targets.presets = {
   {id='aswg_portable',name='ASWG-R001 Portable',group=2,target=-18,ceiling=-1,tolerance=2,source=youlean,
     note='For portable game output over representative gameplay, not an individual sound effect.'},
   {id='fab_cd',name='CD Reference',group=3,target=-9,source=fab,
-    note='Pro-L 2 reference level, not a mandatory CD standard. Keeps your current true-peak ceiling.'},
+    note='Pro-L 2 reference level, not a mandatory CD standard. Keeps your current peak warning.'},
   {id='spotify',name='Spotify',group=3,target=-14,ceiling=-1,source=youlean,
     sources={youlean,fab},
     note='Also covers Pro-L 2\'s -14 LUFS streaming reference.'},
@@ -71,7 +71,7 @@ function targets.warning(preset)
 end
 
 function targets.details(preset)
-  if not preset then return 'Custom loudness target and true-peak ceiling.' end
+  if not preset then return 'Custom loudness target and peak warning.' end
   local lines = {}
   if preset.tolerance then lines[#lines+1] = string.format('Preset tolerance: ±%g LU',preset.tolerance) end
   if preset.i_min then lines[#lines+1] = string.format('Integrated range: %g to %g LUFS',preset.i_min,preset.i_max) end

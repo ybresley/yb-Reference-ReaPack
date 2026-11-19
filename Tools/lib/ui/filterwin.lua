@@ -17,7 +17,8 @@ local first_group = true
 
 local SPECTRUM_GROUPS = {
   { id = "frequency", title = "Frequency", items = {
-    { "resolution", "Resolution" }, { "smoothing", "Smoothing" } } },
+    { "resolution", "Resolution" }, { "smoothing", "Smoothing" },
+    { "note_names", "Note Names" } } },
   { id = "time", title = "Time", items = {
     { "speed", "Speed" }, { "average", "Average" }, { "hover_peaks", "Hover Peaks" } } },
   { id = "levels", title = "Levels", items = {
@@ -30,6 +31,7 @@ local OPTIONS = {
   smoothing = { "Off", "1/24 octave", "1/12 octave", "1/6 octave", values = { "off", "1/24", "1/12", "1/6" } },
   average = { "Off", "1 s", "3 s", "Infinite", values = { "off", "1s", "3s", "infinite" } },
   hover_peaks = { "On", "Off", values = { "hold", "off" } },
+  note_names = { "Off", "On", values = { "off", "on" } },
   range = { "60 dB", "90 dB", "120 dB", values = { 60, 90, 120 } },
   tilt = { "Flat", "3 dB/oct", "4.5 dB/oct", values = { 0, 3, 4.5 } },
   slope = { "12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct", values = { 12, 24, 36, 48 } },
@@ -46,6 +48,7 @@ local LABEL_TIPS = {
   average = "Adds an averaged trace. Longer times smooth out brief changes.\n"
     .. "Infinite accumulates until history is cleared or the source changes.",
   hover_peaks = "Holds and highlights peaks while you hover over the spectrum.",
+  note_names = "Shows the nearest musical note beside the frequency while you hover over the spectrum.",
   range = "Sets the lowest displayed level, from -60 to -120 dB.\n"
     .. "A larger range reveals quieter detail without changing the audio.",
   tilt = "Adjusts the displayed balance between low and high frequencies.\n"

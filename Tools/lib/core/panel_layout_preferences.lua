@@ -3,12 +3,13 @@ local json = require('vendor.json')
 local layout = require('core.layout_prototype')
 local reference = require('core.reference_layout')
 local preferences = {}
-local VARIANTS = {'automatic', 'map', 'direct'}
+-- Versions 1 and 2 kept one arrangement for each of three layout control
+-- modes; reading one keeps the arrangement of the mode that was in use.
 local VARIANT = {automatic=true, map=true, direct=true}
 local PANELS = {spectrum=true, stereo=true, loudness=true}
 -- Version 1 also arranged a Waveform panel. The waveform now lives in the
 -- Reference card, so reading a version 1 record drops that panel.
-local VERSION = 2
+local VERSION = 3
 local RETIRED = 'waveform'
 local MODES = {auto=true, row=true, stack=true, grid=true,
   top=true, bottom=true, left=true, right=true}
@@ -16,6 +17,7 @@ local METER_ORDER = {'loudness', 'lr', 'readings', 'history'}
 local METERS = {loudness=true, lr=true, readings=true, history=true}
 local METER_SHARES = {history_x=true, history_y=true, readings_x=true, loudness_lr=true}
 local INVALID = 'Saved panel arrangements are invalid.'
+local LAYOUT_KEYS = {mode=true, enabled=true, order=true, shares=true, reference=true}
 
 local function only_keys(value, allowed)
   for key in pairs(value) do if not allowed[key] then return false end end
@@ -57,34 +59,23 @@ local function meter_choices(value)
 end
 
 local function normalize(model, meter_splits)
-  if type(model) ~= 'table' or not VARIANT[model.active]
-      or type(model.variants) ~= 'table' or not only_keys(model.variants, VARIANT)
-      or (meter_splits ~= nil and type(meter_splits) ~= 'table') then
+  if type(model) ~= 'table' or not MODES[model.mode]
+      or type(model.shares) ~= 'table' or type(model.reference) ~= 'boolean' then
     return nil, nil, INVALID
   end
-  meter_splits = meter_splits or {}
-  if not only_keys(meter_splits, VARIANT) then return nil, nil, INVALID end
-  local clean = {active=model.active, editing=false, variants={}}
-  local meters = {}
-  for _, name in ipairs(VARIANTS) do
-    local source = model.variants[name]
-    if type(source) ~= 'table' or not MODES[source.mode]
-        or not only_keys(source, {mode=true, enabled=true, order=true, shares=true})
-        or type(source.shares) ~= 'table' then return nil, nil, INVALID end
-    local enabled = copy_list(source.enabled, PANELS, false)
-    local order = copy_list(source.order, PANELS, true)
-    if not enabled or not order then return nil, nil, INVALID end
-    local shares = {}
-    for key, value in pairs(source.shares) do
-      if not layout.valid_share(key, value) then return nil, nil, INVALID end
-      shares[key] = value
-    end
-    if shares.x == nil or shares.y == nil then return nil, nil, INVALID end
-    clean.variants[name] = {mode=source.mode, enabled=enabled, order=order, shares=shares}
-    meters[name] = meter_choices(meter_splits[name])
-    if not meters[name] then return nil, nil, INVALID end
+  local enabled = copy_list(model.enabled, PANELS, false)
+  local order = copy_list(model.order, PANELS, true)
+  if not enabled or not order then return nil, nil, INVALID end
+  local shares = {}
+  for key, value in pairs(model.shares) do
+    if not layout.valid_share(key, value) then return nil, nil, INVALID end
+    shares[key] = value
   end
-  return clean, meters
+  if shares.x == nil or shares.y == nil then return nil, nil, INVALID end
+  local meters = meter_choices(meter_splits)
+  if not meters then return nil, nil, INVALID end
+  return {mode=model.mode, enabled=enabled, order=order, shares=shares,
+    reference=model.reference}, meters
 end
 
 function preferences.defaults()
@@ -94,7 +85,6 @@ end
 function preferences.encode(model, meter_splits)
   local clean, meters, err = normalize(model, meter_splits)
   if not clean then return nil, err end
-  clean.editing = nil
   return json.encode({version=VERSION, layout=clean, meter_splits=meters})
 end
 
@@ -117,7 +107,7 @@ end
 -- showed only the waveform shows every remaining panel instead.
 local function upgrade_v1(stored_layout)
   if type(stored_layout) ~= 'table' or type(stored_layout.variants) ~= 'table' then return end
-  for _, name in ipairs(VARIANTS) do
+  for name in pairs(VARIANT) do
     local source = stored_layout.variants[name]
     if type(source) == 'table' then
       local enabled = without_retired(source.enabled)
@@ -130,25 +120,47 @@ local function upgrade_v1(stored_layout)
   end
 end
 
+-- Versions 1 and 2: the arrangement and meter proportions of the mode in use.
+-- The Reference card was always shown.
+local function upgrade_v2(stored)
+  local old = stored.layout
+  if type(old) ~= 'table' or not only_keys(old, {active=true, variants=true})
+      or not VARIANT[old.active] or type(old.variants) ~= 'table'
+      or not only_keys(old.variants, VARIANT) then return nil end
+  local source = old.variants[old.active]
+  if type(source) ~= 'table'
+      or not only_keys(source, {mode=true, enabled=true, order=true, shares=true}) then
+    return nil
+  end
+  local meter = stored.meter_splits[old.active]
+  -- A stored record is complete; a missing part must not silently reset choices.
+  if type(meter) ~= 'table' or meter.order == nil then return nil end
+  return {mode=source.mode, enabled=source.enabled, order=source.order,
+    shares=source.shares, reference=true}, meter
+end
+
 function preferences.decode(text)
   if text == nil or text == '' then return preferences.defaults() end
   if type(text) ~= 'string' then return nil, nil, INVALID end
   local ok, stored = pcall(json.decode, text)
   if not ok or type(stored) ~= 'table' then return nil, nil, INVALID end
-  if stored.version ~= 1 and stored.version ~= VERSION then
+  if stored.version ~= 1 and stored.version ~= 2 and stored.version ~= VERSION then
     return nil, nil, 'Saved panel arrangements use an unsupported version.'
   end
-  if stored.version == 1 then upgrade_v1(stored.layout) end
   if not only_keys(stored, {version=true, layout=true, meter_splits=true})
-      or type(stored.layout) ~= 'table'
-      or not only_keys(stored.layout, {active=true, variants=true})
-      or type(stored.meter_splits) ~= 'table' then return nil, nil, INVALID end
-  -- A stored record is complete; missing variants must not silently reset choices.
-  for _, name in ipairs(VARIANTS) do
-    local meter = stored.meter_splits[name]
-    if type(meter) ~= 'table' or meter.order == nil then return nil, nil, INVALID end
+      or type(stored.layout) ~= 'table' or type(stored.meter_splits) ~= 'table' then
+    return nil, nil, INVALID
   end
-  return normalize(stored.layout, stored.meter_splits)
+  if stored.version == VERSION then
+    if not only_keys(stored.layout, LAYOUT_KEYS) or stored.meter_splits.order == nil then
+      return nil, nil, INVALID
+    end
+    return normalize(stored.layout, stored.meter_splits)
+  end
+  if stored.version == 1 then upgrade_v1(stored.layout) end
+  local model, meter = upgrade_v2(stored)
+  if not model then return nil, nil, INVALID end
+  return normalize(model, meter)
 end
 
 local function import_shares(target, source)
@@ -190,26 +202,24 @@ function preferences.migrate(reference_prefs, meter_prefs)
     return nil, nil, INVALID
   end
   local shape = legacy and legacy.mode or 'auto'
-  model.active = shape == 'auto' and 'automatic' or 'map'
-  local target = model.variants[model.active]
-  target.mode = shape == 'horizontal' and 'row' or shape == 'vertical' and 'stack' or shape
+  model.mode = shape == 'horizontal' and 'row' or shape == 'vertical' and 'stack' or shape
   -- The older records also arranged the waveform, which now lives in the card.
   local order = without_retired(legacy and legacy.orders[shape == 'auto' and 'horizontal' or shape]
     or {'spectrum', 'stereo'})
-  target.order = {order[1], order[2], 'loudness'}
+  model.order = {order[1], order[2], 'loudness'}
   local view = meter_prefs and meter_prefs.view or 'all'
   local show_meter = view ~= 'pictures' and not (meter_prefs and meter_prefs.visible == false)
   local show_pictures = view ~= 'meters' or not show_meter
-  target.enabled = {}
+  model.enabled = {}
   if show_pictures then
     for _, id in ipairs(without_retired(legacy and legacy.enabled or {'spectrum', 'stereo'})) do
-      target.enabled[#target.enabled+1] = id
+      model.enabled[#model.enabled+1] = id
     end
   end
-  if show_meter then target.enabled[#target.enabled+1] = 'loudness' end
+  if show_meter then model.enabled[#model.enabled+1] = 'loudness' end
   -- Only the waveform was showing: show the loudness meters rather than nothing.
-  if #target.enabled == 0 then target.enabled[1] = 'loudness' end
-  if legacy then import_shares(target.shares, legacy) end
+  if #model.enabled == 0 then model.enabled[1] = 'loudness' end
+  if legacy then import_shares(model.shares, legacy) end
   return normalize(model, meters)
 end
 

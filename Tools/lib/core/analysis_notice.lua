@@ -219,10 +219,10 @@ local function measurement_notice(state, id)
   local shared=prefer(helper,notice.channel(state,verified))
   if id=='stereo' and model.pair_unavailable then
     shared=prefer(shared,message('Selected Pair Is Unavailable','Choose two channels the reference plays through.',PAIR,
-      'Stereo Settings','stereo_settings_open'))
+      'Scope Settings','stereo_settings_open'))
   end
   if model.playing and model.capture_failed and not model.pair_unavailable then
-    shared=prefer(shared,message(id=='stereo' and 'Stereo Has Stopped Updating' or 'Spectrum Has Stopped Updating',
+    shared=prefer(shared,message(id=='stereo' and 'Scope Has Stopped Updating' or 'Spectrum Has Stopped Updating',
       'Check the yb-Reference Monitoring Filter in Reaper’s Monitor FX.',FAULT))
   end
   return shared

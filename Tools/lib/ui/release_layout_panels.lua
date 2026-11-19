@@ -86,13 +86,13 @@ local function paint_spectrum(ctx,dl,value,x,y,w,h,footer)
 end
 
 function panels.measure(value,model,w,h)
-  local geometry=layout.measure(w,h,layout.current(model),{scale=theme.scale,
+  local geometry=layout.measure(w,h,model,{scale=theme.scale,
     gap=M.SPECTRUM_SPLIT_GAP,min_width=M.SPECTRUM_PANE_MIN_W,
     min_height=M.REFERENCE_PANE_MIN_H,loudness_min_height=228*theme.scale,
     stereo_hide_height=M.STEREO_HIDE_H,
     stereo_side_width=value.stereo_preferences.show_correlation and M.STEREO_CORRELATION_W or 0})
   geometry.frame_h=M.BASE_FS+M.FRAME_PAD_Y*2
-  geometry.width,geometry.visual_h,geometry.prototype_variant=w,h,model.active
+  geometry.width,geometry.visual_h=w,h
   return geometry
 end
 

@@ -5,7 +5,6 @@ local filter = require('core.monitor_filter')
 local helper = require('monitor_filter')
 local stereo_core = require('core.stereo')
 local stereo_raster = require('core.stereo_raster')
-local layout_prototype = require('core.layout_prototype')
 local spectrum = {}
 local SECTION = 'yb-Reference'
 local FILTER_KEY = 'monitor_filter_preferences_v1'
@@ -14,7 +13,7 @@ local LEGACY_SPECTRUM_KEY = 'spectrum_preferences_v1'
 local FINAL_DRAIN_TIMEOUT = 0.5
 
 local function stereo_enabled(state)
-  local prototype = layout_prototype.current(state.layout_prototype)
+  local prototype = state.layout_prototype
   local panels = prototype and prototype.enabled
     or state.reference_panels and state.reference_panels.enabled
   if type(panels) ~= 'table' then return false end
