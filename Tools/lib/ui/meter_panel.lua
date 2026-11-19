@@ -478,13 +478,13 @@ function panel.paint(ctx,model,geometry,x,y,presentation,channel_layout_notice)
   end
   if shared and not geometry.surface_painted then drawing.surface(dl,shared) end
   local action
-  -- History beside the meters shares their grey surface, gap included, so the
-  -- group reads as one panel. Stacked below, the meters' readings strip stays
-  -- on the window background.
+  -- The gap before History and the gap above a stacked readings strip show the
+  -- window background, so History reads as its own panel like the others.
+  -- The gap between Loudness and L/R keeps the shared grey surface.
   if geometry.surface_painted then
     for _,seam in ipairs(geometry.seams or {}) do
-      if seam.axis=='y' then
-        local footer=geometry.footer_height or theme.metrics.RULER_H
+      if seam.axis=='y' or seam.key=='history_x' then
+        local footer=seam.axis=='y' and (geometry.footer_height or theme.metrics.RULER_H) or 0
         drawing.rect(dl,x+seam.x,y+seam.y-footer,seam.w,seam.h+footer,T.BG_WINDOW)
       end
     end

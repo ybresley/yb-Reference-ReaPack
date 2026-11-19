@@ -26,6 +26,15 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.7.1 — 2026-11-20
+
+This update fixes a crash in Reference View and restores the border beside History.
+
+### Fixes
+
+- **Window** — The Spectrum, Scope and Loudness panels no longer stop yb-Reference with a script error.
+- **Loudness** — History beside the meters has a dark border again, like the other panels.
+
 ## 0.7.0 — 2026-11-19
 
 This update lets you match references to your own project's loudness, simplifies the Reference View layout settings and adds new hotkeys, along with a crash fix and other fixes.
