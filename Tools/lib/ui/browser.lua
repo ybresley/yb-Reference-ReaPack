@@ -1830,7 +1830,7 @@ end
 
 -- Fallback guidance for the strip's idle face — what the old status row's
 -- default hint used to say, updated for the labelled Add button.
-local IDLE_HINT = "Choose a sound to audition it. Drag audio files here or use + Add Sounds."
+local IDLE_HINT = "Choose a sound to audition it."
 local EMPTY_HINT = "Library is empty. Drag audio files here or use + Add Sounds."
 
 -- Cache complete detail prefixes so resizing never cuts a fact in half.
@@ -2393,16 +2393,7 @@ local function idle_lines(ctx, message, width, max_lines)
       and cached.size == size and cached.max_lines == max_lines then
     return cached.lines, cached.cut
   end
-  local words, line = {}, ""
-  for word in message:gmatch("%S+") do
-    local candidate = line == "" and word or line .. " " .. word
-    if line ~= "" and reaper.ImGui_CalcTextSize(ctx, candidate) > width then
-      words[#words + 1], line = line, word
-    else
-      line = candidate
-    end
-  end
-  words[#words + 1] = line
+  local words = widgets.wrap_words(ctx, message, width)
   local cut = #words > max_lines
   if cut then
     -- The last line that fits carries the rest, so the ellipsis marks the cut.
@@ -2425,11 +2416,18 @@ end
 -- how-to line. Progress shares the waveform with the drag hint but replaces
 -- the how-to line, and so does a status card with a button, which is taller
 -- than the middle allows. With `area_y0` the preview above the waveform is
--- blank too, and the message is centred over all of it. Painted without
--- moving controls.
-local function draw_idle_face(ctx, state, sx0, sy0, sx1, sy1, area_y0, card_button)
-  local show_progress = analysis_panel.is_visible(state, "browse", dropzone.file_drag_active())
+-- blank too, and the message is centred over all of it. `drop_area` marks
+-- that blank area as one place to drop files: a dashed outline, a waveform
+-- mark and the message at the normal text size. Painted without moving
+-- controls.
+local IDLE_MARK = { 2, 7, 14, 6, 18, 8, 2 }
+local function draw_idle_face(ctx, state, sx0, sy0, sx1, sy1, area_y0, card_button, drop_area)
+  local file_drag = dropzone.file_drag_active()
+  local show_progress = analysis_panel.is_visible(state, "browse", file_drag)
   local idle_message = not state.browse and state.drag and state.drag.hint
+  drop_area = drop_area and area_y0 ~= nil
+  -- A drag in flight draws its own outline around the whole drop target.
+  if drop_area and not file_drag then dropzone.idle_outline(ctx, sx0, area_y0, sx1, sy1) end
   if show_progress then
     -- Import summaries and errors remain below progress in the empty strip.
     local bottom = idle_message and sy1 - M.GROUP_FS - M.ANALYSIS_CARD_GAP * 2 or sy1
@@ -2439,8 +2437,8 @@ local function draw_idle_face(ctx, state, sx0, sy0, sx1, sy1, area_y0, card_butt
   local hint = #state.library.sounds == 0 and EMPTY_HINT or IDLE_HINT
   local msg = idle_message or hint
   local dl = reaper.ImGui_GetWindowDrawList(ctx)
-  local col = state.drag and T.TEXT_PRIMARY or T.TEXT_TERTIARY
-  local small = theme.push_small_font(ctx)
+  local col = state.drag and T.TEXT_PRIMARY or (drop_area and T.TEXT_SECONDARY or T.TEXT_TERTIARY)
+  local small = not drop_area and theme.push_small_font(ctx)
   local text_w = math.max(0, sx1 - sx0 - M.WINDOW_PAD * 2)
   if area_y0 and not show_progress then
     -- Never let a line run past the blank area.
@@ -2448,6 +2446,20 @@ local function draw_idle_face(ctx, state, sx0, sy0, sx1, sy1, area_y0, card_butt
     local max_lines = math.max(1, math.floor((sy1 - area_y0 - 2 * M.FRAME_PAD_Y) / line_h))
     local lines, cut = idle_lines(ctx, msg, text_w, max_lines)
     local top = (area_y0 + sy1 - #lines * line_h) * 0.5
+    -- The mark sits above the message when both fit; the pair stays centred.
+    local scale = theme.scale
+    local mark_h, mark_gap = 18 * scale, M.ITEM_SPACING_Y
+    if drop_area and #lines * line_h + mark_h + mark_gap + 2 * M.WINDOW_PAD <= sy1 - area_y0 then
+      top = top + (mark_h + mark_gap) * 0.5
+      local step = 3.5 * scale
+      local mark_y = top - mark_gap - mark_h * 0.5
+      local mark_x = (sx0 + sx1) * 0.5 - step * (#IDLE_MARK - 1) * 0.5
+      for i, bar in ipairs(IDLE_MARK) do
+        local bx = math.floor(mark_x + (i - 1) * step) + 0.5
+        reaper.ImGui_DrawList_AddLine(dl, bx, mark_y - bar * scale * 0.5, bx, mark_y + bar * scale * 0.5,
+          T.TEXT_QUATERNARY, math.max(1, scale * 1.4))
+      end
+    end
     for i, line in ipairs(lines) do
       reaper.ImGui_DrawList_AddText(dl,
         math.floor((sx0 + sx1 - line.width) * 0.5), math.floor(top + (i - 1) * line_h),
@@ -2773,11 +2785,13 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
   -- waveform shows the sound as recorded. The ruler adds RULER_H below the bars
   -- and the list above pays for it. Its own cache slot ("browse") keeps the two
   -- views from thrashing one entry.
-  -- Top of the preview section (name, waveform, ruler). With nothing selected
-  -- in the docked Library, none of those has anything to show, so the section
-  -- is left blank and the idle message is centred over all of it.
+  -- Top of the preview section (name, readings, waveform, ruler). With nothing
+  -- selected, none of those has anything to show, so the section is left
+  -- blank and the idle message is centred over all of it. The separate window
+  -- outlines it as a drop area; the docked Library's own outline already
+  -- frames it.
   local section_y0 = select(2, reaper.ImGui_GetCursorScreenPos(ctx))
-  local blank_section = embedded and not state.browse
+  local blank_section = not state.browse
   draw_preview_heading(ctx, state, heading_h)
   do
     -- Docked, the hairline spans the outline like the list's closing line; in the
@@ -2858,7 +2872,7 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
     { id = state.browse_id, waveform = state.browse_waveform, detail = state.browse_detail,
       ruler = ruler, slot = "browse",
       background_painted = blank_section,
-      empty_baseline = not embedded or state.browse ~= nil,
+      empty_baseline = state.browse ~= nil,
       duration = state.browse and state.browse.duration or nil })
   if wave_action then wave_action.target = "browse" end
   action = action or wave_action
@@ -2873,7 +2887,7 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
     widgets.card_outline(ctx, frame_x, frame_top, frame_x + list_w, sy1 + gap_y + info_h + bottom_pad)
   end
   draw_idle_face(ctx, state, sx0, sy0, sx1, sy1, blank_section and section_y0 or nil,
-    card_handle and card_handle.button ~= nil)
+    card_handle and card_handle.button ~= nil, not embedded)
 
   status_card.paint(ctx, card_handle, leftover_panel.is_open(ctx))
   if not embedded then

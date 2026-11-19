@@ -10,6 +10,7 @@ spectrum.OPTIONS = {
   average = { "off", "1s", "3s", "infinite" },
   tilt = { 0, 3, 4.5 }, range = { 60, 90, 120 },
   visual = { "waveform", "spectrum" },
+  note_names = { "off", "on" },
 }
 local FFT = { responsive = 2048, balanced = 4096, detailed = 8192 }
 local SMOOTHING = { off = 0, ["1/24"] = 1 / 24, ["1/12"] = 1 / 12, ["1/6"] = 1 / 6 }
@@ -26,7 +27,7 @@ end
 function spectrum.defaults()
   return { resolution = "balanced", speed = "balanced", smoothing = "1/12",
     average = "off", tilt = 4.5, range = 90,
-    visual = "spectrum", split = 0.45 }
+    visual = "spectrum", split = 0.45, note_names = "off" }
 end
 
 local function valid_option(key, value)

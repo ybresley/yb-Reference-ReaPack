@@ -81,10 +81,12 @@ function warnings.update(state, values, opts, dt)
     if over then state.clip_below[index]=0 end
   end
 
+  -- The ceiling applies to the maximum of the chosen peak measurement.
   local tp = values.tp_max
-  state.values.tp_max = tp
+  if peak_mode == 'Sample Peak' then tp = values.sp_max end
+  state.values.peak_max = tp
   local tp_over = tp ~= nil and tp == tp and opts.ceiling ~= nil and tp > opts.ceiling
-  if ceiling_changed then
+  if ceiling_changed or peak_changed then
     state.flags.tp = tp_over
     state.tp_clear_max = tp
   elseif tp_over and (state.tp_clear_max == nil or tp > state.tp_clear_max) then
@@ -108,7 +110,7 @@ function warnings.clear(state)
     state.clip_below[index]=0
   end
   state.flags.tp = false
-  state.tp_clear_max = state.values.tp_max
+  state.tp_clear_max = state.values.peak_max
   return state
 end
 

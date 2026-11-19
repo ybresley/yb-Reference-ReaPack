@@ -15,12 +15,16 @@ local hotkeys = {}
 local HAS_WRAP_POS = reaper.ImGui_PushTextWrapPos ~= nil
   and reaper.ImGui_PopTextWrapPos ~= nil
 local COMMAND_ICONS = {
-  play = "play", pause = "pause", latch = "link", loop = "repeat",
+  play = "play", pause = "pause", stop = "square", latch = "link", loop = "repeat",
   next = "chevron-right", previous = "chevron-left",
+  -- The same icons as the Show Panels toggles in Reference View settings.
+  panel_reference = "audio-waveform", panel_spectrum = "chart-no-axes-column", panel_stereo = "diamond", panel_loudness = "gauge",
   library = "library", settings = "settings",
 }
 
-local SECTION_NAMES = { reference = "Reference View", filters = "Filter Bands", windows = "Windows" }
+local SECTION_NAMES = {
+  reference = "Reference View", filters = "Filter Bands", panels = "Panels", windows = "Windows",
+}
 local function command_is_in_section(command, section)
   return command.section == SECTION_NAMES[section]
 end
@@ -185,6 +189,8 @@ function hotkeys.draw(ctx, state, font)
   action = draw_section(ctx, commands, "reference", "Reference View", available, true, font, state)
   local filter_action = draw_section(ctx, commands, "filters", "Filter Bands", available, false, font, state)
   action = action or filter_action
+  local panel_action = draw_section(ctx, commands, "panels", "Panels", available, false, font, state)
+  action = action or panel_action
   local windows_action = draw_section(ctx, commands, "windows", "Windows", available, false, font, state)
   action = action or windows_action
 

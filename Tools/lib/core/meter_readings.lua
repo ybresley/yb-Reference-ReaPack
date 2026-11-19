@@ -22,6 +22,27 @@ function readings.peak_measurement(model)
   return (model.prefs or {}).peak_measurement or 'True Peak'
 end
 
+-- The highest peak since reset, in the measurement the channels use.
+function readings.peak_maximum(model)
+  if readings.peak_measurement(model) == 'Sample Peak' then return model.sp_max end
+  return model.tp_max
+end
+
+-- REAPER keeps an already loaded meter's old controls until it restarts, so
+-- an updated install cannot report the Sample Peak maximum before then.
+function readings.peak_maximum_hint(model)
+  if readings.peak_measurement(model) == 'Sample Peak' and model.true_peak_available ~= false
+      and model.sample_peak_max_available == false then
+    return 'Restart REAPER to show the Sample Peak maximum.'
+  end
+end
+
+-- Short label, unit and tooltip name for that maximum.
+function readings.peak_maximum_label(model)
+  if readings.peak_measurement(model) == 'Sample Peak' then return 'P', 'dBFS', 'Sample-peak' end
+  return 'TP', 'dBTP', 'True-peak'
+end
+
 function readings.peak(values)
   values = values or {}
   local peak

@@ -42,13 +42,13 @@ function settings.apply(state, action)
     if prefs and prefs.views[view] then
       prefs.views[view] = preferences.defaults().views[view]
     else
-      return nil, err or 'Stereo view is unavailable.'
+      return nil, err or 'Scope view is unavailable.'
     end
   elseif action.type == 'stereo_setting' then
     prefs, err = preferences.update(state.stereo_preferences,
       action.view, action.key, action.value)
   else
-    return nil, 'Stereo setting is unavailable.'
+    return nil, 'Scope setting is unavailable.'
   end
   if not prefs then return nil, err end
   if action.commit == false then

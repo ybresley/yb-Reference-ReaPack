@@ -101,8 +101,9 @@ function match.trim_for(sound, unit, value)
   return trim, limited
 end
 
--- "Match all pins to target": write every pin's trim once (the one-shot bulk
--- action — the live "play at target" mode was REJECTED, don't resurrect it).
+-- "Match all pins to target": write every pin's trim once, to a fixed target.
+-- Not wired to any control. Holding every pin at the user's own measured level
+-- is core/own_level.lua's job (docs/design/spectrum-and-loudness.md).
 -- Mutates the pin records; persisting is the caller's job, in one save.
 -- Returns (set, limited, skipped) counts so the caller can say exactly what
 -- happened — a pin with no measurement in the target's unit is skipped, never

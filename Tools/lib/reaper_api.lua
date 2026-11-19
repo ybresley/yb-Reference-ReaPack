@@ -137,6 +137,118 @@ function reaper_api.recording_active(R)
   end
 end
 
+-- REAPER's own action "Calculate loudness of master mix within time selection
+-- via dry run render". Asking for the render statistics with an action number
+-- runs that action first and returns its numbers (documented under
+-- RENDER_STATS). Verified on REAPER 7.66 with prototypes/probe_dry_run_loudness.lua:
+-- no file is written, the project and its undo history are untouched, and no
+-- result window opens. The call blocks until REAPER has processed the selection.
+local DRY_RUN_MASTER_TIME_SELECTION = 42441
+
+-- Returns the statistics text, or (nil, reason): "no_selection", "recording"
+-- (a dry run during recording is never attempted) or "failed".
+function reaper_api.measure_time_selection()
+  local from, to = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  if not (to > from) then return nil, "no_selection" end
+  if reaper_api.recording_active() then return nil, "recording" end
+  local ok, stats = reaper.GetSetProjectInfo_String(0, "RENDER_STATS",
+    tostring(DRY_RUN_MASTER_TIME_SELECTION), false)
+  if not ok or type(stats) ~= "string" or stats == "" then return nil, "failed" end
+  return stats
+end
+
+-- REAPER's own item and track dry runs, verified on REAPER 7.66 with
+-- prototypes/probe_dry_run_items.lua. 42437 renders each selected item through
+-- its take FX, track FX and fader (not master FX), one FILE entry per item.
+-- 42439 renders the selected tracks inside the time selection. Neither wrote
+-- a file or touched the undo history.
+local DRY_RUN_SELECTED_ITEMS = 42437
+local DRY_RUN_TRACKS_TIME_SELECTION = 42439
+
+local function dry_run(action)
+  local ok, stats = reaper.GetSetProjectInfo_String(0, "RENDER_STATS", tostring(action), false)
+  if not ok or type(stats) ~= "string" or stats == "" then return nil, "failed" end
+  return stats
+end
+
+-- The selected items, described for core/own_level.item_target, plus the
+-- matching REAPER handles. Track keys are track numbers, so the description
+-- holds no REAPER objects.
+function reaper_api.selected_items_for_measure()
+  local items, handles = {}, {}
+  for i = 0, reaper.CountSelectedMediaItems(0) - 1 do
+    local item = reaper.GetSelectedMediaItem(0, i)
+    local track = reaper.GetMediaItem_Track(item)
+    local ancestors = {}
+    local parent = reaper.GetParentTrack(track)
+    while parent do
+      ancestors[#ancestors + 1] = reaper.GetMediaTrackInfo_Value(parent, "IP_TRACKNUMBER")
+      parent = reaper.GetParentTrack(parent)
+    end
+    local start = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    items[#items + 1] = {
+      track = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"),
+      ancestors = ancestors,
+      folder = reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH") == 1,
+      start = start,
+      finish = start + reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+      -- REAPER's item dry run skips an item without a take and then hands back
+      -- the previous run's numbers, so only an item with a take is measured.
+      has_take = reaper.GetActiveTake(item) ~= nil,
+    }
+    handles[#handles + 1] = item
+  end
+  return items, handles
+end
+
+-- One selected item through its take FX, track FX and fader. The caller has
+-- already checked that it is the only selected item and that REAPER is not
+-- recording. Returns the statistics text, or (nil, "failed").
+function reaper_api.measure_selected_item()
+  return dry_run(DRY_RUN_SELECTED_ITEMS)
+end
+
+-- The part of the source an item plays: the source, and where in it the item
+-- starts and ends, in source seconds. The take owns the source; the caller
+-- must not destroy it. Returns nil when the item has no take.
+function reaper_api.item_source_range(item)
+  local take = reaper.GetActiveTake(item)
+  local src = take and reaper.GetMediaItemTake_Source(take)
+  if not src then return nil end
+  local from = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
+  local rate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+  local to = from + reaper.GetMediaItemInfo_Value(item, "D_LENGTH") * (rate > 0 and rate or 1)
+  return src, from, to
+end
+
+-- A folder track's whole output between `from` and `to`: the sum of its
+-- children through the folder's own FX. REAPER's track dry run only measures
+-- inside the time selection and only the selected tracks, so both are moved
+-- for the call and put back afterwards, even if the call throws.
+-- Moving them adds no undo point and leaves the project unmodified (probed).
+-- The caller has already checked that REAPER is not recording.
+function reaper_api.measure_folder(item, from, to)
+  local folder = reaper.GetMediaItem_Track(item)
+  local sel_from, sel_to = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  local selected = {}
+  for i = 0, reaper.CountSelectedTracks(0) - 1 do selected[#selected + 1] = reaper.GetSelectedTrack(0, i) end
+
+  reaper.PreventUIRefresh(1)
+  reaper.GetSet_LoopTimeRange(true, false, from, to, false)
+  reaper.SetOnlyTrackSelected(folder)
+  local ok, stats, reason = pcall(dry_run, DRY_RUN_TRACKS_TIME_SELECTION)
+
+  reaper.GetSet_LoopTimeRange(true, false, sel_from, sel_to, false)
+  reaper.SetTrackSelected(folder, false)
+  for _, track in ipairs(selected) do
+    if reaper.ValidatePtr2(0, track, "MediaTrack*") then reaper.SetTrackSelected(track, true) end
+  end
+  reaper.PreventUIRefresh(-1)
+
+  if not ok then return nil, "failed" end
+  return stats, reason
+end
+
 -- Default library folder, under REAPER's user-data folder — never the script's
 -- install folder (a ReaPack update overwrites that). User-changeable later.
 function reaper_api.default_library_dir()
@@ -160,8 +272,10 @@ local EXT_LIBRARY_PANEL_WIDTH = "library_panel_width"
 local EXT_LIBRARY_PANEL_OPEN = "library_panel_open"
 local EXT_REFERENCE_STACK_SPLIT = "reference_stack_split"
 local EXT_READING_EXTRA = "reading_extra"
+local EXT_ITEM_SOUND = "measure_item_sound"
 local EXT_MATCH_PRESETS = "match_presets"
 local EXT_MATCH_TARGET  = "match_target"
+local EXT_MATCH_PRESETS_OPEN = "match_presets_open"
 local EXT_SEEN_VERSION  = "seen_version"
 local EXT_FEEDBACK_EMAIL = "feedback_email"
 local EXT_WALKTHROUGH   = "walkthrough_seen"
@@ -553,6 +667,15 @@ function reaper_api.set_browser_sort(sort)
   reaper.SetExtState(EXT_SECTION, EXT_BROWSER_SORT_ASC, asc == false and "0" or "1", true)
 end
 
+-- What Measure Item hears: "fx" or "raw". Validated by the caller.
+function reaper_api.get_item_sound()
+  return stored_ext(EXT_SECTION, EXT_ITEM_SOUND)
+end
+
+function reaper_api.set_item_sound(value)
+  reaper.SetExtState(EXT_SECTION, EXT_ITEM_SOUND, value, true)
+end
+
 -- Which measurement the Loudness column shows. Also an app preference (it's a way
 -- of looking at the library, not part of it), so it lives beside the master volume.
 -- Returns the stored name as-is; the caller decides whether it still means anything.
@@ -629,6 +752,16 @@ end
 
 function reaper_api.set_match_presets(text)
   reaper.SetExtState(EXT_SECTION, EXT_MATCH_PRESETS, text, true)
+end
+
+-- Whether the Loudness panel shows its preset list. Minimized until the user
+-- opens it.
+function reaper_api.get_match_presets_open()
+  return reaper.GetExtState(EXT_SECTION, EXT_MATCH_PRESETS_OPEN) == "1"
+end
+
+function reaper_api.set_match_presets_open(open)
+  reaper.SetExtState(EXT_SECTION, EXT_MATCH_PRESETS_OPEN, open and "1" or "0", true)
 end
 
 function reaper_api.get_match_target()

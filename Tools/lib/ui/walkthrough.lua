@@ -89,6 +89,16 @@ function walkthrough.note_rect(ctx, ws, id, x1, y1, x2, y2)
   end
 end
 
+-- Mark a region inside target `id` that stays dimmed: a ring is a rectangle,
+-- so a target shaped like an L (the panels around the card's corner) rings its
+-- bounding area and shades the part that isn't the target.
+local shades = {}
+function walkthrough.note_shade(ctx, ws, id, x1, y1, x2, y2)
+  if not ws or not ws.active then return end
+  if not wants(ws, id) then return end
+  shades[id] = { frame = reaper.ImGui_GetFrameCount(ctx), x1 = x1, y1 = y1, x2 = x2, y2 = y2 }
+end
+
 -- Inflate a noted rect by the ring pad and clamp it INSIDE the window: a
 -- target flush against an edge (the sidebar's left is the window's own left)
 -- would otherwise push the ring outside the viewport, where the foreground
@@ -131,9 +141,14 @@ function walkthrough.wash(ctx, ws, win, x, y, w, h)
   local holes, ring = {}, nil
   if id and win == target_win then
     local r = rects[id]
+    -- A target in another child of the same window clamps to nothing here.
     if r and r.frame == frame then
       ring = inflate_clamped(r, wx, wy, ww, wh)
-      holes[#holes + 1] = ring
+      if ring.x2 > ring.x1 and ring.y2 > ring.y1 then
+        holes[#holes + 1] = ring
+      else
+        ring = nil
+      end
     end
   end
 
@@ -169,6 +184,11 @@ function walkthrough.wash(ctx, ws, win, x, y, w, h)
           reaper.ImGui_DrawList_AddRectFilled(dl, x, y1, wx + ww, y2, T.WALK_DIM)
         end
       end
+    end
+    local shade = ring and shades[id]
+    if shade and shade.frame == frame then
+      reaper.ImGui_DrawList_AddRectFilled(dl, math.max(shade.x1, ring.x1), math.max(shade.y1, ring.y1),
+        math.min(shade.x2, ring.x2), math.min(shade.y2, ring.y2), T.WALK_DIM)
     end
     if ring then
       local radius = M.WALK_RING_RADIUS
@@ -320,9 +340,7 @@ function walkthrough.card(ctx, ws)
   local x, y
   if r then
     -- Beside its target — inside the host if it fits there, otherwise anywhere
-    -- on screen that clears the ring. The pin stop needs no exception any more:
-    -- its ring IS the whole main window, so nothing fits inside and the card
-    -- steps out beside it, leaving the drop area it talks about fully visible.
+    -- on screen that clears the ring.
     local ring = { x1 = r.x1 - M.WALK_RING_PAD, y1 = r.y1 - M.WALK_RING_PAD,
                    x2 = r.x2 + M.WALK_RING_PAD, y2 = r.y2 + M.WALK_RING_PAD }
     -- Browser stops sit outside the entire Library, including its title bar.

@@ -119,4 +119,20 @@ function loudness.advance()
   return id, (not threw) and results or nil
 end
 
+-- The loudness readings a comparison uses, measured from part of a source the
+-- caller owns (this module neither keeps nor destroys it). Synchronous: three
+-- passes over the range, so the interface waits for them. Returns
+-- { lufs_i, lufs_m_max, lufs_s_max }, or nil when a pass throws.
+local RANGE_MODES = { MODES[1], MODES[2], MODES[3] }
+
+function loudness.measure_range(src, from, to)
+  local results = {}
+  for _, m in ipairs(RANGE_MODES) do
+    local ok, gain = pcall(reaper.CalculateNormalization, src, m.mode, TARGET, from, to)
+    if not ok then return nil end
+    results[m.key] = to_db(gain)
+  end
+  return results
+end
+
 return loudness

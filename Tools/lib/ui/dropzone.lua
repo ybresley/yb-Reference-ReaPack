@@ -35,6 +35,14 @@ local function dashed_rect(dl, x0, y0, x1, y1, col)
   end
 end
 
+-- The resting outline of an empty area that accepts dropped files: the same
+-- dashes in a neutral stroke, so the accent stays the sign of a drag in flight.
+function dropzone.idle_outline(ctx, x0, y0, x1, y1)
+  local half = theme.scale * 0.5
+  dashed_rect(reaper.ImGui_GetWindowDrawList(ctx), x0 + half, y0 + half, x1 - half, y1 - half,
+    T.STROKE_PRIMARY)
+end
+
 -- A hover-only cue: the corners pull inward as the pointer enters a target,
 -- then leave the existing dashed outline to describe the still-valid landing
 -- area. It never reports an import result.

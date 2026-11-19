@@ -45,6 +45,7 @@ slider36:control_protocol=4<4,4,1>-Control protocol (output)
 slider37:instance_token=0<0,1000000000,1>-Instance token (output)
 slider38:control_session=0<0,1000000000,1>-Control session (output)
 slider39:stopped_monitoring=1<1,1,1>-Monitor while stopped (output)
+slider40:sample_peak_max=-150<-150,50,0.01>-Sample Peak Max (output)
 
 in_pin:Channel 1
 in_pin:Channel 2
@@ -731,8 +732,8 @@ function reset_window() local(ch b p) (
   live_peak_l=live_peak_r=-150;
   true_peak_l=true_peak_r=-150;
   live_true_peak_l=live_true_peak_r=-150;
-  tp_max=0;
-  true_peak_max=-150;
+  tp_max=sp_max=0;
+  true_peak_max=sample_peak_max=-150;
   crest_l=crest_r=-1;
   crest_energy=crest_samples=crest_peak=0;
   capture_epoch=(capture_epoch+1)%1000000000;
@@ -1009,6 +1010,7 @@ measurement_inputs<(vm_requested ? channel_count : max_output) ? lra_error();
 lra_revision=(lra_revision+1)%1000000000;
 update_crest();
 true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
+sample_peak_max=sp_max>0 ? db_per_log*log(sp_max) : -150;
 lra_revision=(lra_revision+1)%1000000000;
 count>0 ? (
   // A short sound can end before one 5 ms slice. Publish its actual partial
@@ -1082,6 +1084,7 @@ meter_active ? (
     sample_tp>=b[403] ? (b[403]=sample_tp; b[404]=meter_samples+1;);
     is_playing && rate_ok && lra_valid!=-1 ? (
       tp_max=max(tp_max,sample_tp);
+      sp_max=max(sp_max,amplitude);
       sample_energy+=x*x;
       sample_peak=max(sample_peak,amplitude);
       layout_known && WEIGHTS[ch]>0 ? (
@@ -1163,6 +1166,7 @@ meter_active ? (
     slot=(slot+1)%80;
     channel_aliases();
     true_peak_max=tp_max>0 ? db_per_log*log(tp_max) : -150;
+    sample_peak_max=sp_max>0 ? db_per_log*log(sp_max) : -150;
     update_crest();
     sequence=(sequence+1)%1000000000;
     channel_publish();

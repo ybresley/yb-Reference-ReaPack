@@ -96,8 +96,7 @@ function window.draw(ctx, state, res, card)
     if state.metering then
       for _, pane in ipairs(geometry.panels) do
         if pane.id == 'loudness' then
-          local variant = state.layout_prototype.active
-          meter_splits = state.layout_meter_splits and state.layout_meter_splits[variant]
+          meter_splits = state.layout_meter_splits
           meter_frame=pane
           prototype_meter_geometry = meter_panel.measure(pane.w, pane.h,
             state.metering.prefs, nil, meter_splits, display_frames[pane.id].footer_height,ctx,capture_profile)
@@ -140,8 +139,7 @@ function window.draw(ctx, state, res, card)
   local legacy_meter_geometry
   if regions and regions.meters then
     local r=regions.meters
-    local splits=state.layout_meter_splits and state.layout_meter_splits.default
-    legacy_meter_geometry=meter_panel.measure(r.w,r.h,state.metering.prefs,nil,splits,nil,ctx,capture_profile)
+    legacy_meter_geometry=meter_panel.measure(r.w,r.h,state.metering.prefs,nil,nil,nil,ctx,capture_profile)
     notice_frames[#notice_frames+1]=with_setup_region(
       {id='loudness',x=outer_x+r.x,y=outer_y+r.y,w=r.w,h=r.h},legacy_meter_geometry)
   end
@@ -239,7 +237,7 @@ function window.draw(ctx, state, res, card)
   end
   if input.gaps then
     (prototype or panels).paint(ctx, geometry, input, x, y, res,
-      type(stop)=='table' and stop.id=='pin')
+      type(stop)=='table' and stop.id=='panels')
   end
   if regions and regions.meters then
     local r=regions.meters

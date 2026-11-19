@@ -63,6 +63,7 @@ icons.NAMES = {
   ["chevron-right"] = 0xE06F, -- next reference
   ["pencil"]        = 0xE1F9, -- edit mode's rename (opens the shared Label dialog)
   ["x"]             = 0xE1B2, -- edit mode's unpin
+  ["lock"]          = 0xE10B, -- a normalize target that holds every pinned reference
   ["target"]        = 0xE180, -- the match window's button (loudness tools, 2026-08-06)
   ["audio-waveform"] = 0xE55B,
   ["diamond"] = 0xE2D2,

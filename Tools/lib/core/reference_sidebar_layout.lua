@@ -1,4 +1,5 @@
 -- Places the Reference card, the optional docked Library and the panels.
+-- The card can be hidden; the Library and the panels then share the area.
 --
 -- The card is one column. Beside the panels it runs the full height, and
 -- core/card_plan.lua decides what fits inside it; the waveform takes the spare
@@ -52,6 +53,7 @@ end
 -- opts:
 --   width, height          available area in pixels
 --   scale                  UI scale
+--   reference              false to hide the Reference card
 --   library                true while the Library is docked here
 --   library_width          remembered Library width, unscaled
 --   library_minimum        measured Library minimum width in pixels
@@ -63,11 +65,30 @@ end
 --   card_height            the card's dragged height above the Library,
 --                          unscaled; nil for its natural height
 -- Returns the regions relative to the area's top-left corner. `placement` is
--- 'side', 'top', 'stacked' (card above the Library) or 'beside_library'.
+-- 'side', 'top', 'stacked' (card above the Library), 'beside_library', or
+-- 'none' when the card is hidden; then `strip` and `reference` are nil.
 function layout.resolve(opts)
   local m, scale = measures(opts)
   local w, h, gap = opts.width, opts.height, m.gap
   local result = { gap = gap, height = h }
+
+  if opts.reference == false then
+    result.placement = 'none'
+    if opts.library then
+      -- No card shares the column here, so the Library keeps its own limits
+      -- rather than the width the card would have needed.
+      local remembered = clamp((opts.library_width or LIBRARY_MIN) * scale, m.lib_min, m.lib_max)
+      local library = clamp(math.min(remembered, w - gap - m.panels_min), m.lib_min, m.lib_max)
+      result.width = math.max(w, library + gap + m.panels_min)
+      result.library = rect(0, 0, library, h)
+      result.resize_x = library
+      result.panels = rect(library + gap, 0, result.width - library - gap, h)
+    else
+      result.width = math.max(w, m.panels_min)
+      result.panels = rect(0, 0, result.width, h)
+    end
+    return result
+  end
 
   if opts.library then
     -- Stacked: the card sits above the Library and shares its width, when the
@@ -142,6 +163,10 @@ end
 -- Library beside the card, so that arrangement sets the width.
 function layout.minimum(opts)
   local m, scale = measures(opts)
+  if opts.reference == false then
+    local library = opts.library and math.max(LIBRARY_MIN * scale, opts.library_minimum or 0) + m.gap or 0
+    return library + m.panels_min, m.panels_min_h
+  end
   if not opts.library then return m.block_min + m.gap + m.panels_min, m.card_min end
   local library = math.max(LIBRARY_MIN * scale, opts.library_minimum or 0)
   return library + m.gap + m.block_min + m.gap + m.panels_min, m.card_min

@@ -93,6 +93,7 @@ function session.reset(state)
   state.m_max = nil
   state.s_max = nil
   state.tp_max = nil
+  state.sp_max = nil
   state.peak_hold = { l = nil, r = nil }
   state.peak_hold_remaining = { l = 0, r = 0 }
   state.loudness_peak = {}
@@ -216,6 +217,7 @@ function session.update(state, snapshot, dt)
     end
     state.sample_rate_supported = supported
     state.true_peak_available = snapshot.true_peak_available ~= false
+    state.sample_peak_max_available = snapshot.sample_peak_max_available ~= false
     if snapshot.loudness_available ~= nil then state.loudness_available = snapshot.loudness_available end
   end
   local peak_mode = readings.peak_measurement(state)
@@ -316,6 +318,7 @@ function session.update(state, snapshot, dt)
     lra_high = lra_ready and lra_high or nil,
     i = loudness_available and warm_m and reading(snapshot.i) or nil,
     tp_max = state.true_peak_available ~= false and reading(snapshot.tp_max) or nil,
+    sp_max = state.true_peak_available ~= false and reading(snapshot.sp_max) or nil,
     rms_l = warm_m and reading(snapshot.rms_l) or nil,
     rms_r = warm_m and reading(snapshot.rms_r) or nil,
     peak_l = warm_m and reading(snapshot[peak_fields.peak..'l']) or nil,
@@ -340,6 +343,7 @@ function session.update(state, snapshot, dt)
   state.s_max = loudness_available and higher(state.s_max, reading(snapshot.s_max)) or nil
   state.s_max = higher(state.s_max, values.s)
   state.tp_max = higher(state.tp_max, values.tp_max)
+  state.sp_max = higher(state.sp_max, values.sp_max)
   local publication = snapshot.lra_seconds or snapshot.sequence
   local fresh_loudness = publication == nil or publication ~= state.loudness_peak_publication
   state.loudness_peak_publication = publication

@@ -8,6 +8,7 @@ local ramps=require('ui.meter_colours')
 local style=require('ui.meter_style')
 local drawing=require('ui.meter_drawing')
 local pointer=require('ui.meter_hover')
+local widgets=require('ui.widgets')
 local T,R=theme.tokens,reaper
 local text,line,rect=drawing.text,drawing.line,drawing.rect
 local number,loudness_number=drawing.number,drawing.loudness_number
@@ -237,19 +238,69 @@ function bars.loudness(ctx,dl,r,model,opts,readout_size,presentation)
   return action
 end
 
-local function true_peak_maximum(ctx,dl,r,model,left,right,presentation)
+-- The label sits at a fixed distance right of the centred digits, measured from
+-- a representative value, so changing readings never move it. Sizes depend only
+-- on the drawn sizes and label, so they are measured once per combination.
+local label_cache,label_cache_size={},0
+local function label_metrics(ctx,size,label_size,label)
+  local key=size..'|'..label_size..'|'..label
+  local entry=label_cache[key]
+  if not entry then
+    local pushed=theme.push_release_font(ctx,size)
+    local half=R.ImGui_CalcTextSize(ctx,'00.0')/2
+    if pushed then R.ImGui_PopFont(ctx) end
+    pushed=theme.push_release_font(ctx,label_size)
+    local width,height=R.ImGui_CalcTextSize(ctx,label)
+    if pushed then R.ImGui_PopFont(ctx) end
+    -- A shrinking row can produce many sizes while resizing; keep the cache small.
+    if label_cache_size>=16 then label_cache,label_cache_size={},0 end
+    entry={half,width,height}
+    label_cache[key],label_cache_size=entry,label_cache_size+1
+  end
+  return entry[1],entry[2],entry[3]
+end
+
+local function peak_maximum(ctx,dl,r,model,left,right,presentation)
   if r.layout_hint then
     drawing.layout_hint(ctx,dl,{x=left,y=r.y,w=right-left,h=style.plot_top*theme.scale},model)
     return
   end
   if not model.prefs.extra_readings or r.compact or model.true_peak_available==false then return end
   local s=theme.scale
-  local value=model.tp_max
+  local cx,height=(left+right)/2,style.plot_top*s
+  local value=readings.peak_maximum(model)
+  local label,unit,name=readings.peak_maximum_label(model)
   local colour=value and (warnings.active(model.warnings,'tp') and T.DANGER_RED or T.ACCENT) or T.TEXT_TERTIARY
-  text(ctx,dl,(left+right)/2,r.y,lr_number(value),colour,12*s,'number',nil,style.plot_top*s)
-  meter_tooltip(ctx,{x=left,y=r.y,w=right-left,h=style.plot_top*s},
-    'True-peak maximum since reset (dBTP).',
-    'meter_maximum_tp',presentation)
+  local drawn=text(ctx,dl,cx,r.y,lr_number(value),colour,12*s,'number',nil,height)
+  local label_size=math.min(10*s,drawn)
+  local half,label_w,label_h=label_metrics(ctx,drawn,label_size,label)
+  local label_x=cx+half+3*s
+  local label_hovered,action=false,nil
+  local hint=readings.peak_maximum_hint(model)
+  local suffix=hint and '\n'..hint or ''
+  if label_x+label_w<=right then
+    local label_y=r.y+(height-label_h)/2
+    if presentation then
+      text(ctx,dl,label_x,label_y,label,T.TEXT_SECONDARY,label_size)
+    else
+      -- The label is the quickest way to switch the measurement for every peak reading.
+      local next_name=label=='TP' and 'Sample Peak' or 'True Peak'
+      local old_x,old_y=R.ImGui_GetCursorScreenPos(ctx)
+      R.ImGui_SetCursorScreenPos(ctx,label_x,label_y)
+      if widgets.text_button(ctx,'##peak_maximum_measurement',label,label_w,label_h,label_size,
+          'Click to switch to '..next_name..'.'..suffix) then
+        action={type='meter_set_preference',key='peak_measurement',value=next_name}
+      end
+      label_hovered=R.ImGui_IsItemHovered(ctx)
+      R.ImGui_SetCursorScreenPos(ctx,old_x,old_y)
+    end
+  end
+  if not label_hovered then
+    meter_tooltip(ctx,{x=left,y=r.y,w=right-left,h=height},
+      name..' maximum since reset ('..unit..').'..suffix,
+      'meter_maximum_tp',presentation)
+  end
+  return action
 end
 
 -- Plot edges, first lane edge, lane pitch and bar width for the channel group.
@@ -326,7 +377,7 @@ function bars.stereo(ctx,dl,r,model,opts,readout_size,presentation)
       ..(not legacy_stereo(model) and '\nCrest Factor: '..number(crest)..' dB' or '')
       ..'\nClick to clear warnings.', 'stereo_'..ch,presentation)
   end
-  true_peak_maximum(ctx,dl,r,model,lanes_left,channel_right,presentation)
+  action=peak_maximum(ctx,dl,r,model,lanes_left,channel_right,presentation) or action
   return action
 end
 
@@ -403,7 +454,7 @@ function bars.k_system(ctx,dl,r,model,opts,readout_size,presentation)
       ..'\nClick to clear warnings.','k_'..ch,presentation)
   end
   if opts.extra_readings or r.layout_hint then
-    true_peak_maximum(ctx,dl,r,model,lanes_left,right,presentation)
+    action=peak_maximum(ctx,dl,r,model,lanes_left,right,presentation) or action
   else
     text(ctx,dl,(lanes_left+right)/2,r.y,opts.mode,T.TEXT_TERTIARY,11*s,'center',nil,style.plot_top*s)
   end

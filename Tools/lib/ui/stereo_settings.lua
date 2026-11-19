@@ -65,7 +65,7 @@ local HINTS = {
   history = 'Lower values make older dots fainter so the newest paths stand out.',
   trail = 'Sets how long older dots remain visible.',
   trace = 'Shows separate dots or joins nearby dots with lines. Available in Lissajous; Polar Sample always uses dots.',
-  clip_hold = 'Keeps red marks after clipping stops. Click the scope to clear them.',
+  clip_hold = 'Keeps red marks after clipping stops. Click the Scope to clear them.',
 }
 
 local function row_label(ctx, label, key, control_width)
@@ -150,7 +150,7 @@ local function draw_content(ctx, state)
   if opened then
     if show_channel_controls(profile) then
       if state.analysis_channel_error then reaper.ImGui_BeginDisabled(ctx) end
-      accept(channel_row(ctx, 'view', 'Scope', profile.view,
+      accept(channel_row(ctx, 'view', 'Mode', profile.view,
         {'Channel Pair', 'Surround Field'}, {'pair', 'surround'}))
       local labels, values = {}, {}
       for index = 1, profile.count do
@@ -204,9 +204,9 @@ local function draw_content(ctx, state)
   if reaper.ImGui_Button(ctx, 'Clear', width) then action = {type='stereo_clear_display'} end
   if failed then
     reaper.ImGui_PushTextWrapPos(ctx, 0)
-    reaper.ImGui_TextColored(ctx, T.DANGER_RED, state.stereo_preferences_error .. '\nReset Stereo Settings to enable changes.')
+    reaper.ImGui_TextColored(ctx, T.DANGER_RED, state.stereo_preferences_error .. '\nReset Scope Settings to enable changes.')
     reaper.ImGui_PopTextWrapPos(ctx)
-    if reaper.ImGui_Button(ctx, 'Reset Stereo Settings', (reaper.ImGui_GetContentRegionAvail(ctx))) then
+    if reaper.ImGui_Button(ctx, 'Reset Scope Settings', (reaper.ImGui_GetContentRegionAvail(ctx))) then
       action = {type='stereo_reset_all_settings'}
     end
   end
@@ -230,7 +230,7 @@ local function panel_height(ctx, state)
     height = height + heading + M.ITEM_SPACING_Y + group.height
   end
   if state.stereo_preferences_error then
-    local message = state.stereo_preferences_error .. '\nReset Stereo Settings to enable changes.'
+    local message = state.stereo_preferences_error .. '\nReset Scope Settings to enable changes.'
     local _, text_height = reaper.ImGui_CalcTextSize(ctx, message, nil, nil, false, width - 2 * M.WINDOW_PAD)
     height = height + text_height + frame + 2 * M.ITEM_SPACING_Y
   end
@@ -345,7 +345,7 @@ function settings.draw(ctx, state, res, x, y, width, height, exclusion, presenta
     end
   end
   if not presentation then
-    tips.show(ctx, button_hovered and not open, 'Stereo Settings', 'stereo_view')
+    tips.show(ctx, button_hovered and not open, 'Scope Settings', 'stereo_view')
   end
   local action
   if frozen and fx >= x + M.WINDOW_PAD then
@@ -358,7 +358,7 @@ function settings.draw(ctx, state, res, x, y, width, height, exclusion, presenta
       'stereo_resume', 'pause', true, '||')
     if resume and not presentation then action = {type='stereo_freeze', value=false} end
     if not presentation then
-      tips.show(ctx, resume_hovered, 'Resume Stereo Display', 'stereo_resume')
+      tips.show(ctx, resume_hovered, 'Resume Scope Display', 'stereo_resume')
     end
     reaper.ImGui_PopStyleColor(ctx, 4)
   end

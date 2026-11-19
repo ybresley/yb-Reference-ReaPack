@@ -61,8 +61,12 @@ end
 
 local function layout_options(ctx, state, width, height)
   local sizes = controls.measure(ctx)
+  -- A feature guide may point at the card, so it shows while one runs.
+  local prefs = state.layout_prototype
   local o = {
     width = width, height = height, scale = theme.scale,
+    reference = not prefs or prefs.reference ~= false
+      or (state.walkthrough and state.walkthrough.active) or false,
     library = library_docked(state),
     library_width = drag and drag.width or state.library_panel_width,
     library_minimum = library_minimum(ctx),
@@ -198,7 +202,7 @@ function host.draw(ctx, state, res)
     library_opts.bottom_pad = theme.metrics.STRIP_PAD
     library_opts.plan, library_opts.readings = plan, rows
     -- The audition buttons match the card's bottom-row buttons.
-    library_opts.cell_w = controls.cell_width(ctx, g.reference.w)
+    library_opts.cell_w = controls.cell_width(ctx, g.reference and g.reference.w or options.block_width)
     -- Clipped to the docker, so a short docker cuts the Library off rather
     -- than growing the host a scrollbar.
     if child(ctx, 'embedded_library', x + l.x, y + l.y, l.w, math.min(l.h, height - l.y),
@@ -230,27 +234,45 @@ function host.draw(ctx, state, res)
       g.reference.h = math.max(card_h, options.card_minimum)
       s.h = math.min(s.h, card_h)
     end
-    walkthrough.note_rect(ctx, state.walkthrough, 'pin', x + s.x, y, x + g.width, y + height)
+    -- The analysis panels, without the card. Sharing the area, the card covers
+    -- either every row (the panels start beside it) or only the top rows, when
+    -- the panels form an L around it and the card is shaded inside the ring.
+    local px1, py1, px2, py2 = x + p.x, y + p.y, x + p.x + p.w, y + p.y + p.h
+    if card and s.h >= p.h - 1 then
+      walkthrough.note_rect(ctx, state.walkthrough, 'panels', px1 + s.w + g.gap, py1, px2, py2)
+    else
+      walkthrough.note_rect(ctx, state.walkthrough, 'panels', px1, py1, px2, py2)
+      if card then
+        walkthrough.note_shade(ctx, state.walkthrough, 'panels', x + s.x, y + s.y,
+          x + s.x + s.w, y + s.y + s.h)
+      end
+    end
     -- Sharing its area with the card, the panels' wash waits until the card
     -- has noted its own targets, and then covers the card too.
     if not card then walkthrough.wash(ctx, state.walkthrough, 'main') end
     reaper.ImGui_EndChild(ctx)
   end
 
-  if child(ctx, 'reference_strip', x + s.x, y + s.y, s.w, s.h, 0) then
+  if s and child(ctx, 'reference_strip', x + s.x, y + s.y, s.w, s.h, 0) then
     local card_action
     card_action, wave_id, wave_cols = controls.draw(ctx, state, res, g)
     action = merge(action, card_action)
-    -- The drop target puts the cursor back where it found it. Below the card's
-    -- last control that would be past the drawn content, which ImGui rejects
-    -- when the child closes, so it starts from the card's top-left corner.
+    -- The drop target puts the cursor back where it found it, so it starts
+    -- from the card's top-left corner rather than below the last control.
     -- Submitted after the controls, so they keep the pointer outside a drag.
     reaper.ImGui_SetCursorScreenPos(ctx, x + s.x, y + s.y)
     action = merge(action, reference.drop_targets(ctx, state, x + s.x, y + s.y, x + s.x + s.w, y + s.y + s.h))
+    walkthrough.note_rect(ctx, state.walkthrough, 'pin', x + s.x, y + s.y, x + s.x + s.w, y + s.y + s.h)
+    -- ImGui rejects a child that closes right after a cursor move unless the
+    -- move lands inside the drawn content, and that is not guaranteed here.
+    -- An empty item at the cursor registers it, as the main window does.
+    reaper.ImGui_Dummy(ctx, 0, 0)
     if not card then walkthrough.wash(ctx, state.walkthrough, 'main') end
     reaper.ImGui_EndChild(ctx)
   end
   if card then walkthrough.wash(ctx, state.walkthrough, 'main', x + p.x, y + p.y, p.w, p.h) end
+  -- The Panel Positions preview in Settings draws this frame's placement.
+  state.reference_view_layout = g
 
   -- The regions are separated by plain gaps, like the panels' dividers. The
   -- Library's resizable gap fills while hovered or dragged, as theirs do.

@@ -18,15 +18,19 @@ local meter = {}
 local SETTINGS_SPACING = {FRAME_PAD_Y=.25, ITEM_SPACING_Y=.5, WINDOW_PAD=.75}
 
 local maxima = {}
-local m_max, s_max
+local m_max, s_max, sp_max
 for index, point in ipairs(signal.points) do
   if point.m then m_max = math.max(m_max or point.m, point.m) end
   if point.s then s_max = math.max(s_max or point.s, point.s) end
+  -- The demo uses Sample Peak, so its maximum is the running highest sample peak.
+  for _, key in ipairs({'peak_l', 'peak_r', 'live_peak_l', 'live_peak_r'}) do
+    if point[key] then sp_max = math.max(sp_max or point[key], point[key]) end
+  end
   local crest
   if point.peak_l and point.rms_l and point.peak_r and point.rms_r then
     crest = math.max(point.peak_l - point.rms_l, point.peak_r - point.rms_r)
   end
-  maxima[index] = {m=m_max, s=s_max, tp=point.tp_max, crest=crest}
+  maxima[index] = {m=m_max, s=s_max, tp=point.tp_max, sp=sp_max, crest=crest}
 end
 
 local function model_new()
@@ -97,7 +101,7 @@ function meter.update(demo, topic, elapsed)
   set_changed(model.prefs, 'show_target', not custom or step.show_target)
   set_changed(model.prefs, 'show_i', not custom or step.show_i)
   local peak = maxima[index]
-  model.m_max, model.s_max, model.tp_max = peak.m, peak.s, peak.tp
+  model.m_max, model.s_max, model.tp_max, model.sp_max = peak.m, peak.s, peak.tp, peak.sp
   model.values.crest = peak.crest
   session.animate(model, theme.motion.enabled and dt or .25, -48)
   return demo

@@ -19,9 +19,14 @@ local DETAILS={m='Momentary · 400 ms',s='Short-term · 3 seconds',i='Integrated
 local MEASUREMENTS={{'I','Integrated'},{'M','Momentary'},{'S','Short-Term'}}
 local SHORT_NAMES={m='Momentary',s='Short-Term',i='Integrated',tp='TP Max'}
 
+local function short_name(model,key)
+  if key=='tp' and readings.peak_measurement(model)=='Sample Peak' then return 'P Max' end
+  return SHORT_NAMES[key]
+end
+
 local function value(model,key)
   local values=model.values or {}
-  if key=='tp' then return model.true_peak_available~=false and model.tp_max or nil end
+  if key=='tp' then return model.true_peak_available~=false and readings.peak_maximum(model) or nil end
   if key=='peak' then return readings.peak(values) end
   if model.loudness_available==false and (key=='m' or key=='s' or key=='i'
       or key=='lra' or key=='target') then return nil end
@@ -62,6 +67,8 @@ local function text_metrics(ctx,s)
     local label_width,label_height=text_size(ctx,'TP',label_size)
     local lufs_width,lufs_height=text_size(ctx,'LUFS',label_size)
     local dbtp_width,dbtp_height=text_size(ctx,'dBTP',label_size)
+    -- The peak tile can show either unit; reserve the wider one.
+    dbtp_width=math.max(dbtp_width,text_width(ctx,'dBFS',label_size))
     local unit_width=math.max(lufs_width,dbtp_width)
     local unit_height=math.max(lufs_height,dbtp_height)
     local minus_width,minus_height=text_size(ctx,'−88.8',size*s)
@@ -78,7 +85,8 @@ local function text_metrics(ctx,s)
     widest_label=math.max(widest_label,text_width(ctx,label,inline_label))
   end
   local number_16=math.max(text_width(ctx,'−88.8',16*s),text_width(ctx,'+88.8',16*s))
-  local unit_16=math.max(text_width(ctx,'LUFS',inline_label),text_width(ctx,'dBTP',inline_label))
+  local unit_16=math.max(text_width(ctx,'LUFS',inline_label),text_width(ctx,'dBTP',inline_label),
+    text_width(ctx,'dBFS',inline_label))
   widths.inline=widest_label+6*s+number_16+4*s+unit_16+4*s
   widths.inline_number=number_16
   heights.inline=heights.value[16]
@@ -152,6 +160,7 @@ function numeric.draw(ctx,dl,r,model,presentation)
     local label=LABELS[key]
     if key=='target' then label=label..' ('..MEASUREMENTS[selected][1]..')' end
     local unit=is_loudness and scale.unit(opts) or UNITS[key]
+    if key=='tp' then label,unit=readings.peak_maximum_label(model) end
     local colour=raw and T.ACCENT or T.TEXT_TERTIARY
     if is_loudness then colour=bars.loudness_colour(model,opts,key,raw) end
     if key=='tp' and raw and warnings.active(model.warnings,'tp') then colour=T.DANGER_RED end
@@ -181,7 +190,7 @@ function numeric.draw(ctx,dl,r,model,presentation)
         local _,label_h=text_size(ctx,label,label_size)
         R.ImGui_SetCursorScreenPos(ctx,left,y+(value_h-label_h)/2)
         if widgets.text_button(ctx,'##numeric_short_'..item_index,label,label_w,label_h,label_size,
-            'Click to show '..SHORT_NAMES[next_key]..'.') then
+            'Click to show '..short_name(model,next_key)..'.') then
           action={type='meter_set_preference',key=item_index==1 and 'short_first' or 'short_second',
             value=next_key}
         end
@@ -210,6 +219,11 @@ function numeric.draw(ctx,dl,r,model,presentation)
     if not presentation then
       local hovered=pointer.rect(ctx,x,y,x+item.w,y+item.h)
       local detail=DETAILS[key] or measurement..' above (+) or below (−) target.'
+      if key=='tp' and readings.peak_measurement(model)=='Sample Peak' then
+        detail='Highest sample peak across all channels since reset.'
+        local hint=readings.peak_maximum_hint(model)
+        if hint then detail=detail..'\n'..hint end
+      end
       if key=='rms' and model.channel_profile
           and (model.channel_profile.count~=2 or model.channel_profile.known==false) then
         detail='Average level across all channels over 400 ms.'

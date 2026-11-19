@@ -37,7 +37,10 @@ local function time_label(seconds,opts)
   return string.format('%02d:%04.1f', tenths // 600, tenths % 600 / 10)
 end
 
+-- Returns the font size actually drawn, which is smaller than `size` when the
+-- text had to shrink to fit `row_height`.
 local function text(ctx, dl, x, y, value, colour, size, align, width, row_height)
+  local drawn = size
   local pushed = size and theme.push_release_font(ctx, size)
   local tw,th = R.ImGui_CalcTextSize(ctx, value)
   if row_height then
@@ -45,7 +48,8 @@ local function text(ctx, dl, x, y, value, colour, size, align, width, row_height
     local available=row_height-padding*theme.scale
     if size and th>available then
       if pushed then R.ImGui_PopFont(ctx) end
-      pushed=theme.push_release_font(ctx,size*available/th)
+      drawn=size*available/th
+      pushed=theme.push_release_font(ctx,drawn)
       tw,th=R.ImGui_CalcTextSize(ctx,value)
     end
     y=y+(row_height-th)/2
@@ -64,6 +68,7 @@ local function text(ctx, dl, x, y, value, colour, size, align, width, row_height
   if align == 'right' then x = x - tw end
   R.ImGui_DrawList_AddText(dl, x, y, colour or T.TEXT_SECONDARY, value)
   if pushed then R.ImGui_PopFont(ctx) end
+  return drawn
 end
 
 local function line(dl, x, y, x2, y2, colour, thickness)
