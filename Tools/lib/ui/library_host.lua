@@ -250,6 +250,10 @@ function host.draw(ctx, state, res)
     -- Sharing its area with the card, the panels' wash waits until the card
     -- has noted its own targets, and then covers the card too.
     if not card then walkthrough.wash(ctx, state.walkthrough, 'main') end
+    -- Panels draw controls at set positions and put the cursor back afterwards,
+    -- which ImGui rejects when the child closes next. An empty item registers
+    -- the cursor, as the card strip and the main window do.
+    reaper.ImGui_Dummy(ctx, 0, 0)
     reaper.ImGui_EndChild(ctx)
   end
 

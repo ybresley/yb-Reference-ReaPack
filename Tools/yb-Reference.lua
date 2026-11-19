@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.7.0
+-- @version 0.7.1
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -50,48 +50,14 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update lets you match references to your own project's loudness,
---   simplifies the Reference View layout settings and adds new hotkeys, along
---   with a crash fix and other fixes.
---    
---   Highlights
---     • Loudness: The Loudness panel can now measure your project, from the
---       time selection, the selected item or one pass of playback, and use
---       that reading as a normalize target. Lock a target to keep every pinned
---       reference at it, including pins added later.
---         The measurement and lock last for the session and clear when another
---         project's pins load.
---    
---   Changes
---     • Loudness: The Item measurement reads the selected item with its FX and
---       volume, or the raw file alone. A folder item is measured as one sound.
---     • Loudness: The meter maximum now shows TP or P to say which peak it
---       measures. Click the label to switch Peak Measurement.
---         The default warning ceiling is now 0. A saved −1 moves to 0 once,
---         unless a preset sets its own.
---     • Loudness: The Loudness panel now stays open until you close it with
---       its button or Escape.
---     • Appearance: Reference View now has one panel arrangement, chosen from
---       tiles that show its shape, and the Reference panel can be hidden from
---       Show Panels.
---     • Appearance: The Stereo panel is now called Scope, because it also
---       shows surround audio.
---     • Hotkeys: New hotkeys stop playback and show or hide the Reference,
---       Spectrum, Scope and Loudness panels.
---     • Spectrum Analyser: The hovered frequency now appears on the frequency
---       ruler instead of in a box over the trace. Turn on Note Names in
---       Spectrum settings to add the nearest note.
---     • Library: With no sound selected, the Library preview shows where to
---       drop files instead of an empty waveform.
+--   This update fixes a crash in Reference View and restores the border beside
+--   History.
 --    
 --   Fixes
---     • Window: The Reference panel no longer stops yb-Reference with a script
---       error.
---     • Reference Playback: Typing a Vol or Trim value no longer changes the
---       level with each keystroke. The level changes on Enter, and Escape
---       leaves it as it was.
---     • Setup: Each walkthrough step now highlights only the part it
---       describes, and the walkthrough no longer closes a docked Library.
+--     • Window: The Spectrum, Scope and Loudness panels no longer stop
+--       yb-Reference with a script error.
+--     • Loudness: History beside the meters has a dark border again, like the
+--       other panels.
 --    
 --   ------------------------------------------------
 --    
