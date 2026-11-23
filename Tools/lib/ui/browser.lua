@@ -15,6 +15,7 @@ local tips = require("ui.tips")
 local categories = require("core.categories")
 local selection = require("core.selection")
 local search_rules = require("core.search")
+local analysis = require("core.analysis")
 local imgui_label = require("core.imgui_label")
 local techfacts = require("core.techfacts")
 local transport = require("ui.transport")
@@ -32,6 +33,9 @@ local shortcuts = require("ui.browser_shortcuts")
 local panel_layout = require("core.browser_panel_layout")
 local anchored_panel = require("ui.anchored_panel")
 local readings = require("ui.readings")
+local own_level = require("core.own_level")
+local reference_list = require("core.reference_list")
+local refpicker = require("ui.refpicker")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -54,6 +58,12 @@ local HAS_SB_CTX       = reaper.ImGui_BeginPopupContextWindow ~= nil
 local RESIZE_CURSOR    = reaper.ImGui_MouseCursor_ResizeNS and reaper.ImGui_MouseCursor_ResizeNS() or nil
 local HAS_NEXT_SCROLL  = reaper.ImGui_SetNextWindowScroll ~= nil
 local HAS_NEXT_CONTENT_SIZE = reaper.ImGui_SetNextWindowContentSize ~= nil
+-- The flag's name changed between ReaImGui versions.
+local ROW_KEEPS_POPUP = (reaper.ImGui_SelectableFlags_NoAutoClosePopups
+    and reaper.ImGui_SelectableFlags_NoAutoClosePopups())
+  or (reaper.ImGui_SelectableFlags_DontClosePopups
+    and reaper.ImGui_SelectableFlags_DontClosePopups())
+  or 0
 local HAS_KEY_MODS     = reaper.ImGui_GetKeyMods ~= nil
 local HAS_CTRL_SELECT  = HAS_KEY_MODS and reaper.ImGui_Mod_Ctrl ~= nil
 local HAS_SHIFT_SELECT = HAS_KEY_MODS and reaper.ImGui_Mod_Shift ~= nil
@@ -70,14 +80,10 @@ end
 -- category child — but the scroll belongs to that window, only reachable while
 -- it is current. So each frame the scrolled window records its numbers here,
 -- and a drag on the thumb parks the wanted value in `pending` for the window's
--- next frame to apply. Declared up here because the sidebar (drawn well above
--- the table in this file) shares the idiom.
-local list_scroll = { y = 0, max = 0, dir = 0 }
+-- next frame to apply. The sound lists keep theirs in `list_memory` below;
+-- the sidebar's is declared up here because it is drawn well above the table.
 local cats_scroll = { y = 0, max = 0 }
 local resize_press_in_header
--- What the sound list was showing last frame (view + search), for the
--- new-view-starts-at-the-top rule in draw_sound_list. nil until first seen.
-local last_view_key = nil
 
 --------------------------------------------------------------- arrow browsing
 
@@ -336,8 +342,8 @@ local edit = { new_cat = "", rename = "", query = "", rename_id = nil, open = ni
   -- a request meant for a popup that lives in the list panel.
   del = nil }
 
--- In-flight category reorder. The row body is the handle, matching the pinned
--- reference picker: a click still selects, while moving that same press reorders.
+-- In-flight category reorder. The row body is the handle: a click still
+-- selects, while moving that same press reorders.
 local category_drag = { id = nil, gap = nil, rows = {}, count = 0 }
 
 -- The sidebar echo (2026-07-29): which category row lights up because the table's
@@ -419,8 +425,10 @@ local function fmt_loudness(s, field)
   if s.analysis ~= "done" then
     return s.analysis == "failed" and "—" or "\u{2026}"
   end
-  if type(s[field]) ~= "number" then return "—" end
-  return string.format("%.1f", s[field])
+  -- Mono loudness as heard, matching the Reference card and the trims.
+  local v = analysis.heard(s, field)
+  if type(v) ~= "number" then return "—" end
+  return string.format("%.1f", v)
 end
 
 local function view_is(state, scope, id)
@@ -470,6 +478,10 @@ end
 -- The browser mirrors the sidebar's file-list grammar. The returned set is
 -- independent of browse_id: Ctrl-clicking the latest sound out of the set still
 -- makes it the sound shown in the audition strip, as requested.
+-- Whether the row press now held began without Ctrl or Shift. Read at the
+-- press, because the keys may be up again when the click finishes.
+local pressed_plain = true
+
 local function select_sound_rows(ctx, state, id)
   local ctrl = HAS_CTRL_SELECT
     and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Ctrl()) ~= 0
@@ -963,10 +975,6 @@ local HAS_CLIPPER_INCLUDE = reaper.ImGui_ListClipper_IncludeItemByIndex ~= nil
   and reaper.ImGui_SetScrollHereY ~= nil
 local HAS_PREFER_DESC = reaper.ImGui_TableColumnFlags_PreferSortDescending ~= nil
 
--- The last "Show in library" request this table has already acted on. UI-local
--- scratch like `edit` and `echo`: the entry script counts requests up and never
--- has to be told when one has been served.
-local revealed_seq = nil
 
 -- Which column the open header menu was armed over. The Loudness header offers the
 -- measurement list on top of the width reset; every other header offers the reset
@@ -1039,7 +1047,10 @@ end
 -- `arrow_zone`, when given, centres the arrow in that many pixels at the cell's
 -- RIGHT end instead of placing it after the label — for the pin column, whose
 -- "label" is a glyph painted over the header afterwards.
-local function header_cell(ctx, state, idx, label, key, arrow_zone, text_left)
+--
+-- `sort` is the sort this header shows ({col, asc}) and `sort_type` the action
+-- that changes it: the Library's rows and the pinned rows each keep their own.
+local function header_cell(ctx, sort, sort_type, idx, label, key, arrow_zone, text_left)
   reaper.ImGui_TableSetColumnIndex(ctx, idx)
   if text_left then
     local _, y = reaper.ImGui_GetCursorScreenPos(ctx)
@@ -1049,7 +1060,7 @@ local function header_cell(ctx, state, idx, label, key, arrow_zone, text_left)
   -- group_row's hand-drawn name does (never from the item rect, which starts at
   -- the cell's padding edge).
   local text_x, text_y = reaper.ImGui_GetCursorScreenPos(ctx)
-  local sorted_text = key and state.sort.col == key and not arrow_zone
+  local sorted_text = key and sort.col == key and not arrow_zone
   -- Keep the native header's identity, sizing and resize grip, but reserve the
   -- arrow's space when painting a sorted label in a narrow column.
   if sorted_text then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), 0) end
@@ -1075,12 +1086,12 @@ local function header_cell(ctx, state, idx, label, key, arrow_zone, text_left)
     -- NOT the `cond and a or b` idiom: flipping a column that is currently
     -- ASCENDING wants `false`, which that idiom silently discards.
     local asc
-    if state.sort.col == key then asc = not state.sort.asc
+    if sort.col == key then asc = not sort.asc
     else asc = not PREFER_DESC[key] end
-    action = { type = "set_sort", col = key, asc = asc }
+    action = { type = sort_type, col = key, asc = asc }
   end
 
-  if key and state.sort.col == key then
+  if key and sort.col == key then
     local x1 = select(1, reaper.ImGui_GetItemRectMax(ctx))
     local y0, y1 = select(2, reaper.ImGui_GetItemRectMin(ctx)), select(2, reaper.ImGui_GetItemRectMax(ctx))
     local shown = label
@@ -1098,7 +1109,7 @@ local function header_cell(ctx, state, idx, label, key, arrow_zone, text_left)
     -- and an arrow drawn beyond that would sit in the next column.
     local max_x = x1 - M.SORT_ARROW_W - 2
     if ax > max_x then ax = max_x end
-    sort_arrow(ctx, ax, y0, y1, state.sort.asc, T.TEXT_SECONDARY)
+    sort_arrow(ctx, ax, y0, y1, sort.asc, T.TEXT_SECONDARY)
   end
 
   return action
@@ -1241,8 +1252,63 @@ local function sound_menu(ctx, state, sound)
 end
 
 local row_fills = {}
+-- The dropdown's Library rows show a Play button while hovered, as its pinned
+-- rows do: it plays the row and leaves the selected reference alone. `hot` is
+-- the row whose button the pointer was on last frame, so that row keeps its
+-- hover fill; `bloom_*` time the confirmed-start bloom. Reused every frame.
+-- Each list keeps its own scroll, last view and row-preview hover. The docked
+-- Library and the card's dropdown can both draw in one frame, and one shared
+-- record made each push the other back to the top every frame.
+local list_memories = {}
+local function list_memory(compact)
+  local key = type(compact) == "table" and compact.list_memory or "main"
+  local mem = list_memories[key]
+  if not mem then
+    -- `revealed_seq` is the last reveal request this list acted on: the entry
+    -- script counts requests up and never has to be told one was served.
+    mem = { key = key, scroll = { y = 0, max = 0, dir = 0 }, view_key = nil, revealed_seq = nil,
+      preview = { hot = nil, now = nil, bloom_id = nil, bloom_frame = nil, bounds = {} } }
+    list_memories[key] = mem
+  end
+  return mem
+end
+-- A row's Selectable spans the table, so a button over it needs the flag that
+-- lets a later item take the pointer. Older ReaImGui names it differently, and
+-- without either the rows keep no Play button.
+local ROW_OVERLAP = (reaper.ImGui_SelectableFlags_AllowOverlap and reaper.ImGui_SelectableFlags_AllowOverlap())
+  or (reaper.ImGui_SelectableFlags_AllowItemOverlap and reaper.ImGui_SelectableFlags_AllowItemOverlap())
+  or nil
+
+local ROW_PLAY_TIP = "Right-click a row to play it too."
+
+-- The pinned list's sort when the state carries none (the gallery's samples).
+local PIN_SORT_DEFAULT = { col = "name", asc = true }
+
+local LABEL_SEPARATOR = " \u{00B7} "
+
+-- A labelled pin's Name cell: the label, then the file name in a quieter
+-- colour, on the row's one line. The label keeps up to half the width and the
+-- name loses its middle to fit the rest. Returns whether either was cut.
+local function draw_labelled_name(ctx, s, x, row_y0, width, row_h)
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local caps = s.label:upper()
+  local label = widgets.ellipsize(ctx, caps, width * 0.5)
+  local lw, th = reaper.ImGui_CalcTextSize(ctx, label)
+  local y = math.floor(row_y0 + (row_h - th) * 0.5 + 0.5)
+  reaper.ImGui_DrawList_AddText(dl, x, y, T.TEXT_PRIMARY, label)
+  local sw = reaper.ImGui_CalcTextSize(ctx, LABEL_SEPARATOR)
+  reaper.ImGui_DrawList_AddText(dl, x + lw, y, T.TEXT_QUATERNARY, LABEL_SEPARATOR)
+  local name = widgets.ellipsize(ctx, s.name, math.max(0, width - lw - sw), "middle")
+  reaper.ImGui_DrawList_AddText(dl, x + lw + sw, y, T.TEXT_TERTIARY, name)
+  return label ~= caps or name ~= s.name
+end
+
 local function draw_sound_list(ctx, state, res, text_left, compact)
   local action
+  local preview_rows = type(compact) == "table" and compact.preview_rows == true and ROW_OVERLAP ~= nil
+  local mem = list_memory(compact)
+  local list_scroll, row_preview = mem.scroll, mem.preview
+  row_preview.hot, row_preview.now = row_preview.now, nil
   if pending_collapse and not reaper.ImGui_IsMouseDown(ctx, 0)
     and not reaper.ImGui_IsMouseReleased(ctx, 0) then
     pending_collapse = nil
@@ -1251,7 +1317,12 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   local show_loudness = not compact or compact.loudness
   local loud_col = channels and LOUD_COL or (show_loudness and 2 or -1)
   local pin_col = 2 + (channels and 1 or 0) + (show_loudness and 1 or 0)
-  local sounds = state.visible_sounds
+  -- The dropdown's pinned list draws its rows in this same table: the pins in
+  -- the pinned list's own sort. Clicking one chooses it as the reference.
+  local pinned_rows = type(compact) == "table" and compact.pinned_rows or nil
+  local sounds = pinned_rows or state.visible_sounds
+  local sort = pinned_rows and (state.pin_sort or PIN_SORT_DEFAULT) or state.sort
+  local sort_type = pinned_rows and "set_pin_sort" or "set_sort"
   local unit = loud_unit(state)
   local font = res.icon_font
 
@@ -1277,9 +1348,10 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
     end
   end
   vk = vk .. "\0" .. (state.query or "")
-  if vk ~= last_view_key then
-    if last_view_key ~= nil then list_scroll.pending = 0 end
-    last_view_key = vk
+  if pinned_rows then vk = "\1pinned\0" .. refpicker.embedded_query() end
+  if vk ~= mem.view_key then
+    if mem.view_key ~= nil then list_scroll.pending = 0 end
+    mem.view_key = vk
   end
 
   -- The sidebar echo for this frame: rebuilt BEFORE the table so a table that
@@ -1407,7 +1479,7 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   if compact then
     -- Each measurement keeps its own resized widths, starting from a header
     -- that fits it. A short unit need not inherit the wider LUFS layout.
-    id = id .. "_compact_v3" .. (show_loudness and ("_" .. unit.field) or "")
+    id = id .. "_compact_v4" .. (show_loudness and ("_" .. unit.field) or "")
       .. (channels and "_channels" or "")
   end
   -- A column appearing or going as the panel is resized switches to another
@@ -1466,8 +1538,12 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   -- state.sort's own default, pin prefers descending — see PREFER_DESC).
   reaper.ImGui_TableSetupColumn(ctx, "Name",
     reaper.ImGui_TableColumnFlags_WidthStretch() | reaper.ImGui_TableColumnFlags_DefaultSort() | resize_flags, 0, 1)
+  -- Wide enough for a length of up to 99 minutes in the clock style
+  -- ("00:00.0"), so no length is cut at the default width.
+  local dur_width = math.max(compact and M.BROWSER_PANEL_DUR_W or M.COL_DUR_W,
+    (reaper.ImGui_CalcTextSize(ctx, "00:00.0")))
   reaper.ImGui_TableSetupColumn(ctx, "Dur", reaper.ImGui_TableColumnFlags_WidthFixed() | resize_flags,
-    compact and M.BROWSER_PANEL_DUR_W or M.COL_DUR_W, 2)
+    dur_width, 2)
   if channels then
     reaper.ImGui_TableSetupColumn(ctx, "Ch", reaper.ImGui_TableColumnFlags_WidthFixed() | resize_flags, M.COL_CH_W, 3)
   end
@@ -1520,19 +1596,21 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_CellPadding(), cellpad_x, cellpad_y)
   if HAS_TABLE_HEADER then
     reaper.ImGui_TableNextRow(ctx, reaper.ImGui_TableRowFlags_Headers(), row_h)
-    action = header_cell(ctx, state, 0, "Name", "name", nil, text_left) or action
+    action = header_cell(ctx, sort, sort_type, 0, "Name", "name", nil, text_left) or action
     local ux0, _ = reaper.ImGui_GetItemRectMin(ctx)
-    action = header_cell(ctx, state, 1, "Dur", "dur") or action
-    if channels then action = header_cell(ctx, state, 2, "Ch", "ch") or action end
+    action = header_cell(ctx, sort, sort_type, 1, "Dur", "dur") or action
+    if channels then action = header_cell(ctx, sort, sort_type, 2, "Ch", "ch") or action end
     if show_loudness then
-      action = header_cell(ctx, state, loud_col, unit.header, "loud") or action
+      action = header_cell(ctx, sort, sort_type, loud_col, unit.header, "loud") or action
     end
     -- The pin column's "label" is the pushpin painted over the header below, so
     -- its arrow goes in the zone the pins already leave clear at the cell's
     -- right end — immediately right of the pin, wherever a resize puts it. The
     -- header pin is WHITE (2026-08-11, user's ask): it names the column, and
     -- TEXT_QUATERNARY is reserved for what nobody has to read.
-    action = header_cell(ctx, state, pin_col, "##pin", "pin", arrow_zone) or action
+    -- Every pinned row is pinned, so there the pin column does not sort.
+    action = header_cell(ctx, sort, sort_type, pin_col, "##pin", not pinned_rows and "pin" or nil,
+      arrow_zone) or action
     pin_cx = pin_axis(ctx, arrow_zone)
     pin_glyph(ctx, font, T.TEXT_PRIMARY, M.ICON_PIN_FS, pin_cx)
     -- The one hairline under the header (the flat-table separation the design
@@ -1554,7 +1632,7 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   -- toggling to no sort and back re-shuffled the rows for a frame — that was the
   -- list "flashing". Asked only when the table IS sortable: ImGui hands back no
   -- sort specs at all otherwise.
-  if not HAS_TABLE_HEADER and reaper.ImGui_TableNeedSort(ctx) then
+  if not HAS_TABLE_HEADER and not pinned_rows and reaper.ImGui_TableNeedSort(ctx) then
     local ok, _, col_user_id, dir = reaper.ImGui_TableGetColumnSortSpecs(ctx, 0)
     -- Sort wins over a unit pick in the (practically impossible) frame that has
     -- both: reading the sort specs clears ImGui's "needs sorting" flag, so a
@@ -1571,9 +1649,11 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   -- handled either way, so a sound that somehow isn't in this view can't make
   -- it scan again and again.
   local reveal_row
-  if state.reveal_seq ~= revealed_seq then
-    revealed_seq = state.reveal_seq
-    if state.reveal_id then
+  -- Each list answers a reveal once. The list the choice was made in already
+  -- shows the row, so it marks the request handled without moving.
+  if not pinned_rows and state.reveal_seq ~= mem.revealed_seq then
+    mem.revealed_seq = state.reveal_seq
+    if state.reveal_id and state.reveal_from ~= mem.key then
       -- The reveal may have cleared a search that was hiding the row; the box's
       -- own buffer is UI-local, so it has to be told (typing is the only other
       -- thing that changes it, and this only fires on a reveal).
@@ -1584,7 +1664,11 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
     end
   end
 
-  local span = reaper.ImGui_SelectableFlags_SpanAllColumns()
+  -- In the name box's dropdown a row must not close the list by itself: a
+  -- Ctrl or Shift click builds a selection, and the dropdown decides when a
+  -- finished choice closes it.
+  local span = reaper.ImGui_SelectableFlags_SpanAllColumns() | ROW_KEEPS_POPUP
+  if preview_rows then span = span | ROW_OVERLAP end
   -- The Name cell's usable width, measured off the first row submitted and shared
   -- by every row after it (one column, one width — asking per row would be the
   -- same answer at a per-frame cost). A SpanAllColumns Selectable renders its
@@ -1603,8 +1687,9 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
   -- band, and scroll_follow needs it submitted to have a rect to test. Without
   -- IncludeItemByIndex the step still happens — the list just doesn't scroll
   -- until the selection re-enters view (the house degrade-don't-break rule).
-  if nav.list_row and HAS_CLIPPER_INCLUDE then
-    reaper.ImGui_ListClipper_IncludeItemByIndex(res.clipper, nav.list_row)
+  local nav_row = not pinned_rows and nav.list_row or nil
+  if nav_row and HAS_CLIPPER_INCLUDE then
+    reaper.ImGui_ListClipper_IncludeItemByIndex(res.clipper, nav_row)
   end
   while reaper.ImGui_ListClipper_Step(res.clipper) do
     local first, last = reaper.ImGui_ListClipper_GetDisplayRange(res.clipper)
@@ -1636,27 +1721,36 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
       name_w = name_w or select(1, reaper.ImGui_GetContentRegionAvail(ctx))
       -- The row's identity is the sound id alone (after ###), so a name that
       -- changes its cut, or contains ##, can never change which row this is.
-      local row_selected = state.browse_ids and state.browse_ids[s.id] == true
+      -- A pinned row is selected when it is the card's reference.
+      local row_selected
+      if pinned_rows then row_selected = state.selected_id == s.id
+      else row_selected = state.browse_ids and state.browse_ids[s.id] == true end
+      -- A labelled pin's name is drawn below, with its label in front.
+      local labelled = pinned_rows and s.label and s.label ~= ""
       -- Paint one continuous background in the wrapper rather than joining
       -- a native highlight to a separate fill across the scrollbar boundary.
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Header(), 0)
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderHovered(), 0)
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_HeaderActive(), 0)
       local row_clicked = reaper.ImGui_Selectable(ctx,
-        widgets.ellipsize(ctx, imgui_label.visible(s.name), name_w) .. "###" .. s.id,
+        (labelled and "" or widgets.ellipsize(ctx, imgui_label.visible(s.name), name_w, "middle"))
+          .. "###" .. s.id,
         row_selected, span, 0, row_h)
       reaper.ImGui_PopStyleColor(ctx, 3)
       local row_hovered = reaper.ImGui_IsItemHovered(ctx)
+      local row_y0 = select(2, reaper.ImGui_GetItemRectMin(ctx))
+      -- The pointer on the row's Play button still counts as on the row.
+      local row_lit = row_hovered or (preview_rows and row_preview.hot == s.id)
       -- Save visible fills for the wrapper. ReaImGui resolves window draw
       -- lists at drawing time, so drawing here would clip them to the table.
-      if row_selected or row_hovered then
+      if row_selected or row_lit then
         local _, y0 = reaper.ImGui_GetItemRectMin(ctx)
         local _, y1 = reaper.ImGui_GetItemRectMax(ctx)
         y0 = math.max(y0, table_y + header_h)
         y1 = math.min(y1, table_y + avail_h)
         local held = row_hovered and reaper.ImGui_IsItemActive(ctx)
         local fill = (held or (row_selected and row_hovered)) and T.FILL_PRIMARY
-          or (row_hovered and T.FILL_TERTIARY or T.FILL_SECONDARY)
+          or (row_lit and T.FILL_TERTIARY or T.FILL_SECONDARY)
         if y1 > y0 then
           row_fills[row_fill_count + 1] = y0
           row_fills[row_fill_count + 2] = y1
@@ -1664,26 +1758,39 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
           row_fill_count = row_fill_count + 3
         end
       end
-      local row_pressed = row_hovered and reaper.ImGui_IsMouseClicked(ctx, 0)
+      local row_pressed = not pinned_rows and row_hovered and reaper.ImGui_IsMouseClicked(ctx, 0)
       reaper.ImGui_PopStyleVar(ctx, 2)
+      if labelled and draw_labelled_name(ctx, s, text_left, row_y0, name_w, row_h)
+          and row_hovered and row_preview.hot ~= s.id then
+        -- Cut text is spelled out in full; the row is the only place it shows.
+        tips.show(ctx, true, s.label:upper() .. "\n" .. s.name, "pinname")
+      end
       local next_selection
       if row_pressed then
         next_selection = select_sound_rows(ctx, state, s.id)
         pending_collapse = next_selection.pending
           and { id = s.id, selection = next_selection.pending } or nil
         action = { type = "browse_sound", id = s.id,
-          selection = next_selection, quiet = true }
+          selection = next_selection, quiet = true, press = true }
+        local mods = HAS_KEY_MODS and reaper.ImGui_GetKeyMods(ctx) or 0
+        pressed_plain = not ((HAS_CTRL_SELECT and (mods & reaper.ImGui_Mod_Ctrl()) ~= 0)
+          or (HAS_SHIFT_SELECT and (mods & reaper.ImGui_Mod_Shift()) ~= 0))
         nav_owner = "list" -- the arrows follow the last-clicked pane
       end
 
       -- The press above selects immediately but stays silent until ImGui confirms
       -- a click on release. Moving far enough to begin a drag never produces this
       -- activation, so pinning or dragging to the timeline cannot auto-audition.
-      if row_clicked then
+      if row_clicked and pinned_rows then
+        -- A click chooses the pin as the reference, as the pinned list's rows
+        -- always have, and follows auto-audition.
+        action = { type = "select_sound", id = s.id, quiet = false }
+      elseif row_clicked then
         local collapse = pending_collapse and pending_collapse.id == s.id
           and pending_collapse.selection or nil
         pending_collapse = nil
-        action = { type = "audition_browse_sound", id = s.id, selection = collapse }
+        action = { type = "audition_browse_sound", id = s.id, selection = collapse,
+          plain = pressed_plain, list = mem.key }
       end
       -- Scroll the revealed row into the middle of the list, on the one frame
       -- the request is fresh.
@@ -1693,13 +1800,13 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
       end
       -- A key-stepped row scrolls into view at the edge it entered from; the
       -- frozen header row masks the table's top band (scroll_follow's inset).
-      if nav.list_row == i then
+      if nav_row == i then
         scroll_follow(ctx, nav.dir, header_h)
         list_scroll.requested = nav.dir
       end
       -- The Name selectable spans the whole row (SpanAllColumns), so its hover
       -- marks the whole row as hovered — that is what feeds the sidebar echo.
-      if row_hovered then
+      if row_hovered and not pinned_rows then
         clear_echo()
         set_echo(s)
       end
@@ -1709,15 +1816,67 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
       -- lands is worked out when the mouse is let go.
       if state.deps.drag_out and not state.drag
         and reaper.ImGui_IsItemActive(ctx) and reaper.ImGui_IsMouseDragging(ctx, 0) then
-        action = { type = "drag_sound", id = s.id, target = "browse",
-          ids = selection.sound_targets(state.visible_sounds, state.browse_ids, s.id) }
+        if pinned_rows then
+          action = { type = "drag_sound", id = s.id, target = "main" }
+        else
+          action = { type = "drag_sound", id = s.id, target = "browse",
+            ids = selection.sound_targets(state.visible_sounds, state.browse_ids, s.id) }
+        end
       end
       -- Right-click the row: pin it to (or unpin it from) the current project, or
       -- delete it. Like the category menus, the delete confirmation can't be opened
       -- from in here (we're inside the closing menu) — stash which sound it's about
       -- and open it below, once the table is finished.
-      local pinned = state.pins and state.pins.by_origin[s.id]
-      action = sound_menu(ctx, state, s) or action
+      local pinned = pinned_rows ~= nil or (state.pins and state.pins.by_origin[s.id])
+      -- The dropdown's rows have no menu: right-click plays the row, as on its
+      -- pinned rows, the pin column pins it, and deleting belongs to the
+      -- Library panel.
+      if not preview_rows then action = sound_menu(ctx, state, s) or action end
+
+      -- The Play button sits at the name column's right edge, over the name's
+      -- end, and a patch of the row's own colours hides the text beneath it,
+      -- so nothing moves.
+      if preview_rows then
+        -- The face keeps a 1px margin above and below: a face as tall as
+        -- the row touches the rows either side, which clip its top and bottom.
+        local size = math.min(reaper.ImGui_GetFrameHeight(ctx), row_h - 2)
+        local bx = text_left + name_w - size
+        reaper.ImGui_SetCursorScreenPos(ctx, bx, row_y0)
+        reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), spacing_x, 0)
+        local play_clicked = reaper.ImGui_InvisibleButton(ctx, "##rowplay_" .. s.id, size, row_h)
+        reaper.ImGui_PopStyleVar(ctx, 1)
+        local play_hot = reaper.ImGui_IsItemHovered(ctx)
+        local play_held = reaper.ImGui_IsItemActive(ctx)
+        if play_hot then row_preview.now = s.id end
+        local blocked = state.picker_preview_blocked or state.drag ~= nil
+        local session = state.pins and state.pins.session
+        local right_clicked = (row_hovered or play_hot) and reaper.ImGui_IsMouseClicked(ctx, 1)
+        if (play_clicked or right_clicked) and not blocked then
+          action = { type = pinned_rows and "preview_pin" or "preview_library_sound", id = s.id,
+            session = session }
+          row_preview.bloom_id, row_preview.bloom_frame = s.id, reaper.ImGui_GetFrameCount(ctx)
+        end
+        if row_lit or play_hot then
+          local dl = reaper.ImGui_GetWindowDrawList(ctx)
+          local gap = M.PICK_TOOL_GAP
+          reaper.ImGui_DrawList_AddRectFilled(dl, bx - gap, row_y0, text_left + name_w, row_y0 + row_h, T.BG_WINDOW)
+          reaper.ImGui_DrawList_AddRectFilled(dl, bx - gap, row_y0, text_left + name_w, row_y0 + row_h,
+            row_selected and T.FILL_PRIMARY or T.FILL_TERTIARY)
+          local playing = state.preview.playing and state.preview.slot == "picker"
+            and state.preview.sound_id == s.id
+          local trigger = theme.motion.enabled and row_preview.bloom_id == s.id
+            and row_preview.bloom_frame + 1 == reaper.ImGui_GetFrameCount(ctx) and playing and not blocked
+          if blocked then reaper.ImGui_BeginDisabled(ctx) end
+          widgets.row_play_face(ctx, font, "rowplay_" .. s.id, bx + size * 0.5, row_y0 + row_h * 0.5, size,
+            playing and not blocked, play_hot and not blocked, play_held, trigger, row_preview.bounds)
+          if blocked then reaper.ImGui_EndDisabled(ctx) end
+          if row_preview.bloom_id == s.id and row_preview.bloom_frame < reaper.ImGui_GetFrameCount(ctx) then
+            row_preview.bloom_id, row_preview.bloom_frame = nil, nil
+          end
+        end
+        tips.show(ctx, play_hot, state.picker_preview_blocked and refpicker.PREVIEW_BLOCKED or ROW_PLAY_TIP,
+          "rowplay")
+      end
 
       reaper.ImGui_TableNextColumn(ctx)
       num_cell(ctx, T.TEXT_TERTIARY, fmt_duration(s.duration), row_h)
@@ -1741,12 +1900,31 @@ local function draw_sound_list(ctx, state, res, text_left, compact)
       -- re-derived by name), nothing otherwise. The Dummy reserves the cell
       -- either way, so a pin appearing can't move a single pixel.
       local cw = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-      reaper.ImGui_Dummy(ctx, cw, row_h)
+      -- In the dropdown an unpinned row's pin cell is a button that pins it.
+      -- A pinned row's mark is not one: unpinning loses the pin's own trim,
+      -- label and points, so it stays on the name box's menu and in the
+      -- pinned list's edit mode, where it cannot happen by a stray click.
+      local pin_hot = false
+      if preview_rows and not pinned then
+        reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_ItemSpacing(), spacing_x, 0)
+        if reaper.ImGui_InvisibleButton(ctx, "##rowpin_" .. s.id, math.max(1, cw), row_h) then
+          action = { type = "pin_sounds", ids = { s.id } }
+        end
+        reaper.ImGui_PopStyleVar(ctx, 1)
+        pin_hot = reaper.ImGui_IsItemHovered(ctx)
+        if pin_hot then row_preview.now = s.id end
+        tips.show(ctx, pin_hot, "Pin To This Project", "rowpin")
+      else
+        reaper.ImGui_Dummy(ctx, cw, row_h)
+      end
       -- The axis, if the header didn't set it (no custom header row on this
       -- build): the first row submitted stands in, and every later one shares it.
       pin_cx = pin_cx or pin_axis(ctx, arrow_zone)
       if pinned then
         pin_glyph(ctx, font, T.ACCENT, M.ICON_PIN_FS, pin_cx)
+      elseif pin_hot then
+        -- A faint pin under the pointer shows what the click will add.
+        pin_glyph(ctx, font, T.TEXT_TERTIARY, M.ICON_PIN_FS, pin_cx)
       end
     end
   end
@@ -1892,6 +2070,8 @@ end
 -- global action top-right — Add sounds, labelled. The folder and gear squares
 -- that used to follow it left on 2026-08-10 (`.brief/settings-move`): the gear
 -- lives in the Reference View's bar now, and the folder became a Settings row.
+local AUTO_TIP = "Auto-audition: play a sound the moment you select it, in the list or with the Reference card's arrows"
+
 local function draw_toolbar(ctx, state, res)
   local action
 
@@ -1905,7 +2085,7 @@ local function draw_toolbar(ctx, state, res)
   if reaper.ImGui_IsItemActive(ctx) then nav_owner = "list" end
   if q ~= (edit.query or "") then
     edit.query = q
-    action = { type = "set_query", query = q }
+    action = action or { type = "set_query", query = q }
   end
 
   -- The one global action, placed by the measure-then-push idiom (same as the
@@ -1919,13 +2099,20 @@ local function draw_toolbar(ctx, state, res)
   local panel_w = reaper.ImGui_GetFrameHeight(ctx)
   local cx = reaper.ImGui_GetCursorPosX(ctx)
   local avail = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
-  local target = cx + avail - add_w - panel_w - M.ITEM_SPACING_X
+  local target = cx + avail - add_w - 2 * (panel_w + M.ITEM_SPACING_X)
   if target > cx then reaper.ImGui_SetCursorPosX(ctx, target) end
+
+  -- Auto-audition belongs to the list: it decides what a click on a row does.
+  if widgets.toggle(ctx, "auto", "A", state.auto_audition, AUTO_TIP,
+      res.icon_font, "ear", nil, "audition") then
+    action = action or { type = "toggle_auto" }
+  end
+  reaper.ImGui_SameLine(ctx)
 
   local cat = view_target(state.library, state.view)
   local dest = categories.get(state.library, cat)
   if reaper.ImGui_Button(ctx, "##add_sounds", add_w) then
-    action = { type = "pick", category = cat }
+    action = action or { type = "pick", category = cat }
   end
   local ax0, ay0 = reaper.ImGui_GetItemRectMin(ctx)
   local _, ay1 = reaper.ImGui_GetItemRectMax(ctx)
@@ -1946,7 +2133,7 @@ local function draw_toolbar(ctx, state, res)
 
   reaper.ImGui_SameLine(ctx)
   if widgets.panel_button(ctx, res.icon_font, "embed_library", "panel-left", false, "[") then
-    action = { type = "set_library_placement", placement = "embedded" }
+    action = action or { type = "set_library_placement", placement = "embedded" }
   end
   tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), "Dock to Reference View")
 
@@ -1954,21 +2141,19 @@ local function draw_toolbar(ctx, state, res)
 end
 
 local compact_search = { open = false, focus = false }
+-- The card's dropdown keeps its own, so opening its search never opens the
+-- docked Library's, which may be drawn in the same frame.
+local dropdown_search = { open = false, focus = false }
+-- The card's dropdown can be open beside the Library itself, so it keeps its
+-- own record of the last frame it was drawn. Its search field is always shown.
+local dropdown_view = { frame = nil }
 
-local function header_button(ctx, font, id, icon, fallback, highlighted)
-  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0)
-  local clicked = widgets.panel_button(ctx, font, id, icon, false, fallback, highlighted)
-  reaper.ImGui_PopStyleColor(ctx, 1)
-  reaper.ImGui_PopStyleVar(ctx, 1)
-  return clicked
-end
+local header_button = widgets.header_button
 
--- Open in Separate Window and Hide Library, at window-relative x positions.
--- The docked Library's mark at the left of its top row, in the accent like
--- the Reference card's pin, so the two cards read apart. Paints it centred in
--- a square `size` wide at screen (x, y), `h` tall, and returns the width it
--- took with the gap after it (0 when the icon font is missing).
+-- The short docked Library's mark at the left of its picker row, in the
+-- accent. Paints it centred in a square `size` wide at screen (x, y), `h`
+-- tall, and returns the width it took with the gap after it (0 when the icon
+-- font is missing).
 local function draw_library_mark(ctx, res, x, y, h)
   local size = M.ICON_SM_FS
   if not icons.paint_glyph(ctx, res.icon_font, "library", x + size * 0.5, y + h * 0.5, T.ACCENT, size) then
@@ -1976,6 +2161,50 @@ local function draw_library_mark(ctx, res, x, y, h)
   end
   return size + M.ITEM_SPACING_X
 end
+
+-- The docked pinned list's heading, kept between frames.
+local pinned_heading = { count = nil, width = nil, font = nil, text = "" }
+
+-- The list switch's two faces. The shared switch paints through a draw list
+-- alone, so the context and icon font of the frame being drawn are kept here.
+local switch_ctx, switch_font
+local function draw_library_face(dl, cx, cy, colour)
+  if not icons.paint_glyph(switch_ctx, switch_font, "library", cx, cy, colour, M.ICON_SM_FS) then
+    icons.draw_folder(dl, cx, cy, colour)
+  end
+end
+local function draw_pinned_face(dl, cx, cy, colour)
+  if not icons.paint_glyph(switch_ctx, switch_font, "pin", cx, cy, colour, M.ICON_SM_FS) then
+    local w, h = reaper.ImGui_CalcTextSize(switch_ctx, "P")
+    reaper.ImGui_DrawList_AddText(dl, cx - w * 0.5, cy - h * 0.5, colour, "P")
+  end
+end
+-- Hoisted so the frame loop never rebuilds it (frame-allocation rule).
+local LIST_CHOICES = {
+  { value = "library", tip = "Library", draw = draw_library_face },
+  { value = "pinned", tip = "Pinned References", draw = draw_pinned_face },
+}
+
+-- The list switch at the left of the dropdown's top row: one joined control,
+-- the Library icon for its sounds and the pin for this project's pinned
+-- references, with the accent selection sliding to the one in use (the shared
+-- two-way switch, as on the Pitch panel's unit). Drawn at window position
+-- (x, y). Returns the choice made this frame, and the width the switch took
+-- with the gap after it.
+local function draw_list_switch(ctx, state, res, x, y)
+  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
+  local shown = reference_list.shown(state)
+  local action
+  switch_ctx, switch_font = ctx, res.icon_font
+  reaper.ImGui_SetCursorPos(ctx, x, y)
+  local chosen = widgets.two_way_switch(ctx, "list_", shown, LIST_CHOICES, 2 * ctrl, ctrl, true)
+  if chosen and chosen ~= shown then
+    action = { type = "set_library_list", list = chosen }
+  end
+  return action, 2 * ctrl + M.ITEM_SPACING_X
+end
+
+-- Open in Separate Window and Hide Library, at window-relative x positions.
 
 local function draw_window_buttons(ctx, res, popout_x, close_x, y)
   local action
@@ -1994,7 +2223,15 @@ end
 
 -- The docked Library's category row. `compact_search` says whether its search
 -- field is open. The picker's list passes its own state and no window buttons.
-local function draw_compact_toolbar(ctx, state, res, compact_search, window_buttons)
+-- `earlier_form` is the release example's row: the Library mark at its left
+-- and no auto-audition button. `dropdown` is the card's list: the docked row
+-- without window buttons, starting with the switch between the Library's
+-- sounds and the pinned references, whose heading replaces the category's.
+-- Search is a button in every form of the row. A click swaps the heading for
+-- a back arrow and the search field; the button stays where it was, lit, and
+-- closes the field again. The dropdown's pinned list has the same button in
+-- the same place, for its own search.
+local function draw_compact_toolbar(ctx, state, res, compact_search, window_buttons, earlier_form, dropdown)
   local action
   local width = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
@@ -2003,37 +2240,112 @@ local function draw_compact_toolbar(ctx, state, res, compact_search, window_butt
   local button_step = ctrl + M.BROWSER_PANEL_ACTION_GAP
   local close_x = x + width - ctrl
   local popout_x = close_x - button_step
-  local search_x = window_buttons and popout_x - button_step or close_x
-  -- Docked, the row starts with the Library's mark.
-  local mark_w = window_buttons and draw_library_mark(ctx, res, sx, sy, ctrl) or 0
+  -- The row's right end: auto-audition then search then the window buttons,
+  -- or, in the dropdown, search then auto-audition at the very end.
+  local search_x, auto_x
+  if dropdown then
+    auto_x, search_x = close_x, close_x - button_step
+  else
+    search_x = window_buttons and popout_x - button_step or close_x
+    auto_x = not earlier_form and search_x - button_step or nil
+  end
+  -- Where the heading, or the open search field, must stop.
+  local heading_end = math.min(auto_x or search_x, search_x) - M.ITEM_SPACING_X
+  -- The open field starts after the back arrow.
+  local field_x = x + ctrl + M.ITEM_SPACING_X
+  local searching = search_rules.active(edit.query or "")
+  local mark_w = 0
+  if dropdown then action, mark_w = draw_list_switch(ctx, state, res, x, y)
+  elseif window_buttons and earlier_form then mark_w = draw_library_mark(ctx, res, sx, sy, ctrl) end
   x, sx = x + mark_w, sx + mark_w
+  local pinned_list = dropdown == true and reference_list.shown(state) == "pinned"
+  field_x = field_x + mark_w
+  if pinned_list then
+    -- The same buttons in the same places as the Library's row.
+    local list = state.pins and not state.pins.load_error and state.pins.data.pins
+    local drawn = false
+    if compact_search.open then
+      reaper.ImGui_SetCursorPos(ctx, x, y)
+      if header_button(ctx, res.icon_font, "back_to_category", "arrow-left", "\u{2190}") then
+        compact_search.open = false
+      end
+      tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), "Close Search")
+      reaper.ImGui_SetCursorPos(ctx, field_x, y)
+      drawn = refpicker.draw_embedded_search(ctx, state, res, heading_end - field_x,
+        compact_search.focus)
+      compact_search.focus = false
+      if drawn then
+        local fx0, fy0 = reaper.ImGui_GetItemRectMin(ctx)
+        local fx1, fy1 = reaper.ImGui_GetItemRectMax(ctx)
+        focus.keep_zone(fx0, fy0, fx1, fy1)
+      end
+    end
+    if not drawn then
+      local heading_x = compact_search.open and field_x or x
+      local heading_w = heading_end - heading_x
+      -- Rebuilt only when the count, the width or the font size changes.
+      local h, count, font = pinned_heading, list and #list or -1, reaper.ImGui_GetFontSize(ctx)
+      if h.count ~= count or h.width ~= heading_w or h.font ~= font then
+        h.count, h.width, h.font = count, heading_w, font
+        h.text = widgets.ellipsize(ctx,
+          "Pinned References" .. (list and (" (" .. count .. ")") or ""), heading_w)
+      end
+      local shown = h.text
+      local _, text_h = reaper.ImGui_CalcTextSize(ctx, shown)
+      reaper.ImGui_DrawList_AddText(reaper.ImGui_GetWindowDrawList(ctx), sx + heading_x - x,
+        math.floor(sy + (ctrl - text_h) / 2 + 0.5), T.TEXT_PRIMARY, shown)
+    end
+    reaper.ImGui_SetCursorPos(ctx, search_x, y)
+    local pin_query = refpicker.embedded_query()
+    if header_button(ctx, res.icon_font, "open_search", "search", icons.draw_search,
+        compact_search.open or pin_query ~= "") then
+      compact_search.open = not compact_search.open
+      compact_search.focus = compact_search.open
+    end
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), compact_search.open and "Close Search"
+      or (pin_query ~= "" and ("Search: " .. pin_query) or "Search"))
+    -- A click on a pinned row follows auto-audition, as in the Library list.
+    reaper.ImGui_SetCursorPos(ctx, auto_x, y)
+    if header_button(ctx, res.icon_font, "auto_audition", "ear", "A", state.auto_audition) then
+      action = action or { type = "toggle_auto" }
+    end
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), AUTO_TIP)
+    reaper.ImGui_SetCursorPos(ctx, x - mark_w, y + ctrl + M.ITEM_SPACING_Y)
+    return action
+  end
   reaper.ImGui_SetCursorPos(ctx, x, y)
-  local category_w = search_x - x - M.ITEM_SPACING_X
+  local category_w = heading_end - x
   local view = state.view
   local cat = view_target(state.library, view)
   local category = categories.get(state.library, cat)
   local name = category and category.name or (view.scope == "uncategorised"
     and "Uncategorised" or (view.scope == "categories" and "Categories" or "All"))
   if compact_search.open then
-    if header_button(ctx, res.icon_font, "back_to_category", "arrow-left", "←") then
+    if header_button(ctx, res.icon_font, "back_to_category", "arrow-left", "\u{2190}") then
       compact_search.open = false
     end
     tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), "Return to Category")
-    reaper.ImGui_SetCursorPos(ctx, x + ctrl + M.ITEM_SPACING_X, y)
-    -- Keep the current query when Escape closes the field. InputText otherwise
-    -- restores the text it had when it first received focus.
-    local escape = reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_ChildWindows())
+    reaper.ImGui_SetCursorPos(ctx, field_x, y)
+    -- Keep the current query when Escape closes the field, or closes the
+    -- dropdown around it. InputText otherwise restores the text it had when
+    -- it first received focus.
+    local escape = (dropdown or reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_ChildWindows()))
       and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape())
     if compact_search.focus then
       reaper.ImGui_SetKeyboardFocusHere(ctx)
       compact_search.focus = false
     end
-    local _, q = widgets.search_input(ctx, res.icon_font, "##search", "Search", edit.query or "", category_w)
+    -- The field stops before the buttons at the row's right end.
+    local _, q = widgets.search_input(ctx, res.icon_font, "##search", "Search", edit.query or "",
+      heading_end - field_x)
     if reaper.ImGui_IsItemActive(ctx) then nav_owner = "list" end
     focus.keep_zone(sx, sy, sx + search_x - x + ctrl, sy + ctrl)
     if escape then
-      compact_search.open = false
-      focus.consume_key(reaper.ImGui_Key_Escape())
+      -- Escape closes the dropdown itself; its field reopens closed.
+      if not dropdown then
+        compact_search.open = false
+        focus.consume_key(reaper.ImGui_Key_Escape())
+      end
     elseif q ~= (edit.query or "") then
       edit.query = q
       action = { type = "set_query", query = q }
@@ -2093,12 +2405,24 @@ local function draw_compact_toolbar(ctx, state, res, compact_search, window_butt
       end
       reaper.ImGui_EndPopup(ctx)
     end
-    reaper.ImGui_SetCursorPos(ctx, search_x, y)
-    if header_button(ctx, res.icon_font, "open_search", "search", icons.draw_search, search_rules.active(edit.query or "")) then
-      compact_search.open, compact_search.focus = true, true
-      focus.keep_zone(sx, sy, sx + width, sy + ctrl)
+  end
+  -- The search button keeps its place while the field is open, lit, and
+  -- closes it again.
+  reaper.ImGui_SetCursorPos(ctx, search_x, y)
+  if header_button(ctx, res.icon_font, "open_search", "search", icons.draw_search,
+      compact_search.open or searching) then
+    compact_search.open = not compact_search.open
+    compact_search.focus = compact_search.open
+    if compact_search.open then focus.keep_zone(sx, sy, sx + width, sy + ctrl) end
+  end
+  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), compact_search.open and "Close Search"
+    or (searching and ("Search: " .. edit.query) or "Search"))
+  if auto_x then
+    reaper.ImGui_SetCursorPos(ctx, auto_x, y)
+    if header_button(ctx, res.icon_font, "auto_audition", "ear", "A", state.auto_audition) then
+      action = action or { type = "toggle_auto" }
     end
-    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), search_rules.active(edit.query or "") and ("Search: " .. edit.query) or "Search")
+    tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), AUTO_TIP)
   end
   if window_buttons then
     action = draw_window_buttons(ctx, res, popout_x, close_x, y) or action
@@ -2364,6 +2688,7 @@ local function draw_picker_popup(ctx, state, res)
   end
   local list_w, list_h = reaper.ImGui_GetContentRegionAvail(ctx)
   local compact = panel_layout.geometry(list_w, ctrl, M)
+  compact.list_memory = "picker"
   local no_scroll = reaper.ImGui_WindowFlags_NoScrollbar() | reaper.ImGui_WindowFlags_NoScrollWithMouse()
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0)
   local list_open = reaper.ImGui_BeginChild(ctx, "picker_listarea", list_w, list_h, 0, no_scroll)
@@ -2636,6 +2961,37 @@ end
 -- outline.
 -- opts: the docked Library's options from ui/library_host.lua (its card plan
 -- and readings); nil in the separate window.
+-- Reused every frame (frame-allocation rule).
+local strip_wave = { slot = "main", span_shade = true,
+  empty_hint = "Choose a sound to see its waveform." }
+
+-- The separate window's preview strip, under the sound list: the selected
+-- reference's whole waveform and, where the width allows, its six readings.
+-- It is a second view of the Reference card's sound, with the same playback,
+-- playhead, trim and start and end points. A click seeks. The points, the
+-- trim and the zoom are changed on the card.
+local function draw_reference_strip(ctx, state, x, y, w, h)
+  local sel = state.selected
+  local gap = M.STRIP_GROUP_GAP
+  local two_w = readings.measure(ctx).two_w
+  local read_w = (w - two_w - gap >= M.BROWSER_STRIP_WAVE_MIN_W) and two_w or 0
+  local wave_w = math.floor(read_w > 0 and (w - read_w - gap) or w)
+  reaper.ImGui_SetCursorScreenPos(ctx, x, y)
+  local o = strip_wave
+  o.id, o.waveform, o.width = state.selected_id, state.waveform, wave_w
+  o.trim_db = sel and own_level.playing_trim(state.own_level, sel) or 0
+  o.duration = sel and sel.duration or nil
+  o.min_lane_h = M.BROWSER_PICKER_LANE_MIN_H
+  o.span_start = sel and sel.span_start or nil
+  o.span_end = sel and sel.span_end or nil
+  local action = waveform.draw(ctx, state, h, o)
+  if read_w > 0 then
+    readings.draw_columns(ctx, reaper.ImGui_GetWindowDrawList(ctx), sel,
+      x + wave_w + gap, y, read_w, M.STRIP_READING_H)
+  end
+  return action
+end
+
 local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
   bottom_pad = embedded and (bottom_pad or M.STRIP_PAD) or 0
   if form == "picker" then
@@ -2666,11 +3022,19 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
     hx, frame_top = reaper.ImGui_GetCursorScreenPos(ctx)
     reaper.ImGui_SetCursorScreenPos(ctx, hx, frame_top + M.STRIP_PAD)
   end
-  if embedded then action = draw_compact_toolbar(ctx, state, res, compact_search, true)
+  if embedded then
+    local dropdown = opts and opts.dropdown == true
+    action = draw_compact_toolbar(ctx, state, res, dropdown and dropdown_search or compact_search,
+      not dropdown, opts and opts.with_preview == true, dropdown)
   else action = draw_toolbar(ctx, state, res) end
   local compact = embedded and panel_layout.geometry(
     select(1, reaper.ImGui_GetContentRegionAvail(ctx)), reaper.ImGui_GetFrameHeight(ctx), M,
     opts and opts.cell_w)
+  if compact and opts and opts.dropdown then
+    compact.preview_rows = true
+    compact.list_memory = "dropdown"
+    refpicker.claim_preview(state)
+  end
 
   -- Height budget: the strip and the info row are anchored to the bottom, the
   -- table takes everything in between (the 2026-07-29 arrangement — results on
@@ -2720,6 +3084,21 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
   local list_h = avail_h - (wave_h + ruler_h + frame_bottom_pad + gap_y)
     - name_block - (info_h + gap_y)
   if list_h < min_list_h then list_h = min_list_h end
+  -- The Library is its list, docked or in its own window: the selected
+  -- sound's name, readings, waveform and controls are the Reference card's.
+  -- The separate window adds a preview strip under the list
+  -- (draw_reference_strip), while the list above keeps its minimum rows.
+  -- The release introduction's Library example still shows the earlier docked
+  -- form with its own preview (opts.with_preview).
+  local list_only = not (opts and opts.with_preview)
+  local strip_h
+  if list_only then
+    list_h = select(2, reaper.ImGui_GetContentRegionAvail(ctx))
+    local wanted = 3 * M.STRIP_READING_H
+    if not embedded and list_h - gap_y - wanted >= min_list_h then
+      strip_h, list_h = wanted, list_h - gap_y - wanted
+    end
+  end
 
   -- Wrap the list in a child so the whole area is one reliable drop target (a bare
   -- table isn't dependable across ReaImGui versions, and dropping into an empty view
@@ -2737,6 +3116,72 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
   local list_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx)) + panel_pad * 2
   local frame_x, frame_y = reaper.ImGui_GetCursorScreenPos(ctx)
   frame_x = frame_x - panel_pad
+  local pinned_rows = list_only and compact and opts and opts.dropdown
+    and reference_list.shown(state) == "pinned" and refpicker.embedded_rows(ctx, state)
+  if pinned_rows then
+    -- The card's dropdown, set to this project's pinned references: the pins
+    -- in the Library's own table, so the columns, their widths and the
+    -- scrolling match the Library's rows. The edit button sits beneath it.
+    local footer_h = refpicker.footer_height(ctx)
+    local table_h = math.max(1, list_h - M.STRIP_PAD - footer_h)
+    reaper.ImGui_SetCursorScreenPos(ctx, frame_x + frame_stroke, frame_y + frame_stroke)
+    if embedded then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0) end
+    local table_open = reaper.ImGui_BeginChild(ctx, "listarea",
+      list_w - frame_stroke * 2, math.max(1, table_h - frame_stroke), 0, no_scroll)
+    if embedded then reaper.ImGui_PopStyleColor(ctx) end
+    if table_open then
+      compact.pinned_rows = pinned_rows
+      local list_action = draw_sound_list(ctx, state, res, text_left, compact)
+      compact.pinned_rows = nil
+      action = action or list_action
+      reaper.ImGui_EndChild(ctx)
+      -- Its row clicks keep focus here, so the arrow keys still step the list.
+      local tx0, ty0 = reaper.ImGui_GetItemRectMin(ctx)
+      local tx1, ty1 = reaper.ImGui_GetItemRectMax(ctx)
+      focus.keep_zone(tx0, ty0, tx1, ty1)
+    end
+    local foot_w = math.max(1, list_w - panel_pad * 2)
+    reaper.ImGui_SetCursorScreenPos(ctx, frame_x + panel_pad, frame_y + table_h + M.ITEM_SPACING_Y)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0)
+    local foot_open = reaper.ImGui_BeginChild(ctx, "pinnedfoot", foot_w,
+      math.max(1, footer_h - M.ITEM_SPACING_Y), 0, no_scroll)
+    reaper.ImGui_PopStyleColor(ctx)
+    if foot_open then
+      refpicker.draw_embedded_footer(ctx, state, foot_w)
+      reaper.ImGui_EndChild(ctx)
+      -- The edit button keeps focus here too.
+      local fx0, fy0 = reaper.ImGui_GetItemRectMin(ctx)
+      local fx1, fy1 = reaper.ImGui_GetItemRectMax(ctx)
+      focus.keep_zone(fx0, fy0, fx1, fy1)
+    end
+    if embedded then
+      widgets.card_outline(ctx, frame_x, frame_top, frame_x + list_w, frame_y + list_h)
+    end
+    return action
+  end
+  if list_only and opts and opts.dropdown and reference_list.shown(state) == "pinned" then
+    -- The pinned list while it is being edited, or with nothing to list: its
+    -- own rows, messages and edit mode, inset like the category row above.
+    reaper.ImGui_SetCursorScreenPos(ctx, frame_x + panel_pad, frame_y)
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0)
+    local pinned_open = reaper.ImGui_BeginChild(ctx, "pinnedarea",
+      math.max(1, list_w - panel_pad * 2), math.max(1, list_h - M.STRIP_PAD), 0, no_scroll)
+    reaper.ImGui_PopStyleColor(ctx)
+    if pinned_open then
+      local pinned_action = refpicker.draw_embedded(ctx, state, res)
+      action = action or pinned_action
+      reaper.ImGui_EndChild(ctx)
+      -- Typing in its search field, and its row clicks, keep focus here.
+      local px0, py0 = reaper.ImGui_GetItemRectMin(ctx)
+      local px1, py1 = reaper.ImGui_GetItemRectMax(ctx)
+      focus.keep_zone(px0, py0, px1, py1)
+    end
+    if embedded then
+      widgets.card_outline(ctx, frame_x, frame_top, frame_x + list_w, frame_y + list_h)
+    end
+    return action
+  end
+
   reaper.ImGui_SetCursorScreenPos(ctx, frame_x + frame_stroke, frame_y + frame_stroke)
   if embedded then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), 0) end
   local list_open = reaper.ImGui_BeginChild(ctx, "listarea",
@@ -2750,7 +3195,6 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
     action = action or list_action or shortcut_action
     reaper.ImGui_EndChild(ctx)
   end
-  reaper.ImGui_SetCursorPosX(ctx, list_x)
   -- The main panel's drop target spans the list AND the audition strip below
   -- it (2026-08-01, user's call) — the list rect is captured here, the one
   -- rect-based target (dropzone.file_drop_over_rect, the same mechanism as the
@@ -2766,6 +3210,33 @@ local function draw_main(ctx, state, res, embedded, form, bottom_pad, opts)
     focus.keep_zone(lx0, ly0, lx1, ly1)
     list_rect = { x0 = lx0, y0 = ly0 }
   end
+
+  if list_only then
+    local bottom = frame_y + list_h
+    -- Docked, the outline closes around the category row and the list. Painted
+    -- in the parent after the list child has closed, as the card's outline is.
+    if embedded then widgets.card_outline(ctx, frame_x, frame_top, frame_x + list_w, bottom) end
+    if strip_h then
+      local strip_action = draw_reference_strip(ctx, state, frame_x + panel_pad, bottom + gap_y,
+        list_w - panel_pad * 2, strip_h)
+      action = action or strip_action
+      -- A drop on the strip adds to the Library, as a drop on the list does.
+      bottom = bottom + gap_y + strip_h
+    end
+    if list_rect then
+      local cat = view_target(state.library, state.view)
+      local dest = categories.get(state.library, cat)
+      local drop_action = dropzone.file_drop_over_rect(ctx, state, list_rect.x0, list_rect.y0,
+        frame_x + list_w, bottom,
+        { category = cat, label = "Add to " .. (dest and dest.name or "your Library") })
+      action = action or drop_action
+    end
+    return action
+  end
+
+  -- Back to the content's left edge for the preview below. Only here, where
+  -- items follow: ImGui stops the script when a window ends on a moved cursor.
+  reaper.ImGui_SetCursorPosX(ctx, list_x)
 
   -- Docked, a permanent hairline closes the list across the outline, in the
   -- gap below it.
@@ -2955,27 +3426,36 @@ end
 function browser.draw(ctx, state, res, opts)
   local action
   local embedded = opts and opts.embedded == true
-  if embedded ~= last_embedded then
-    resize_press_in_header = nil
-    nav_owner = "list"
-    split.start_h, split.start_my, split.live, split.hold = nil, nil, nil, false
-    last_embedded = embedded
-    compact_search.open, compact_search.focus = false, false
-    edit.query = state.query or ""
-  end
+  local frame = reaper.ImGui_GetFrameCount ~= nil and reaper.ImGui_GetFrameCount(ctx) or nil
+  if opts and opts.dropdown then
+    -- The Library itself may be drawn in this same frame, so the dropdown
+    -- leaves the Library's own records alone. Reopened, its search field
+    -- shows the current filter.
+    if frame ~= nil and dropdown_view.frame ~= frame - 1 then
+      edit.query = state.query or ""
+      dropdown_search.open, dropdown_search.focus = false, false
+    end
+    dropdown_view.frame = frame
+  else
+    if embedded ~= last_embedded then
+      resize_press_in_header = nil
+      nav_owner = "list"
+      split.start_h, split.start_my, split.live, split.hold = nil, nil, nil, false
+      last_embedded = embedded
+      compact_search.open, compact_search.focus = false, false
+      edit.query = state.query or ""
+    end
 
-  -- A reopened window starts arrow-browsing back on the sound list (see
-  -- nav_owner above). Frame-count gap = the window wasn't drawn last frame.
-  if reaper.ImGui_GetFrameCount ~= nil then
-    local frame = reaper.ImGui_GetFrameCount(ctx)
-    if last_draw_frame ~= frame - 1 then
+    -- A reopened window starts arrow-browsing back on the sound list (see
+    -- nav_owner above). Frame-count gap = the window wasn't drawn last frame.
+    if frame ~= nil and last_draw_frame ~= frame - 1 then
       nav_owner = "list"
       resize_press_in_header = nil
       -- The box and the list filter are two copies; Esc can close the window
       -- right after the box reverted, leaving them disagreeing on reopen.
       edit.query = state.query or ""
     end
-    last_draw_frame = frame
+    if frame ~= nil then last_draw_frame = frame end
   end
 
   -- Arrow-key browsing, read at the top of the draw so this same frame's panes
@@ -2987,8 +3467,14 @@ function browser.draw(ctx, state, res, opts)
   if HAS_ARROW_NAV and not state.drag
     and reaper.ImGui_IsWindowFocused(ctx, embedded and reaper.ImGui_FocusedFlags_ChildWindows()
       or reaper.ImGui_FocusedFlags_RootAndChildWindows()) then
-    local popup_up = HAS_POPUP_ANY and reaper.ImGui_IsPopupOpen(ctx, "",
-      reaper.ImGui_PopupFlags_AnyPopupId() | reaper.ImGui_PopupFlags_AnyPopupLevel())
+    local popup_up
+    if opts and opts.dropdown then
+      -- This list is itself a popup, so only its own category menu takes the keys.
+      popup_up = reaper.ImGui_IsPopupOpen(ctx, "library_categories")
+    else
+      popup_up = HAS_POPUP_ANY and reaper.ImGui_IsPopupOpen(ctx, "",
+        reaper.ImGui_PopupFlags_AnyPopupId() | reaper.ImGui_PopupFlags_AnyPopupLevel())
+    end
     if not popup_up then
       -- Left/Right drive the audition itself (2026-08-08, the user's ask —
       -- "standard stuff"): Left restarts the browsed sound, Right jumps to the
@@ -2996,11 +3482,19 @@ function browser.draw(ctx, state, res, opts)
       -- reports, so reference-mode refusal and auditioning behave identically.
       -- Skipped while ANY item is active — unlike Up/Down, these two are the
       -- text cursor's own keys in the search box.
-      if state.browse and not reaper.ImGui_IsAnyItemActive(ctx) then
+      -- The list plays the selected reference, so the two keys seek that; the
+      -- release example's Library still has its own audition.
+      local own_preview = opts and opts.with_preview
+      local seek_target = own_preview and "browse" or nil
+      local playable = state.browse
+      if not own_preview then playable = state.selected end
+      if playable and not reaper.ImGui_IsAnyItemActive(ctx) then
         if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_LeftArrow()) then
-          action = { type = "seek", fraction = 0, target = "browse" }
+          -- The reference starts again from its start point, as Play does.
+          action = own_preview and { type = "seek", fraction = 0, target = seek_target }
+            or { type = "trigger_play", target = "main" }
         elseif reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_RightArrow()) then
-          action = { type = "seek", fraction = 1, target = "browse" }
+          action = { type = "seek", fraction = 1, target = seek_target }
         end
       end
       local step = 0
@@ -3009,10 +3503,18 @@ function browser.draw(ctx, state, res, opts)
       if step ~= 0 then
         -- NOT the `cond and a or b` idiom: a step refused at a list edge
         -- returns nil, which would wrongly fall through to the other pane.
-        if nav_owner == "sidebar" then
+        if opts and opts.dropdown and reference_list.shown(state) == "pinned" then
+          -- The dropdown shows the pinned list: the keys walk it, as the
+          -- card's arrows do.
+          action = refpicker.step_embedded(state, step)
+          -- A key step keeps the dropdown open; a row click closes it.
+          if action then action.from_key = true end
+        elseif nav_owner == "sidebar" then
           action = step_sidebar(state, step)
         else
           action = step_list(state, step)
+          -- The keys walk the dropdown's rows; the docked Library follows.
+          if action and opts and opts.dropdown then action.list = "dropdown" end
         end
         -- Precedence, decided (Codex, 2026-08-08 review): a panel action in
         -- the SAME frame replaces this step (merge_action below prefers new).
@@ -3111,7 +3613,7 @@ function browser.draw(ctx, state, res, opts)
   local wave_id, wave_cols
   if main_open then
     local main_action
-    main_action, wave_id, wave_cols = draw_main(ctx, state, res)
+    main_action, wave_id, wave_cols = draw_main(ctx, state, res, false, nil, nil, opts)
     action = merge_action(action, main_action)
     reaper.ImGui_EndChild(ctx)
   end

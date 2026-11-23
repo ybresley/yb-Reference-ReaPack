@@ -1,23 +1,25 @@
 -- The Reference card, beside or above the panels. A ui/ module: draws from
 -- state and returns intent.
 --
--- Top row: the picker, previous and next, the count, then Library and
--- Settings. Then the file details, the six stored readings below a hairline,
+-- Top row: the name box, then previous and next joined around the count.
+-- Then the file details, the six stored readings below a hairline,
 -- and the reference's waveform with its ruler. Bottom row: playback (play,
--- pause, stop, loop), listening (latch, mono, pitch, Normalize) and the trim
--- bar. The playback group matches the docked Library's, cell for cell.
+-- pause, stop, loop), listening (latch, mono, pitch, Normalize), the trim
+-- value, then Library and Settings. The playback group matches the docked
+-- Library's, cell for cell.
 -- core/card_plan.lua decides which middle rows fit; the waveform takes the
 -- spare height, so the card always fills the docker. With no room for the
 -- readings, the Normalize menu shows them.
 --
--- The bottom row is eight equal cells and the trim bar. On the top row the
--- arrows and Library and Settings are square buttons, so the name box gets
--- the rest of the width. Extra width goes to the cells and the name box.
+-- The bottom row is ten equal cells and the trim value, which is a number
+-- that opens a vertical slider while held: a bar the row has no width for. On
+-- the top row the arrows are narrow, so the name box gets the rest.
 local theme = require("ui.theme")
 local tips = require("ui.tips")
 local widgets = require("ui.widgets")
 local match = require("core.match")
 local own_level = require("core.own_level")
+local decibels = require("core.decibels")
 local card_plan = require("core.card_plan")
 local icons = require("ui.icons")
 local refpicker = require("ui.refpicker")
@@ -32,9 +34,13 @@ local M = theme.metrics
 
 local controls = {}
 
-local TRIM_TIP = "Adjust the selected reference's remembered trim.\n"
-  .. "Drag left or right \u{00B7} Alt for fine adjustment \u{00B7} click to type \u{00B7} right-click to reset"
-local CELLS = 8
+local TRIM_TIP = "Trim: adjust the selected reference's remembered level.\n"
+  .. "Drag up or down \u{00B7} Alt for fine adjustment \u{00B7} click to type \u{00B7} right-click to reset"
+-- Playback (4), listening (3), then Library and Settings (2). The level
+-- control sits between the last two and is not made of cells. Three gaps part
+-- the groups.
+local CELLS, GROUP_GAPS = 9, 3
+local PLAYBACK_CELLS, LISTENING_CELLS = 4, 3
 local FACT_SEPARATOR = require("core.techfacts").SEP
 
 local function snap(v) return math.floor(v + 0.5) end
@@ -57,9 +63,8 @@ end
 
 local function trim_width(ctx)
   if sizes_current(ctx) and measured.trim then return measured.trim end
-  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
-  measured.trim = math.ceil(reaper.ImGui_CalcTextSize(ctx, "Trim") + M.STRIP_GROUP_GAP
-    + reaper.ImGui_CalcTextSize(ctx, "-60.0 dB") + 2 * pad_x)
+  -- Normalize and the lock each take a square at its left.
+  measured.trim = widgets.db_value_width(ctx, 2)
   return measured.trim
 end
 
@@ -85,7 +90,7 @@ function controls.measure(ctx)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local gap = M.STRIP_GROUP_GAP
   local r = readings.measure(ctx)
-  local content = math.max(CELLS * ctrl + 2 * gap + trim_width(ctx), r.two_w)
+  local content = math.max(CELLS * ctrl + GROUP_GAPS * gap + trim_width(ctx), r.two_w)
   sizes.block_width = math.ceil(content) + 2 * M.STRIP_PAD
   local s = measure_plan_sizes(ctx, content)
   sizes.card_minimum = card_plan.minimum(s)
@@ -98,7 +103,7 @@ end
 -- Library sizes its audition buttons from it, so the two rows match.
 function controls.cell_width(ctx, card_w)
   local w = snap(card_w - 2 * M.STRIP_PAD)
-  return (w - trim_width(ctx) - 2 * M.STRIP_GROUP_GAP) / CELLS
+  return (w - trim_width(ctx) - GROUP_GAPS * M.STRIP_GROUP_GAP) / CELLS
 end
 
 -- What a card `w` wide shows at height `h` (core/card_plan.lua). Fills `out`,
@@ -112,7 +117,7 @@ local cell = widgets.segment_cell
 
 --------------------------------------------------------------- top row
 
--- Library and Settings.
+-- Library and Settings, at the right end of the bottom row.
 local function draw_app(ctx, state, font, x0, x1, y)
   local action
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
@@ -149,32 +154,26 @@ local function draw_app(ctx, state, font, x0, x1, y)
     reaper.ImGui_DrawList_AddCircleFilled(reaper.ImGui_GetWindowDrawList(ctx),
       max_x - r - 2, min_y + r + 2, r, T.ACCENT)
   end
-  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx),
+  -- No tip while Settings is open, so it never draws over the window it opened.
+  tips.show(ctx, reaper.ImGui_IsItemHovered(ctx)
+    and (state.showcase or not settings.is_open()),
     tips.with_shortcut(state, "settings", update_due and "Settings. An update is available" or "Settings"))
   widgets.end_segment(ctx, x0, y, x1, y + ctrl, 2)
   return action
 end
 
--- The picker, previous and next, the count, then Library and Settings at the
--- right. The count is centred in its space, which fits the widest count, so
--- it has even room either side.
+-- The name box, then previous and next joined around the count. The name box
+-- takes the width the arrows leave, and opens the card's list: the Library's
+-- sounds or the pinned references.
 local function draw_top_row(ctx, state, res, x, y, w)
   local gap = M.STRIP_GROUP_GAP
-  local ctrl = reaper.ImGui_GetFrameHeight(ctx)
-  local app_x = w - 2 * ctrl
-  local count_w = refpicker.count_width(ctx, state)
-  local count_space = count_w > 0 and count_w + 2 * gap or gap
-  local arrows_w = 2 * ctrl
-  local arrows_x = app_x - count_space - arrows_w
-  local name_end = arrows_x - gap
+  local stepper_w = refpicker.stepper_width(ctx, state)
+  local stepper_x = w - stepper_w
 
   reaper.ImGui_SetCursorScreenPos(ctx, x, y)
-  local action = refpicker.draw_slot(ctx, state, res, math.max(1, name_end), "pin")
-  if count_w > 0 then refpicker.draw_count(ctx, state, x + arrows_x + arrows_w, y, count_space) end
-  local arrow_action = refpicker.draw_arrows(ctx, state, res, x + arrows_x, y, arrows_w)
-
-  local app_action = draw_app(ctx, state, res and res.icon_font, x + app_x, x + w, y)
-  return action or arrow_action or app_action
+  local action = refpicker.draw_slot(ctx, state, res, math.max(1, stepper_x - gap))
+  local step_action = refpicker.draw_stepper(ctx, state, res, x + stepper_x, y, stepper_w)
+  return action or step_action
 end
 
 --------------------------------------------------------------- middle rows
@@ -223,7 +222,8 @@ local function draw_wave(ctx, state, x, y, w, bars)
       paint_only = state.showcase == true,
       view = state.wave_view, detail = state.wave_detail, navigation = true,
       modifiers = state.mouse_modifiers,
-      trim_db = sel and sel.trim_db or 0,
+      -- The level it plays at: the normalize lock's while that holds it.
+      trim_db = sel and own_level.playing_trim(state.own_level, sel) or 0,
       ruler = true, duration = sel and sel.duration or nil,
       -- Thin lanes overlay into one, as the Library's short waveform does.
       min_lane_h = M.BROWSER_PICKER_LANE_MIN_H,
@@ -272,16 +272,16 @@ local function draw_playback(ctx, state, font, x0, x1, y)
     "loop", tips.with_shortcut(state, "loop", "Loop"))
 end
 
--- Latch, mono, pitch, Normalize.
+-- Latch, mono, pitch. Normalize sits with the lock and the trim it sets.
 local function draw_listening(ctx, state, res, x0, x1, y)
   local font = res and res.icon_font
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   widgets.begin_segment(ctx, x0, y, x1, y + ctrl)
 
-  local w = cell(ctx, x0, x1, 4, 0, y)
+  local w = cell(ctx, x0, x1, LISTENING_CELLS, 0, y)
   local action = transport.draw_latch(ctx, state, font, w)
 
-  w = cell(ctx, x0, x1, 4, 1, y)
+  w = cell(ctx, x0, x1, LISTENING_CELLS, 1, y)
   local sound = state.selected
   local channels = state.preview.playing and (tonumber(state.preview.channels) or 0)
     or (sound and (tonumber(sound.channels) or 0) or 0)
@@ -294,42 +294,120 @@ local function draw_listening(ctx, state, res, x0, x1, y)
     action = action or { type = "toggle_mono" }
   end
 
-  w = cell(ctx, x0, x1, 4, 2, y)
+  w = cell(ctx, x0, x1, LISTENING_CELLS, 2, y)
   transport.draw_pitch(ctx, state, font, "main", w)
-
-  -- Normalize opens a dropdown of targets: rarely needed, so it stays hidden.
-  w = cell(ctx, x0, x1, 4, 3, y)
-  matchwin.draw_button(ctx, state, res, w)
-  widgets.end_segment(ctx, x0, y, x1, y + ctrl, 4)
+  widgets.end_segment(ctx, x0, y, x1, y + ctrl, LISTENING_CELLS)
   return action
 end
 
-local function draw_trim(ctx, state, x, y, w)
+local UNLOCK_HINT = "Unlock to change the trim."
+-- The state the two tooltips below describe, set each frame by draw_trim. They
+-- are functions so their text is built only while the pointer is on the box.
+local tip_state
+
+local function lock_tip()
+  local own = tip_state.own_level
+  local name = own_level.target_label(own.target)
+  if own.lock then
+    return "Locked to " .. (name or "the target")
+      .. ". Every reference you select plays at that level.\nClick to unlock."
+  end
+  if not name then
+    return "The lock needs a target. Normalize a reference to one first."
+  end
+  if not own_level.usable_target(own, own.target) then
+    return "Measure your project first. The lock then uses the Reaper Measurement."
+  end
+  return "Lock to " .. name .. ". Every reference you select plays at that level.\n"
+    .. "Saved trims do not change."
+end
+
+local function locked_trim_tip()
+  local own, sel = tip_state.own_level, tip_state.selected
+  local name = own_level.target_label(own.target) or "the target"
+  if not own_level.holds_sound(own, sel) then
+    return "Locked to " .. name .. ". This sound has no measurement for that target yet, "
+      .. "so it plays at its own trim.\n" .. UNLOCK_HINT
+  end
+  local _, limited = own_level.playing_trim(own, sel)
+  local first = limited
+    and ("Locked to " .. name .. ". This sound stops at the trim's limit, short of the target.")
+    or ("Plays at " .. name .. " while the lock is on.")
+  return first .. " Its own trim is " .. decibels.format(sel.trim_db or 0) .. " dB.\n" .. UNLOCK_HINT
+end
+
+-- Reused every frame (frame-allocation rule).
+local trim_lock = {}
+-- The Normalize button at the box's left edge. It opens the menu of targets;
+-- the lock beside it uses the target chosen there, and the number shows the
+-- result, so the three read in the order they are used.
+local lead_state, lead_res
+local trim_lead = { draw = function(ctx, w)
+  matchwin.draw_button(ctx, lead_state, lead_res, w, true)
+  -- Tells the box to outline the button while its menu is open.
+  return not lead_state.showcase and matchwin.is_open()
+end }
+
+-- The level control: Normalize, the normalize lock, then the trim value, in
+-- one box. The lock is always
+-- there: dim when off, accent when on, and faint while there is no target to
+-- lock to. While it is on, the number is the level the lock plays the
+-- reference at and the box is read-only, so a reference can never sit apart
+-- from the lock unnoticed. Its own trim is kept and returns on unlock.
+local function draw_trim(ctx, state, res, x, y, w)
   local action
   local sel = state.selected
   reaper.ImGui_SetCursorScreenPos(ctx, x, y)
   local opts = { min = match.TRIM_SILENCE, max = match.TRIM_MAX, default = 0, taper = true,
-    width = w, label = "Trim", edit_key = sel and sel.id or false }
-  -- The bar keeps its drag and typed entry by id; a demonstration's copy must
+    width = w, edit_key = sel and sel.id or false,
+    -- A demonstration has no press of its own to open the slider with.
+    held = state.showcase == true and state.trim_held == true }
+  -- The box keeps its drag and typed entry by id; a demonstration's copy must
   -- never cancel the live one's.
   local id = state.showcase and "showcase_trim" or "trim"
+  local own = state.own_level
+  local live = own ~= nil and state.showcase ~= true
+  local lock = trim_lock
+  lock.font = res and res.icon_font
+  lock.on = live and own.lock == true
+  lock.enabled = live and (own.lock == true or own_level.usable_target(own, own.target))
+  -- No tips beside an open Normalize menu: they would draw over the menu the
+  -- neighbouring button opened.
+  local menu_open = live and matchwin.is_open()
+  lock.tip = (live and not menu_open) and lock_tip or nil
+  opts.lock = lock
+  lead_state, lead_res = state, res
+  opts.lead = trim_lead
+  tip_state = state
   if sel then
+    local shown = sel.trim_db
     opts.tip = TRIM_TIP
-    -- A pin held at the Reaper Measurement says so on its Trim label, in
-    -- colour only, so the bar keeps its shape.
-    local own = state.own_level
-    if own and own_level.is_held(own, state.pins and state.pins.data and state.pins.data.pins, sel.id) then
-      opts.label_colour = T.ACCENT
-      opts.tip = "Locked to the target. Moving the trim releases this reference.\n" .. TRIM_TIP
+    if lock.on then
+      local limited
+      shown, limited = own_level.playing_trim(own, sel)
+      opts.read_only, opts.tip = true, locked_trim_tip
+      -- Accent says the lock sets this level. The warning colour says the
+      -- trim's limit kept it short of the target.
+      if own_level.holds_sound(own, sel) then
+        opts.colour = limited and T.WARNING_TEXT or T.ACCENT
+      end
     end
-    local db, commit = widgets.db_bar(ctx, id, sel.trim_db, opts)
-    if db ~= nil then action = { type = "set_trim", db = db, commit = commit } end
+    if menu_open then opts.tip = nil end
+    local db, commit, lock_clicked = widgets.db_value(ctx, id, shown, opts)
+    if db ~= nil then
+      action = { type = "set_trim", db = db, commit = commit }
+    elseif lock_clicked then
+      action = { type = "set_level_lock", on = not own.lock, target = own.target }
+    end
   else
-    -- Present but disabled, so the card never changes shape.
-    opts.tip = "Select a reference to adjust its trim."
-    reaper.ImGui_BeginDisabled(ctx)
-    widgets.db_bar(ctx, id, 0, opts)
-    reaper.ImGui_EndDisabled(ctx)
+    -- Present, so the card never changes shape. The number is faint and takes
+    -- no input; the lock stays live, because it needs no selected reference.
+    opts.tip = not menu_open and "Select a reference to adjust its trim." or nil
+    opts.read_only, opts.colour = true, T.TEXT_QUATERNARY
+    local _, _, lock_clicked = widgets.db_value(ctx, id, 0, opts)
+    if lock_clicked then
+      action = { type = "set_level_lock", on = not own.lock, target = own.target }
+    end
   end
   return action
 end
@@ -356,7 +434,6 @@ function controls.draw(ctx, state, res, g)
   -- Whole pixels, so hairlines and text stay sharp at any width.
   local x, w = snap(ox + b.x + pad), snap(b.w - 2 * pad)
   local trim_w = trim_width(ctx)
-  local column_x = w - trim_w
   local cell_w = controls.cell_width(ctx, b.w)
 
   local y = snap(top + p.pad)
@@ -383,19 +460,23 @@ function controls.draw(ctx, state, res, g)
     draw_facts(ctx, state, x, snap((y + bottom_y - M.STRIP_FACTS_H) * 0.5), w)
   end
 
-  local playback_end = snap(x + 4 * cell_w)
+  local playback_end = snap(x + PLAYBACK_CELLS * cell_w)
   local listening_x = playback_end + group_gap
-  local listening_end = snap(x + 8 * cell_w + group_gap)
+  local listening_end = snap(x + (PLAYBACK_CELLS + LISTENING_CELLS) * cell_w + group_gap)
+  local trim_x = listening_end + group_gap
+  local app_x = trim_x + trim_w + group_gap
   local playback_action = draw_playback(ctx, state, res and res.icon_font, x, playback_end, bottom_y)
   local listening_action = draw_listening(ctx, state, res, listening_x, listening_end, bottom_y)
   -- The tour points at playback and the latch together, then at the rest of
-  -- the row through the trim bar, so the two rings never overlap.
-  local latch_end = widgets.segment_edge(listening_x, listening_end, 4, 1)
+  -- the row through the trim value, so the two rings never overlap.
+  local latch_end = widgets.segment_edge(listening_x, listening_end, LISTENING_CELLS, 1)
   walkthrough_ui.note_rect(ctx, state.walkthrough, "latch", x, bottom_y, latch_end, bottom_y + ctrl)
-  walkthrough_ui.note_rect(ctx, state.walkthrough, "transport", latch_end, bottom_y, x + w, bottom_y + ctrl)
-  local trim_action = draw_trim(ctx, state, x + column_x, bottom_y, trim_w)
+  walkthrough_ui.note_rect(ctx, state.walkthrough, "transport", latch_end, bottom_y,
+    trim_x + trim_w, bottom_y + ctrl)
+  local trim_action = draw_trim(ctx, state, res, trim_x, bottom_y, trim_w)
+  local app_action = draw_app(ctx, state, res and res.icon_font, app_x, x + w, bottom_y)
   action = action or readings_action or wave_action or playback_action or listening_action
-    or trim_action
+    or trim_action or app_action
 
   -- Leave the cursor below the card so a short child can scroll to it.
   reaper.ImGui_SetCursorScreenPos(ctx, ox + g.strip.x, bottom_edge)
@@ -405,8 +486,9 @@ end
 
 -- The picker's list and the Normalize panel are separate windows. Submit them
 -- after the strip so they never steal a click meant for a control beneath.
-function controls.draw_popups(ctx, state, res)
-  local action = refpicker.draw_popup(ctx, state, res)
+-- `library` is the Library's list for the name box's dropdown (refpicker.draw_popup).
+function controls.draw_popups(ctx, state, res, library)
+  local action = refpicker.draw_popup(ctx, state, res, library)
   local match_action = matchwin.draw_popup(ctx, state, res)
   return action or match_action
 end

@@ -32,16 +32,15 @@ end
 
 -- `play` is the entry script's normal playback path, including routing, gain,
 -- spans and error reporting. This module never opens another audio player.
-function picker_preview.play(state, id, owner, play)
+local function start(state, sound, owner, play, missing)
   local ps = state.pins
   if owner == nil or owner ~= state.picker_preview_owner
-    or not ps or owner ~= ps.session or ps.load_error then return false end
+    or not ps or owner ~= ps.session then return false end
   if state.drag then return false end
   if state.picker_preview_blocked or state.reference.active then
     return false, "Reference mode is playing. Stop the Reaper timeline to preview here."
   end
-  local sound = pins.find(ps.data, id)
-  if not sound then return false, "That reference is no longer pinned to this project." end
+  if not sound then return false, missing end
 
   -- Preserve the actual sounding reference, even if a quiet left-click has
   -- selected another row since playback started. Selection itself stays intact.
@@ -49,11 +48,27 @@ function picker_preview.play(state, id, owner, play)
   if live.playing and live.slot ~= "picker" then
     holders.pause_playback(state, live.slot, live.sound_id)
   end
-  -- Picker rows are one-shot triggers. A repeated click starts the pin again;
+  -- Picker rows are one-shot triggers. A repeated click starts the row again;
   -- the popup never owns a pause/resume gesture.
   holders.clear_pause(state, "picker")
   if not play(sound, nil, "picker") then return false, state.status end
   return true
+end
+
+-- A pinned reference, by id.
+function picker_preview.play(state, id, owner, play)
+  local ps = state.pins
+  -- A damaged pin collection plays nothing from it. Library sounds below do
+  -- not depend on the pins, so they still play.
+  if ps and ps.load_error then return false end
+  return start(state, ps and ps.data and pins.find(ps.data, id) or nil, owner, play,
+    "That reference is no longer pinned to this project.")
+end
+
+-- A Library sound from the dropdown's Library list. `sound` is its record, or
+-- nil when it is gone.
+function picker_preview.play_sound(state, sound, owner, play)
+  return start(state, sound, owner, play, "That sound is no longer in your Library.")
 end
 
 return picker_preview

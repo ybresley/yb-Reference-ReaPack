@@ -213,7 +213,7 @@ function numeric.draw(ctx,dl,r,model,presentation)
     if plan.show_maxima and (key=='m' or key=='s') then
       local maximum=not unavailable and model[key..'_max'] or nil
       local text='Max '..drawing.loudness_number(maximum,opts)
-      fixed_text(ctx,dl,cx,y+header+value_h,text,secondary,
+      fixed_text(ctx,dl,cx,y+header+value_h,text,theme.fade(bars.maximum_colour(opts,maximum),alpha),
         plan.maximum_size*s,'center',plan.maximum_height)
     end
     if not presentation then

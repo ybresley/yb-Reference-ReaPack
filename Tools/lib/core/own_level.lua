@@ -8,6 +8,7 @@
 -- core/analysis.lua, so core/match.lua's arithmetic applies unchanged: the
 -- trim is the user's reading minus the reference's stored reading.
 
+local analysis = require("core.analysis")
 local match = require("core.match")
 
 local own_level = {}
@@ -48,13 +49,15 @@ function own_level.new(item_sound)
     measurement = nil,
     unit = own_level.DEFAULT_UNIT,
     lock = false,
-    -- The target the user chose last, which is what the lock holds pins at:
+    -- The target the user chose last, which is the level the lock plays every
+    -- reference at:
     -- { kind = "own" } for the Reaper Measurement, or
     -- { kind = "fixed", unit = ..., value = ... } for a preset or custom target.
     target = nil,
-    -- Pins the user trimmed by hand while the lock was on. They keep their own
-    -- trim until the lock is switched on again.
-    released = {},
+    -- The target each sound was last normalized to this session, by sound id.
+    -- Two targets can give the same trim, so the trim alone cannot say which
+    -- one the user picked. A trim set by hand forgets the choice.
+    chosen = {},
     listening = nil, -- nil | "waiting" | "measuring"
     item_sound = own_level.is_item_sound(item_sound) and item_sound or own_level.DEFAULT_ITEM_SOUND,
   }
@@ -95,14 +98,15 @@ function own_level.parse_render_stats(text, method)
   return result
 end
 
--- Readings measured from a file, as { lufs_i, lufs_m_max, lufs_s_max }.
--- Returns nil when none of them is a level.
+-- Readings measured from a file, as { lufs_i, lufs_m_max, lufs_s_max,
+-- channels? }. A mono file is counted as heard from both speakers, like the
+-- references it is compared with. Returns nil when none of them is a level.
 function own_level.from_readings(values, method)
   if type(values) ~= "table" then return nil end
   local result = {
-    lufs_i = reading(values.lufs_i),
-    lufs_m_max = reading(values.lufs_m_max),
-    lufs_s_max = reading(values.lufs_s_max),
+    lufs_i = reading(analysis.heard(values, "lufs_i")),
+    lufs_m_max = reading(analysis.heard(values, "lufs_m_max")),
+    lufs_s_max = reading(analysis.heard(values, "lufs_s_max")),
     method = method,
   }
   if not (result.lufs_i or result.lufs_m_max or result.lufs_s_max) then return nil end
@@ -205,37 +209,51 @@ function own_level.usable_target(state, target)
   return match.is_unit(target.unit) and is_real_number(target.value)
 end
 
--- The trims the lock must still write: every pin that is not released and
--- whose trim differs from its target trim. A pin with no stored reading in
--- the unit is left alone until it has one, so a new pin joins the lock as
--- soon as its measurement arrives.
-function own_level.pending_lock_trims(state, pin_list)
-  local out = {}
-  if not state or not state.lock or type(pin_list) ~= "table" then return out end
-  for _, pin in ipairs(pin_list) do
-    if not state.released[pin.id] then
-      local trim = own_level.target_trim(state, pin)
-      if trim and math.abs((pin.trim_db or 0) - trim) > 0.001 then
-        out[#out + 1] = { pin = pin, trim = trim }
-      end
-    end
-  end
-  return out
+-- Does the lock hold this reference, a pin or a Library sound? Not without
+-- a lock, a target, or a stored reading in the target's unit.
+function own_level.holds_sound(state, sound)
+  if not state or not state.lock or type(sound) ~= "table" then return false end
+  return own_level.target_trim(state, sound) ~= nil
 end
 
--- Is this pin's trim being held by the lock right now? False for a released
--- pin, a pin with no stored reading in the unit, and anything that is not in
--- the pin list (a Library sound is never held).
-function own_level.is_held(state, pin_list, id)
-  if not state or not state.lock or state.released[id] or type(pin_list) ~= "table" then
-    return false
+-- The level a reference plays at, in dB: the lock's trim while the lock holds
+-- it, otherwise its own saved trim. The lock is temporary. It changes what is
+-- heard and shown and never a saved trim, so unlocking returns every reference
+-- to its own trim with nothing to restore. The second return is "range" when
+-- the trim's limit kept a held reference short of the target.
+function own_level.playing_trim(state, sound)
+  if type(sound) ~= "table" then return 0 end
+  if state and state.lock then
+    local trim, limited = own_level.target_trim(state, sound)
+    if trim then return trim, limited end
   end
-  for _, pin in ipairs(pin_list) do
-    if pin.id == id then
-      return own_level.target_trim(state, pin) ~= nil
-    end
-  end
-  return false
+  return sound.trim_db or 0
+end
+
+-- The target in words, for a tooltip: "-16 LUFS-M", or "Reaper Measurement".
+-- nil without a target.
+function own_level.target_label(target)
+  if type(target) ~= "table" then return nil end
+  if target.kind == "own" then return "Reaper Measurement" end
+  if not match.is_unit(target.unit) or not is_real_number(target.value) then return nil end
+  return string.format("%g %s", target.value, match.label(target.unit))
+end
+
+-- Is `target` (which may be nil) this one? `kind` is "own", or "fixed" with a
+-- unit and value. Plain arguments, so the menu can ask every frame without
+-- building a table per row.
+function own_level.is_target(target, kind, unit, value)
+  if type(target) ~= "table" or target.kind ~= kind then return false end
+  return kind == "own" or (target.unit == unit and target.value == value)
+end
+
+-- The target this sound is set to: the lock's target while the lock holds it,
+-- else the one the user last normalized it to this session. nil when neither.
+-- `sound` is the reference's record, a pin or a Library sound.
+function own_level.chosen_target(state, sound)
+  if not state or type(sound) ~= "table" or sound.id == nil then return nil end
+  if own_level.holds_sound(state, sound) then return state.target end
+  return state.chosen and state.chosen[sound.id] or nil
 end
 
 return own_level

@@ -10,6 +10,8 @@
 -- resizing the Library never resizes it. Only stacked above the Library does it
 -- share the Library's width, up to the Library's maximum. The panels always
 -- stay; they compress instead.
+-- The card always starts at the top-left corner. The docked Library opens
+-- below it or to its right, so opening the Library never moves the card.
 local layout = {}
 
 -- Unscaled sizes. The Library widths match its embedded limits.
@@ -115,20 +117,20 @@ function layout.resolve(opts)
       return result
     end
 
-    -- Otherwise the Library, then the card, then the panels, all full height.
+    -- Otherwise the card, then the Library, then the panels, all full height.
     -- The card keeps its own width and the Library narrows first, so the
     -- panels keep theirs.
     local strip_w = m.block_min
     local library = clamp(math.min(m.column, w - 2 * gap - strip_w - m.panels_min), m.lib_min, m.lib_max)
-    local strip_x = library + gap
+    local library_x = strip_w + gap
     local card_h = math.max(h, m.card_min)
     result.placement = 'beside_library'
-    result.width = math.max(w, strip_x + strip_w + gap + m.panels_min)
-    result.library = rect(0, 0, library, card_h)
-    result.strip = rect(strip_x, 0, strip_w, h)
-    result.reference = rect(strip_x, 0, strip_w, card_h)
-    result.resize_x = library
-    result.panels = rect(strip_x + strip_w + gap, 0, result.width - strip_x - strip_w - gap, h)
+    result.width = math.max(w, library_x + library + gap + m.panels_min)
+    result.strip = rect(0, 0, strip_w, h)
+    result.reference = rect(0, 0, strip_w, card_h)
+    result.library = rect(library_x, 0, library, card_h)
+    result.resize_x = library_x + library
+    result.panels = rect(library_x + library + gap, 0, result.width - library_x - library - gap, h)
     return result
   end
 

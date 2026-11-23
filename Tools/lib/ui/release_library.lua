@@ -103,7 +103,9 @@ function library.new()
     state = state, sound = sound, card = card, scene = {},
     anchors = {home = {}, dock = {}, edge = {}, row = {}, wave = {}},
     -- Reused every frame (frame-allocation rule).
-    opts = {embedded = true}, plan = {}, reading_sizes = {rows = {}}, form_sizes = {},
+    -- The example shows the Library as it was introduced, with its own preview.
+    opts = {embedded = true, with_preview = true}, window_opts = {with_preview = true},
+    plan = {}, reading_sizes = {rows = {}}, form_sizes = {},
     forms = {}, docked = {}, stack_opts = {},
   }
 end
@@ -239,7 +241,7 @@ local function draw_window(ctx, res, demo, x, y, width, height)
   reaper.ImGui_PopStyleVar(ctx)
   local ok, failure = true, nil
   if content then
-    ok, failure = xpcall(demo.browser.draw, debug.traceback, ctx, demo.state, res)
+    ok, failure = xpcall(demo.browser.draw, debug.traceback, ctx, demo.state, res, demo.window_opts)
     reaper.ImGui_EndChild(ctx)
   end
   reaper.ImGui_EndChild(ctx)

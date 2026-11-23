@@ -161,7 +161,7 @@ function panels.paint(ctx, geometry, input, x, y, res, walkthrough_active)
     for _, index in ipairs(input.highlight) do
       local r = geometry.panels[index]
       reaper.ImGui_DrawList_AddRect(dl, x+r.x+0.5, y+r.y+0.5,
-        x+r.x+r.w-0.5, y+r.y+r.h-0.5, T.ACTIVE_CONTROL_BORDER, rounding, 0, 1)
+        x+r.x+r.w-0.5, y+r.y+r.h-0.5, T.ACCENT_QUIET_STROKE, rounding, 0, 1)
     end
   end
   for _, face in ipairs(input.faces) do

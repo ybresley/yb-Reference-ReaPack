@@ -133,7 +133,10 @@ local function update_frame(state, frame, context)
   -- continues the same measurement, keeping the picture and any Freeze.
   local restarted = context.playing and state.epoch ~= context.epoch
     and (context.measurement == nil or state.measurement ~= context.measurement)
-  if source_changed or session_changed or restarted then
+  -- A reference that ended hands back to another source. Its captured layers
+  -- keep fading by age instead of vanishing.
+  local handoff = context.handoff == true and not session_changed
+  if ((source_changed or restarted) and not handoff) or session_changed then
     clear(state)
     state.capture_failure_since, state.capture_failed = nil, false
   end

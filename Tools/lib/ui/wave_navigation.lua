@@ -147,7 +147,14 @@ function navigation.handle(ctx, id, v, x, y, w, h, ruler_h, blocked, physical_mo
   local g = geometry(x, y, w, h, ruler_h)
   local mx, my = reaper.ImGui_GetMousePos(ctx)
   if drag.id and drag.id ~= id then drag = {} end
-  local hot = blocked and nil or classify(v, mx, my, g)
+  -- The pointer's place counts only while the waveform itself is under it, or
+  -- a drag that began on it is still held. A popup drawn over the waveform,
+  -- such as the card's dropdown, covers the rails and the ruler: without this
+  -- they still lit up and changed the cursor through it.
+  local hovered = reaper.ImGui_IsItemHovered(ctx)
+  local reachable = hovered or (drag.mode ~= nil and drag.id == id)
+  local hot
+  if reachable and not blocked then hot = classify(v, mx, my, g) end
   local result, claimed
 
   if not blocked and reaper.ImGui_IsItemActivated(ctx) and hot then
@@ -190,7 +197,6 @@ function navigation.handle(ctx, id, v, x, y, w, h, ruler_h, blocked, physical_mo
     end
   end
 
-  local hovered = reaper.ImGui_IsItemHovered(ctx)
   if hovered and not blocked and not drag.mode and reaper.ImGui_IsMouseClicked(ctx, MIDDLE_BUTTON) then
     start_drag("middle_pan", id, mx, my, v)
     claimed = true

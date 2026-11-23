@@ -531,6 +531,22 @@ function waveform.draw(ctx, state, height, opts)
   -- a real file to frame. Drawn here, after the bars and playhead, so the dim
   -- wash sits over the picture it excludes.
   local span_on = opts.span_edit and has_duration and target_id ~= nil
+  -- opts.span_shade: a view that only shows the points dims what lies outside
+  -- them and has no handles.
+  if opts.span_shade and not span_on and has_duration and target_id ~= nil then
+    local total = opts.duration
+    local s0, s1 = opts.span_start or 0, opts.span_end or total
+    if s1 > total then s1 = total end
+    if s0 < 0 or s0 >= s1 then s0 = 0 end
+    local hx0 = x + viewport.x_of_time(view, s0 / total) * avail_w
+    local hx1 = x + viewport.x_of_time(view, s1 / total) * avail_w
+    if hx0 > x then
+      reaper.ImGui_DrawList_AddRectFilled(dl, x, y, math.min(x + avail_w, hx0), y + h, T.SPAN_DIM)
+    end
+    if hx1 < x + avail_w then
+      reaper.ImGui_DrawList_AddRectFilled(dl, math.max(x, hx1), y, x + avail_w, y + h, T.SPAN_DIM)
+    end
+  end
   local near -- which handle the mouse is on, this frame
   local dur = opts.duration
   -- The live handle drag, or none for a painted copy.

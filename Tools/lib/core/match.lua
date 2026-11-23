@@ -84,12 +84,14 @@ end
 -- own limit clamped it — only ever its BOOST end in practice, now that the cut
 -- end runs to silence. Returns (nil, reason) when there is nothing to compute:
 -- "unmeasured" (the sound has no number in that unit — not analysed yet, or
--- silence) or "bad_target" (a unit or value that isn't real).
+-- silence) or "bad_target" (a unit or value that isn't real). Mono loudness
+-- is compared as heard (analysis.heard), so a mono and a stereo sound normalized
+-- to one target sound equally loud.
 function match.trim_for(sound, unit, value)
   if not match.is_unit(unit) or not is_real_number(value) then
     return nil, "bad_target"
   end
-  local measured = sound and sound[unit]
+  local measured = analysis.heard(sound, unit)
   if not is_real_number(measured) then return nil, "unmeasured" end
 
   local trim, limited = value - measured, nil

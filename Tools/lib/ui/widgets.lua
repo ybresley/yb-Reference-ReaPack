@@ -257,6 +257,34 @@ function widgets.button_bloom(ctx, id, on, colour, trigger, strong, glow_gain, b
   end
 end
 
+-- The Play button a list row shows while the pointer is on the row: a square
+-- `size` wide centred on (cx, cy), drawn over the row. The pinned rows and
+-- the dropdown's Library rows share it, so it looks and blooms the same in
+-- both. The caller owns the hit target and passes its state; `bounds` is the
+-- caller's reused table for the bloom.
+function widgets.row_play_face(ctx, font, id, cx, cy, size, playing, hovered, held, trigger, bounds)
+  local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
+  local rounding = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding()))
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  local face = hovered and (held and T.FILL_PRIMARY or T.FILL_SECONDARY) or T.FILL_TERTIARY
+  if playing then
+    face = held and T.ACTIVE_CONTROL_HELD
+      or (hovered and T.ACTIVE_CONTROL_HOVER or T.ACTIVE_CONTROL_FILL)
+  end
+  local x0, y0 = math.floor(cx - size * 0.5 + 0.5), math.floor(cy - size * 0.5 + 0.5)
+  local x1, y1 = math.floor(cx + size * 0.5 + 0.5), math.floor(cy + size * 0.5 + 0.5)
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, theme.fade(face, alpha), rounding)
+  bounds.left, bounds.top, bounds.right, bounds.bottom = x0, y0, x1, y1
+  widgets.play_bloom(ctx, id, playing, bounds, trigger)
+  local colour = playing and T.ACCENT_HOVER or T.TEXT_SECONDARY
+  if not icons.paint_glyph(ctx, font, "play", cx, cy, colour) then
+    local glyph = "\u{25B6}"
+    local gw, gh = reaper.ImGui_CalcTextSize(ctx, glyph)
+    reaper.ImGui_DrawList_AddText(dl, math.floor(cx - gw * 0.5 + 0.5), math.floor(cy - gh * 0.5 + 0.5),
+      theme.fade(colour, alpha), glyph)
+  end
+end
+
 -- All audio Play controls use the same confirmed-start bloom. Hand-drawn
 -- controls supply their painted bounds rather than a neighbouring hit target.
 function widgets.play_bloom(ctx, id, playing, bounds, trigger, revision)
@@ -275,20 +303,38 @@ function widgets.button_outline(ctx, colour)
     x0, y0, x1, y1, theme.fade(colour, alpha), rounding, 0, thickness)
 end
 
--- Persistent button states share a soft accent wash and outline instead of a
--- solid face. Callers keep ownership of what "active" means; this helper only
--- keeps that state looking identical.
-function widgets.push_soft_active(ctx, active)
+-- The joined group being drawn, if any. Fixed slots, so recording an active cell
+-- allocates nothing in the frame loop; a group has at most a handful of cells.
+local segment = { open = false, count = 0, x0 = 0, x1 = 0, rects = {} }
+for i = 1, 12 do segment.rects[i] = { 0, 0, 0, 0 } end
+
+-- Persistent button states share a soft accent wash instead of a solid face.
+-- `opens_panel` adds the full-strength accent outline, which is reserved for a
+-- button whose panel or popup is open right now; an ON mode such as Mono or Loop
+-- keeps only the wash. Callers keep ownership of what "active" means; this helper
+-- only keeps each state looking identical. Returns the count to pop, or false.
+function widgets.push_soft_active(ctx, active, opens_panel)
   if not active then return false end
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), T.ACTIVE_CONTROL_FILL)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), T.ACTIVE_CONTROL_HOVER)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.ACTIVE_CONTROL_HELD)
+  if not opens_panel then return 3 end
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), T.ACTIVE_CONTROL_BORDER)
-  return true
+  return 4
 end
 
+-- Inside a joined group the cells have no border of their own, so the group
+-- remembers its open-panel cells and end_segment outlines them above its
+-- hairlines. Call this straight after the button it styled.
 function widgets.pop_soft_active(ctx, pushed)
-  if pushed then reaper.ImGui_PopStyleColor(ctx, 4) end
+  if not pushed then return end
+  reaper.ImGui_PopStyleColor(ctx, pushed)
+  if pushed == 4 and segment.open and segment.count < #segment.rects then
+    segment.count = segment.count + 1
+    local r = segment.rects[segment.count]
+    r[1], r[2] = reaper.ImGui_GetItemRectMin(ctx)
+    r[3], r[4] = reaper.ImGui_GetItemRectMax(ctx)
+  end
 end
 
 -- A joined group of buttons: one rounded frame, square cells of equal width and
@@ -328,9 +374,20 @@ local function step_icon_face(ctx, key, clicked)
   return { color = theme.blend(T.ACCENT_HOVER, T.TEXT_SECONDARY, progress ^ 2) }
 end
 
-function widgets.step_arrows(ctx, font, id, x, y, w, live, prev_tip, next_tip)
+-- Cell boundaries of the arrows joined around a count; reused every frame.
+local step_edges = { 0, 0 }
+
+-- One arrow's width when a count sits between the pair.
+local function step_arrow_width(ctx)
+  return math.floor(reaper.ImGui_GetFrameHeight(ctx) * 0.75 + 0.5)
+end
+
+-- With `count`, a text such as "2/6", the arrows narrow to the two ends of the
+-- group and the count sits centred between them.
+function widgets.step_arrows(ctx, font, id, x, y, w, live, prev_tip, next_tip, count)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
-  local left_w = math.floor(w / 2 + 0.5)
+  local left_w = count and step_arrow_width(ctx) or math.floor(w / 2 + 0.5)
+  local right_w = count and left_w or w - left_w
   local delta
   widgets.begin_segment(ctx, x, y, x + w, y + ctrl)
   if not live then reaper.ImGui_BeginDisabled(ctx) end
@@ -341,16 +398,32 @@ function widgets.step_arrows(ctx, font, id, x, y, w, live, prev_tip, next_tip)
   end
   icons.paint_over_item(ctx, font, "chevron-left", step_icon_face(ctx, "step_" .. id .. "_prev", delta == -1))
   tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx), prev_tip)
-  reaper.ImGui_SetCursorScreenPos(ctx, x + left_w, y)
+  reaper.ImGui_SetCursorScreenPos(ctx, x + w - right_w, y)
   if reaper.ImGui_Button(ctx, (font and icons.NAMES["chevron-right"] and "" or "\u{203A}") .. "##" .. id .. "_next",
-      w - left_w, ctrl) then
+      right_w, ctrl) then
     delta = 1
   end
   icons.paint_over_item(ctx, font, "chevron-right", step_icon_face(ctx, "step_" .. id .. "_next", delta == 1))
   tips.show(ctx, live and reaper.ImGui_IsItemHovered(ctx), next_tip)
   if not live then reaper.ImGui_EndDisabled(ctx) end
-  widgets.end_segment(ctx, x, y, x + w, y + ctrl, 2)
+  if count then
+    widgets.draw_count(ctx, count, x + left_w, y, w - left_w - right_w)
+    step_edges[1], step_edges[2] = x + left_w, x + w - right_w
+    widgets.end_segment(ctx, x, y, x + w, y + ctrl, 3, step_edges)
+  else
+    widgets.end_segment(ctx, x, y, x + w, y + ctrl, 2)
+  end
   return delta
+end
+
+-- The width of the arrows joined around a count of up to `total` items: two
+-- narrow arrows and room for the widest count, so the group never changes
+-- size as the count grows. With nothing to count, two square arrows.
+function widgets.stepper_width(ctx, total)
+  local count_w = widgets.count_width(ctx, total)
+  if count_w == 0 then return 2 * reaper.ImGui_GetFrameHeight(ctx) end
+  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+  return 2 * step_arrow_width(ctx) + count_w + 2 * pad_x
 end
 
 -- The widest "n/total" count in the small font, so a count beside the arrows
@@ -383,6 +456,25 @@ function widgets.begin_segment(ctx, x0, y0, x1, y1)
   reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
   -- The shared background already shows; an idle cell adds nothing on top.
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0)
+  segment.open, segment.count, segment.x0, segment.x1 = true, 0, x0, x1
+end
+
+-- Outlines the open-panel cells recorded since begin_segment. A cell on the group's
+-- edge follows the group's rounded corners there, and an inner edge reaches one
+-- pixel further so it covers the neighbouring hairline instead of doubling it.
+local function outline_active_cells(dl, rounding, alpha)
+  local colour = theme.fade(T.ACTIVE_CONTROL_BORDER, alpha)
+  for i = 1, segment.count do
+    local r = segment.rects[i]
+    local left = r[1] <= segment.x0 + 0.5
+    local right = r[3] >= segment.x1 - 0.5
+    local corners = (left and reaper.ImGui_DrawFlags_RoundCornersLeft() or 0)
+      | (right and reaper.ImGui_DrawFlags_RoundCornersRight() or 0)
+    if corners == 0 then corners = reaper.ImGui_DrawFlags_RoundCornersNone() end
+    reaper.ImGui_DrawList_AddRect(dl, r[1], r[2], right and r[3] or r[3] + 1, r[4],
+      colour, rounding, corners, 1)
+  end
+  segment.open, segment.count = false, 0
 end
 
 -- `edges`, when given, lists the inner cell boundaries of a group whose cells
@@ -399,11 +491,14 @@ function widgets.end_segment(ctx, x0, y0, x1, y1, cells, edges)
     reaper.ImGui_DrawList_AddLine(dl, dx, y0 + 1, dx, y1 - 1, line)
   end
   reaper.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1, line, rounding)
+  outline_active_cells(dl, rounding, alpha)
 end
 
 -- Share the open-panel frame between square icons and the wide sound picker.
-function widgets.panel_button_frame(ctx, label, width, height, open)
-  local pushed = widgets.push_soft_active(ctx, open)
+-- `open` means its panel is showing now and earns the outline; `highlighted`
+-- keeps only the wash, for a setting that is on while nothing is open.
+function widgets.panel_button_frame(ctx, label, width, height, open, highlighted)
+  local pushed = widgets.push_soft_active(ctx, open or highlighted, open)
   local clicked = reaper.ImGui_Button(ctx, label, width, height)
   widgets.pop_soft_active(ctx, pushed)
   return clicked
@@ -415,7 +510,7 @@ function widgets.icon_label_toggle(ctx, font, id, label, icon, on, width, enable
   if disabled then reaper.ImGui_BeginDisabled(ctx) end
   local tw, th = reaper.ImGui_CalcTextSize(ctx, label)
   local height = M.FRAME_PAD_Y*4 + M.ICON_FS + M.FRAME_PAD_Y + th
-  local clicked = widgets.panel_button_frame(ctx, '##' .. id, width, height, on)
+  local clicked = widgets.panel_button_frame(ctx, '##' .. id, width, height, false, on)
   local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
   local x1 = select(1, reaper.ImGui_GetItemRectMax(ctx))
   local cx = (x0+x1)*0.5
@@ -458,8 +553,7 @@ function widgets.multi_switch(ctx, id, choices, width)
     local base = active and T.FILL_PRIMARY or hovered and T.FILL_TERTIARY or T.FILL_QUATERNARY
     local selected = active and T.ACTIVE_CONTROL_HELD or hovered and T.ACTIVE_CONTROL_HOVER or T.ACTIVE_CONTROL_FILL
     reaper.ImGui_DrawList_AddRectFilled(dl,x0,y0,x1,y1,theme.fade(theme.blend(base,selected,position),alpha),0)
-    reaper.ImGui_DrawList_AddRect(dl,x0,y0,x1,y1,
-      theme.fade(theme.blend(T.STROKE_SECONDARY,T.ACTIVE_CONTROL_BORDER,position),alpha),0,0,1)
+    reaper.ImGui_DrawList_AddRect(dl,x0,y0,x1,y1,theme.fade(T.STROKE_SECONDARY,alpha),0,0,1)
     local tw,th = reaper.ImGui_CalcTextSize(ctx,choice.label)
     reaper.ImGui_DrawList_AddText(dl,x0+(x1-x0-tw)/2,y0+(y1-y0-th)/2,
       theme.fade(theme.blend(T.TEXT_SECONDARY,T.ACCENT,position),alpha),choice.label)
@@ -467,6 +561,17 @@ function widgets.multi_switch(ctx, id, choices, width)
     tips.show(ctx,tip_hovered,choice.tip,id .. choice.key)
   end
   return result
+end
+
+-- A panel button with no frame and no fill until the pointer is on it, for a
+-- heading row's controls.
+function widgets.header_button(ctx, font, id, icon, fallback, highlighted)
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), 0)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0)
+  local clicked = widgets.panel_button(ctx, font, id, icon, false, fallback, highlighted)
+  reaper.ImGui_PopStyleColor(ctx, 1)
+  reaper.ImGui_PopStyleVar(ctx, 1)
+  return clicked
 end
 
 -- An open panel uses the shared active treatment. `highlighted` also allows
@@ -481,7 +586,7 @@ function widgets.panel_button(ctx, font, id, icon, open, fallback, highlighted, 
     accented and T.ACCENT_HOVER or T.TEXT_SECONDARY)
   local label = not use_icon and not icon_motion.supports(icon)
     and type(fallback) == 'string' and fallback or ''
-  local clicked = widgets.panel_button_frame(ctx, label .. '##' .. id, width or size, size, accented)
+  local clicked = widgets.panel_button_frame(ctx, label .. '##' .. id, width or size, size, open, highlighted)
   reaper.ImGui_PopStyleColor(ctx)
   local hovered = reaper.ImGui_IsItemHovered(ctx)
   local colour = accented and T.ACCENT_HOVER
@@ -1099,11 +1204,21 @@ end
 -- without jumping the value.
 local HAS_ALT = reaper.ImGui_GetKeyMods ~= nil and reaper.ImGui_Mod_Alt ~= nil
 local DRAG_EW_CURSOR = reaper.ImGui_MouseCursor_ResizeEW and reaper.ImGui_MouseCursor_ResizeEW()
+local DRAG_NS_CURSOR = reaper.ImGui_MouseCursor_ResizeNS and reaper.ImGui_MouseCursor_ResizeNS()
 local drag_anchor = {}
+
+-- The pointer's place along the drag axis, growing as the value gets louder:
+-- rightwards, or upwards for a vertical control (opts.vertical).
+local function gesture_pos(ctx, vertical)
+  local mx, my = reaper.ImGui_GetMousePos(ctx)
+  if vertical then return -(my or 0) end
+  return mx
+end
 
 local function db_number_gesture(ctx, id, value, opts, to_t, to_db, reset, clicked)
   local active, hovered = reaper.ImGui_IsItemActive(ctx), reaper.ImGui_IsItemHovered(ctx)
-  if (active or hovered) and DRAG_EW_CURSOR then reaper.ImGui_SetMouseCursor(ctx, DRAG_EW_CURSOR) end
+  local cursor = opts.vertical and DRAG_NS_CURSOR or DRAG_EW_CURSOR
+  if (active or hovered) and cursor then reaper.ImGui_SetMouseCursor(ctx, cursor) end
   local key = opts.edit_key == nil and id or opts.edit_key
   local anchor = drag_anchor[id]
   if anchor and anchor.key ~= key then anchor.blocked = true end
@@ -1111,12 +1226,12 @@ local function db_number_gesture(ctx, id, value, opts, to_t, to_db, reset, click
     drag_anchor[id] = active and { blocked = true, key = key } or nil
     return opts.default or 0, true
   elseif reaper.ImGui_IsItemActivated(ctx) then
-    drag_anchor[id] = { t = to_t(value or 0), m = (reaper.ImGui_GetMousePos(ctx)),
+    drag_anchor[id] = { t = to_t(value or 0), m = gesture_pos(ctx, opts.vertical),
       moved = false, key = key }
   elseif active and anchor and not anchor.blocked then
     if reaper.ImGui_IsMouseDragging(ctx, 0) then anchor.moved = true end
     if anchor.moved then
-      local m = (reaper.ImGui_GetMousePos(ctx))
+      local m = gesture_pos(ctx, opts.vertical)
       local fine = HAS_ALT and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Alt()) ~= 0
       local track = opts.track
       anchor.t = math.max(0, math.min(1, anchor.t + (m - anchor.m) / track / (fine and 5 or 1)))
@@ -1356,6 +1471,332 @@ function widgets.db_bar(ctx, id, value, opts)
   return nil
 end
 
+-- Marks beside the hold slider, loudest first. A mark that would touch the
+-- one above it is left out, so the taper's crowded lower end stays readable.
+-- The slider's marks, the ones that most deserve a number first: a mark with
+-- no room for its number is drawn as a tick alone.
+local DB_MARKS = { 24, 12, 0, -12, -24, 18, 6, -6, -18, -36, -48 }
+local mark_ys = {}
+local DB_MARK_TEXT = {}
+for _, db in ipairs(DB_MARKS) do DB_MARK_TEXT[db] = db == 0 and "0" or string.format("%+d", db) end
+local HAS_FOREGROUND = reaper.ImGui_GetForegroundDrawList ~= nil
+
+-- The widest reading a dB value box shows, without its unit.
+local function db_value_text_width(ctx)
+  return math.max((reaper.ImGui_CalcTextSize(ctx, "-60.0")), (reaper.ImGui_CalcTextSize(ctx, "+24.0")))
+end
+
+-- The slider a dB value box opens while it is held: a vertical track with dB
+-- marks at its left, beside the box x0..x1, y0..y1. The track's 0 dB point
+-- sits level with the box's centre, so the handle starts beside the number
+-- for an untouched trim, and the number itself stays in the box.
+-- It is drawn in the tooltip layer, which is not clipped by the tool's window
+-- and takes no input: the box keeps the drag.
+local slider_place = { left = 0, top = 0, right = 0, bottom = 0, work = nil }
+local CAN_PLACE_TOOLTIP = reaper.ImGui_SetNextWindowPos ~= nil
+  and reaper.ImGui_SetNextWindowSize ~= nil and reaper.ImGui_BeginTooltip ~= nil
+
+local function paint_db_slider(ctx, dl, left, top, w, h, track_top, shown, min, taper, to_t)
+  local line_h = select(2, reaper.ImGui_CalcTextSize(ctx, "0"))
+  local pad, gap = M.STRIP_PAD, M.ITEM_SPACING_X
+  local track_h, track_w, knob_w = M.DB_SLIDER_H, M.FADER_TRACK_H, M.FADER_KNOB_H
+  local track_bottom = track_top + track_h
+  local cx = left + w - pad - knob_w * 0.5
+  local function y_of(t)
+    if t < 0 then t = 0 elseif t > 1 then t = 1 end
+    return math.floor(track_bottom - t * track_h + 0.5)
+  end
+  local mark_right = cx - knob_w * 0.5 - gap
+  local function tick(y, half)
+    reaper.ImGui_DrawList_AddLine(dl, cx - half, y + 0.5, cx + half, y + 0.5, T.FADER_TICK)
+  end
+  local function mark(y, text, colour)
+    local tw = reaper.ImGui_CalcTextSize(ctx, text)
+    reaper.ImGui_DrawList_AddText(dl, mark_right - tw, math.floor(y - line_h * 0.5 + 0.5), colour, text)
+    tick(y, knob_w * 0.5)
+  end
+  -- Digits fill about half of a text line, so labels can sit closer than a
+  -- full line apart and still stay clear of each other.
+  local need = line_h * 0.7
+  -- The lowest mark first, so the marks above it give way and it never does.
+  local floor_y = y_of(0)
+  mark(floor_y, taper and "-inf" or decibels.format(min), T.TEXT_TERTIARY)
+  mark_ys[1] = floor_y
+  local placed = 1
+  for _, db in ipairs(DB_MARKS) do
+    if db > min then
+      local y = y_of(to_t(db))
+      local fits = true
+      for i = 1, placed do
+        if math.abs(mark_ys[i] - y) < need then fits = false break end
+      end
+      if fits then
+        mark(y, DB_MARK_TEXT[db], db == 0 and T.TEXT_SECONDARY or T.TEXT_TERTIARY)
+        placed = placed + 1
+        mark_ys[placed] = y
+      else
+        tick(y, track_w * 0.5 + 1)
+      end
+    end
+  end
+
+  local half_track = track_w * 0.5
+  reaper.ImGui_DrawList_AddRectFilled(dl, cx - half_track, track_top, cx + half_track, track_bottom,
+    T.FADER_TRACK, half_track)
+  local vy = y_of(to_t(shown))
+  if track_bottom - vy >= 1 then
+    reaper.ImGui_DrawList_AddRectFilled(dl, cx - half_track, vy, cx + half_track, track_bottom,
+      T.ACCENT_HOVER, half_track)
+  end
+  local half_kw, half_kh = knob_w * 0.5, M.FADER_KNOB_W * 0.5
+  reaper.ImGui_DrawList_AddRectFilled(dl, cx - half_kw, vy - half_kh, cx + half_kw, vy + half_kh,
+    T.FADER_KNOB, half_kh)
+end
+
+local function draw_db_slider(ctx, x0, x1, y0, y1, shown, min, taper, to_t)
+  local line_h = select(2, reaper.ImGui_CalcTextSize(ctx, "0"))
+  local pad, gap = M.STRIP_PAD, M.ITEM_SPACING_X
+  local track_h = M.DB_SLIDER_H
+  local mark_w = math.max((reaper.ImGui_CalcTextSize(ctx, "-inf")), (reaper.ImGui_CalcTextSize(ctx, "+24")))
+  local w = pad + mark_w + gap + M.FADER_KNOB_H + pad
+  -- Half a line above and below the track, so the end marks sit inside.
+  local h = track_h + line_h + 2 * pad
+  local zero = to_t(0)
+  if zero < 0 then zero = 0 elseif zero > 1 then zero = 1 end
+  local track_top = math.floor((y0 + y1) * 0.5 + zero * track_h + 0.5) - track_h
+  local top = track_top - line_h * 0.5 - pad
+  local left = x1 + gap
+
+  -- Near a screen edge the panel moves to stay on screen: to the box's other
+  -- side, or up or down, where 0 dB can no longer sit level with the box.
+  local place = slider_place
+  if tips.work_area and (place.work == nil or place.left ~= x0 or place.top ~= y0
+      or place.right ~= x1 or place.bottom ~= y1) then
+    place.left, place.top, place.right, place.bottom = x0, y0, x1, y1
+    place.work = nil
+    place.work = tips.work_area(ctx, place)
+  end
+  local work = place.work
+  if work then
+    if left + w > work.right and x0 - gap - w >= work.left then left = x0 - gap - w end
+    local shift = 0
+    if top + h > work.bottom then shift = work.bottom - (top + h) end
+    if top + shift < work.top then shift = work.top - top end
+    top, track_top = top + shift, track_top + shift
+  end
+
+  if CAN_PLACE_TOOLTIP then
+    reaper.ImGui_SetNextWindowPos(ctx, left, top)
+    reaper.ImGui_SetNextWindowSize(ctx, w, h)
+    reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_WindowPadding(), 0, 0)
+    local open = reaper.ImGui_BeginTooltip(ctx)
+    reaper.ImGui_PopStyleVar(ctx, 1)
+    if not open then return end
+    paint_db_slider(ctx, reaper.ImGui_GetWindowDrawList(ctx), left, top, w, h, track_top,
+      shown, min, taper, to_t)
+    reaper.ImGui_Dummy(ctx, w, h)
+    reaper.ImGui_EndTooltip(ctx)
+  elseif HAS_FOREGROUND then
+    local dl = reaper.ImGui_GetForegroundDrawList(ctx)
+    local rounding = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding())
+    reaper.ImGui_DrawList_AddRectFilled(dl, left, top, left + w, top + h, T.BG_POPUP, rounding)
+    reaper.ImGui_DrawList_AddRect(dl, left, top, left + w, top + h, T.STROKE_PRIMARY, rounding)
+    paint_db_slider(ctx, dl, left, top, w, h, track_top, shown, min, taper, to_t)
+  end
+end
+
+local DB_UNIT = " dB"
+
+-- The width of a dB value box: its widest reading, the unit and the frame
+-- padding, plus `squares` control-height squares for the buttons it carries
+-- at its left (a leading button, a lock).
+function widgets.db_value_width(ctx, squares)
+  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+  local unit_w = reaper.ImGui_CalcTextSize(ctx, DB_UNIT)
+  local buttons_w = (squares or 0) * reaper.ImGui_GetFrameHeight(ctx)
+  return math.ceil(db_value_text_width(ctx) + unit_w + 2 * pad_x + buttons_w)
+end
+
+-- A tooltip given as a function is only built while the pointer is on its
+-- control, so a text that changes with the value costs nothing at rest.
+local function tip_text(tip)
+  if type(tip) == "function" then return tip() end
+  return tip
+end
+
+-- A dB value as a small framed number with a dim " dB" after it, for a row
+-- with no room for a bar. Dragging it opens a vertical slider beside the box
+-- (draw_db_slider) at the first movement, and moves the value from where it
+-- was, a pixel of drag for a pixel of handle travel, with Alt for fine
+-- adjustment. A press that has not moved shows nothing, so a click, which
+-- opens exact entry in the box, never flashes the slider. The box keeps
+-- showing the number, in the accent colour while the slider is open.
+-- Right-click resets, as on the dB bar.
+-- opts = { min, max, default, width, taper, edit_key, tip, colour, held,
+--          read_only, lock, lead }.
+-- `colour` tints the reading; `held` shows the slider without a press, for a
+-- demonstration. `read_only` shows the value and takes no drag, typed entry
+-- or reset. `lock` = { on, enabled, tip, font } adds a lock button in a
+-- square at the box's left, split from the number by a hairline: dim when
+-- off, accent on the soft active fill when on, and fainter still, taking no
+-- click, when not enabled. `tip` and `lock.tip` may be functions.
+-- `lead` = { draw = function(ctx, w, h) } puts the caller's own button in a
+-- square before the lock, at the box's left edge. The caller submits one
+-- frameless item of that size and paints its face; the box draws the hairline
+-- after it.
+-- Returns (value, commit, lock_clicked) when something happened this frame.
+function widgets.db_value(ctx, id, value, opts)
+  opts = opts or {}
+  local min, max = opts.min or -24, opts.max or 24
+  local taper = opts.taper == true
+  local to_db = function(t) return taper and taper_db(t, max, min) or (min + t * (max - min)) end
+  local to_t = function(db) return taper and taper_t(db, max, min) or ((db - min) / (max - min)) end
+  local h = reaper.ImGui_GetFrameHeight(ctx)
+  local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+  local w = opts.width or widgets.db_value_width(ctx)
+  local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
+  local x1, y1 = x0 + w, y0 + h
+  local edit_key = opts.edit_key == nil and id or opts.edit_key
+  local read_only = opts.read_only == true
+  local edit = db_edit[id]
+  if edit and (edit.key ~= edit_key or read_only
+      or (reaper.ImGui_IsWindowAppearing and reaper.ImGui_IsWindowAppearing(ctx))) then
+    db_edit[id], edit = nil, nil
+  end
+
+  -- The lock button comes first, so the number's item is the last one and the
+  -- caller's layout reads the box's right edge from it.
+  local lead = opts.lead
+  local lead_w = lead and h or 0
+  local lx0 = x0 + lead_w
+  -- The leading button is submitted after the box is painted, so its face
+  -- sits on the box's fill. Its square is left empty until then.
+  if lead then reaper.ImGui_SetCursorScreenPos(ctx, lx0, y0) end
+  local lock = opts.lock
+  local lock_w = lock and h or 0
+  local lock_clicked, lock_hot = false, false
+  if lock then
+    if lock.enabled == false then
+      reaper.ImGui_Dummy(ctx, lock_w, h)
+    else
+      lock_clicked = reaper.ImGui_InvisibleButton(ctx, "##" .. id .. "_lock", lock_w, h)
+    end
+    lock_hot = reaper.ImGui_IsItemHovered(ctx)
+    if lock_hot and lock.tip then tips.show(ctx, true, tip_text(lock.tip), id .. "_lock") end
+    reaper.ImGui_SameLine(ctx, 0, 0)
+  end
+  local vx0, vw = lx0 + lock_w, w - lead_w - lock_w
+
+  local hovered, active, reset = false, false, false
+  local result, commit, enter
+  if edit or read_only then
+    reaper.ImGui_Dummy(ctx, vw, h)
+    hovered = reaper.ImGui_IsItemHovered(ctx)
+  else
+    local clicked = reaper.ImGui_InvisibleButton(ctx, "##" .. id, vw, h)
+    hovered = reaper.ImGui_IsItemHovered(ctx)
+    active = reaper.ImGui_IsItemActive(ctx)
+    reset = widgets.wants_reset(ctx)
+    local gesture = { default = opts.default, edit_key = opts.edit_key, track = M.DB_SLIDER_H,
+      vertical = true }
+    result, commit, enter = db_number_gesture(ctx, id .. "_bar", value, gesture,
+      to_t, to_db, reset, clicked)
+  end
+  -- The slider uses the tooltip layer while it is open, so the box's tip waits.
+  local anchor = drag_anchor[id .. "_bar"]
+  local dragging = anchor ~= nil and anchor.moved == true and not anchor.blocked
+  local held = (active and not reset and dragging) or opts.held == true
+  if not edit and not held and opts.tip and hovered then
+    tips.show(ctx, true, tip_text(opts.tip), id)
+  end
+  if enter then
+    edit = { key = edit_key, text = decibels.format(value or 0), focus = true, active = false }
+    db_edit[id] = edit
+  end
+  local shown = result or value or 0
+
+  local alpha = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha()))
+  local rounding = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding())
+  local dl = reaper.ImGui_GetWindowDrawList(ctx)
+  -- A read-only value does not light up under the pointer.
+  local hot = (hovered and not read_only) or active
+  reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1,
+    fade(held and T.ACTIVE_CONTROL_FILL or (hot and T.FILL_TERTIARY or T.FILL_QUATERNARY), alpha), rounding)
+  if lock then
+    local live = lock.enabled ~= false
+    local fill = lock.on and T.ACTIVE_CONTROL_FILL or ((lock_hot and live) and T.FILL_TERTIARY or nil)
+    if fill then
+      -- Square behind a leading button; otherwise it takes the box's left corners.
+      local corners = lead and reaper.ImGui_DrawFlags_RoundCornersNone or reaper.ImGui_DrawFlags_RoundCornersLeft
+      reaper.ImGui_DrawList_AddRectFilled(dl, lx0, y0, vx0, y1, fade(fill, alpha), rounding,
+        corners and corners() or 0)
+    end
+    local colour = lock.on and ((lock_hot and live) and T.ACCENT_HOVER or T.ACCENT)
+      or (not live and T.TEXT_QUATERNARY)
+      or (lock_hot and T.TEXT_PRIMARY or T.TEXT_TERTIARY)
+    local cx, cy = math.floor(lx0 + lock_w * 0.5 + 0.5), y0 + h * 0.5
+    if not icons.paint_glyph(ctx, lock.font, "lock", cx, cy, fade(colour, alpha), M.ICON_SM_FS) then
+      local lw, lh = reaper.ImGui_CalcTextSize(ctx, "L")
+      reaper.ImGui_DrawList_AddText(dl, cx - lw * 0.5, cy - lh * 0.5, fade(colour, alpha), "L")
+    end
+    reaper.ImGui_DrawList_AddLine(dl, vx0 + 0.5, y0 + 1, vx0 + 0.5, y1 - 1, fade(T.STROKE_SECONDARY, alpha), 1)
+  end
+  local lead_open = false
+  if lead then
+    reaper.ImGui_SetCursorScreenPos(ctx, x0, y0)
+    -- true from the caller means the button's panel is open right now.
+    lead_open = lead.draw(ctx, lead_w, h) == true
+    reaper.ImGui_DrawList_AddLine(dl, lx0 + 0.5, y0 + 1, lx0 + 0.5, y1 - 1, fade(T.STROKE_SECONDARY, alpha), 1)
+    -- Leave the cursor where the box ends, as an ordinary item would.
+    reaper.ImGui_SetCursorScreenPos(ctx, x0, y1)
+    reaper.ImGui_Dummy(ctx, 0, 0)
+  end
+  reaper.ImGui_DrawList_AddRect(dl, x0, y0, x1, y1,
+    fade(held and T.ACTIVE_CONTROL_BORDER or (hot and T.STROKE_PRIMARY or T.STROKE_SECONDARY), alpha),
+    rounding)
+  if lead_open then
+    -- The outline every button with an open panel carries, over the box's border.
+    local left = reaper.ImGui_DrawFlags_RoundCornersLeft and reaper.ImGui_DrawFlags_RoundCornersLeft() or 0
+    reaper.ImGui_DrawList_AddRect(dl, x0, y0, lx0 + 1, y1, fade(T.ACTIVE_CONTROL_BORDER, alpha), rounding, left, 1)
+  end
+
+  if edit then
+    local entry_pad = math.min(pad_x, M.FRAME_PAD_Y)
+    reaper.ImGui_SetCursorScreenPos(ctx, vx0, y0)
+    if edit.focus then focus.keep_zone(vx0, y0, x1, y1) end
+    local frame_pad_y = select(2, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
+    local typed, typed_commit, ended = db_entry_field(ctx, id, edit, value, min, max, opts.default,
+      vw, entry_pad, frame_pad_y)
+    if typed ~= nil then result, commit = typed, typed_commit end
+    if ended then db_edit[id] = nil end
+    -- Leave the cursor where the box ends, as an ordinary item would.
+    reaper.ImGui_SetCursorScreenPos(ctx, x0, y1)
+    reaper.ImGui_Dummy(ctx, 0, 0)
+  else
+    local text = decibels.format(shown, taper and min or nil)
+    local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
+    local uw = reaper.ImGui_CalcTextSize(ctx, DB_UNIT)
+    local tx = math.floor((vx0 + x1 - tw - uw) * 0.5 + 0.5)
+    local ty = math.floor(y0 + (h - th) * 0.5 + 0.5)
+    reaper.ImGui_DrawList_AddText(dl, tx, ty,
+      fade(opts.colour or (held and T.ACCENT_HOVER)
+        or (hot and T.TEXT_PRIMARY or T.TEXT_SECONDARY), alpha), text)
+    reaper.ImGui_DrawList_AddText(dl, tx + tw, ty, fade(T.TEXT_TERTIARY, alpha), DB_UNIT)
+  end
+
+  if held and not edit then draw_db_slider(ctx, x0, x1, y0, y1, shown, min, taper, to_t) end
+
+  local reset_progress = widgets.motion_event(ctx, id .. "_reset_bar", true, 0.55, reset)
+  if reset_progress then
+    local outset = M.FRAME_PAD_Y * reset_progress
+    reaper.ImGui_DrawList_AddRect(dl, x0 - outset, y0 - outset, x1 + outset, y1 + outset,
+      fade(T.ACCENT_HOVER, (1 - reset_progress) * alpha), rounding + outset, 0, 1.5)
+  end
+
+  if result ~= nil or lock_clicked then return result, commit, lock_clicked end
+  return nil
+end
+
 -- A semitone value that accepts horizontal or vertical dragging. The first
 -- intentional movement locks one axis for the rest of that hold, so a diagonal
 -- gesture never changes Pitch faster by accidentally counting both directions.
@@ -1514,10 +1955,6 @@ function widgets.two_way_switch(ctx, id, value, choices, width, height, accented
     fade(T.STROKE_SECONDARY, alpha), 0, 0, 1)
   reaper.ImGui_DrawList_AddLine(dl, first.x1, first.y0, first.x1, first.y1,
     fade(T.STROKE_SECONDARY, alpha), 1)
-  if accented then
-    reaper.ImGui_DrawList_AddRect(dl, selected_x0, first.y0, selected_x1, first.y1,
-      fade(T.ACTIVE_CONTROL_BORDER, alpha), 0, 0, 1)
-  end
 
   for i = 1, 2 do
     local r = rects[i]

@@ -110,7 +110,8 @@ function wave.step(state, sound_path)
   if state.selected and state.waveform.sound_id ~= state.selected_id
     and holders.wave_asked("main") ~= state.selected_id then
     id, sound, slot = state.selected_id, state.selected, "main"
-  elseif state.browse and state.browse_waveform.sound_id ~= state.browse_id
+  elseif state.browse_preview ~= false and state.browse
+    and state.browse_waveform.sound_id ~= state.browse_id
     and holders.wave_asked("browse") ~= state.browse_id then
     id, sound, slot = state.browse_id, state.browse, "browse"
   end

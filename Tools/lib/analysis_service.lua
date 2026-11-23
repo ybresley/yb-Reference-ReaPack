@@ -63,6 +63,19 @@ end
 
 -- A refused removal restores interrupted work at the front. Pins deliberately
 -- use this retry path too, bypassing the automatic queue's attempted-pin filter.
+-- A sound waiting to be measured goes next: the selected reference shows
+-- its readings, and can be normalized, without waiting behind a whole import.
+function service.prioritise(state, id)
+  local queue = state.analysis_queue
+  for i = 2, #queue do
+    if queue[i] == id then
+      table.remove(queue, i)
+      table.insert(queue, 1, id)
+      return
+    end
+  end
+end
+
 function service.restore(state, id)
   table.insert(state.analysis_queue, 1, id)
 end

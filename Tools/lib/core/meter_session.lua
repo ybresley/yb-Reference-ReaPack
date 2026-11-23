@@ -78,8 +78,64 @@ function session.new()
   return session.reset({ hold = false })
 end
 
+-- Keeps the readings that were showing when playback ended, until playback
+-- starts again. Live numbers follow their falling bars; Integrated stays where
+-- it was; maxima, crest and LRA come from this copy if a reset replaces the
+-- measurement. A handoff also makes the bars fall at the stopped rate, rising
+-- again only for new sound.
+function session.begin_fade(state, handoff)
+  if state.hold then return end
+  if handoff and next(state.display) then
+    state.display_handoff, state.handoff_targets = true, {}
+  end
+  local fade = state.readout_fade
+  -- After a reset the values belong to the next measurement, not the ended one.
+  if fade and fade.reset then return end
+  if not state.values then return end
+  local values = {}
+  for key, value in pairs(state.values) do values[key] = value end
+  local channels = {}
+  for index, channel in ipairs(state.values.channels or {}) do
+    local copy = {}
+    for key, value in pairs(channel) do copy[key] = value end
+    channels[index] = copy
+  end
+  values.channels = channels
+  state.readout_fade = {
+    values = values,
+    m_max = state.m_max, s_max = state.s_max, tp_max = state.tp_max, sp_max = state.sp_max,
+  }
+end
+
+-- The kept Integrated, maxima, crest and LRA go, so the source now playing
+-- shows its own. The falling bars carry on to their new levels.
+function session.release_readings(state)
+  state.readout_fade = nil
+end
+
+function session.end_fade(state)
+  state.readout_fade, state.display_handoff, state.handoff_targets = nil, nil, nil
+  state.handoff_settling = nil
+end
+
+-- With keep_display set, a reset starts a new measurement but leaves the drawn
+-- bars where they were, so they fall into the new source's readings. The LRA
+-- bracket belongs to the old measurement and goes with it; its number stays.
 function session.reset(state)
   state = state or {}
+  local kept = state.keep_display and state.display or nil
+  if kept then
+    if not state.readout_fade then session.begin_fade(state) end
+    kept.lra_low, kept.lra_high = nil, nil
+  end
+  local fade = kept and state.readout_fade or nil
+  if fade then fade.reset = true end
+  state.readout_fade = fade
+  state.display_handoff = kept ~= nil or nil
+  state.handoff_targets = kept and (state.handoff_targets or {}) or nil
+  -- Lasts after the bars finish falling, until the new windows have filled.
+  state.handoff_settling = kept ~= nil or nil
+  state.was_live = nil
   local hold = state.hold == true
   state.hold = hold
   state.warnings = warnings.new()
@@ -87,25 +143,37 @@ function session.reset(state)
   state.status = nil
   state.values = nil
   state.field_channels = {}
-  state.display = {}
+  state.display = kept or {}
   state.elapsed = 0
-  state.view_elapsed = 0
+  -- History stops with playback. A handoff while it is frozen keeps the drawn
+  -- history; it is replaced once playback records the new measurement.
+  local keep_history = kept and state.history_frozen
+  state.history_restart = keep_history or nil
+  if not keep_history then
+    state.view_elapsed = 0
+    state.history = {}
+    state.history_count = 0
+    state.history_head = 1
+    state.last_history_t = 0
+  end
   state.m_max = nil
   state.s_max = nil
   state.tp_max = nil
   state.sp_max = nil
-  state.peak_hold = { l = nil, r = nil }
-  state.peak_hold_remaining = { l = 0, r = 0 }
-  state.loudness_peak = {}
-  state.loudness_peak_remaining = { m = 0, s = 0 }
-  state.loudness_peak_previous = {}
+  -- Kept peak marks finish their hold and fall exactly as after a normal stop.
+  if not kept then
+    state.peak_hold = { l = nil, r = nil }
+    state.peak_hold_remaining = { l = 0, r = 0 }
+    state.loudness_peak = {}
+    state.loudness_peak_remaining = { m = 0, s = 0 }
+    state.loudness_peak_previous = {}
+  end
   state.loudness_peak_publication = nil
-  state.history = {}
-  state.history_count = 0
-  state.history_head = 1
-  state.last_history_t = 0
   state.sequence = nil
-  state.peak_measurement, state.peak_snapshot = nil, nil
+  -- A kept display is still labelled with this peak type. Forgetting it would
+  -- make the next update treat it as a relabelled hold and wipe the L/R bars.
+  state.peak_measurement = kept and state.peak_measurement or nil
+  state.peak_snapshot = nil
   state.peak_active = false
   state.peak_warm = false
   return state
@@ -141,9 +209,17 @@ local function update_peak_hold(state, channel, peak, dt, fresh_publication, pea
   state.peak_hold[channel] = held > PEAK_HOLD_FLOOR and held or nil
 end
 
+-- Seconds of audio each loudness window needs before its reading is real.
+local LOUDNESS_WINDOW_SECONDS = { m = 0.4, s = 3 }
+
 -- Loudness markers stay at their captured level and expire in place. After
 -- expiry a falling bar cannot immediately recreate a lower marker.
 local function update_loudness_peak(state, key, value, dt, fresh)
+  -- After a handoff the next source's window reads low and climbs while it
+  -- fills. That climb is not a new peak, so it must not recreate a marker the
+  -- ended source left behind.
+  local settling = state.handoff_settling
+    and state.elapsed + 1e-9 < LOUDNESS_WINDOW_SECONDS[key]
   local hold_seconds = (state.prefs or {}).ms_hold or PEAK_HOLD_SECONDS
   if hold_seconds == -1 then
     if fresh then state.loudness_peak[key] = higher(state.loudness_peak[key],value) end
@@ -161,7 +237,7 @@ local function update_loudness_peak(state, key, value, dt, fresh)
   local previous = state.loudness_peak_previous[key]
   if fresh then state.loudness_peak_previous[key] = value end
   if fresh and value and ((held and value >= held)
-      or (not held and (not previous or value > previous))) then
+      or (not held and not settling and (not previous or value > previous))) then
     state.loudness_peak[key] = value
     state.loudness_peak_remaining[key] = hold_seconds
     return
@@ -194,7 +270,12 @@ function session.history_at(state, index)
 end
 
 local function advance_view(state, dt)
-  if state.hold then return end
+  if state.hold or state.history_frozen then return end
+  if state.history_restart then
+    state.history_restart = nil
+    state.history, state.history_count, state.history_head = {}, 0, 1
+    state.last_history_t, state.view_elapsed = 0, 0
+  end
   -- Audio readings arrive in 10 ms steps. Advance the viewport each draw,
   -- while keeping it close to the measured time and never moving it back.
   local next_view = math.max(state.view_elapsed + dt, state.elapsed)
@@ -255,7 +336,7 @@ function session.update(state, snapshot, dt)
     state.values = nil
     state.field_channels = {}
     state.peak_snapshot, state.peak_active = nil, false
-    if (state.prefs or {}).ms_hold ~= -1 then
+    if (state.prefs or {}).ms_hold ~= -1 and not state.display_handoff then
       state.loudness_peak.m, state.loudness_peak.s = nil, nil
       state.loudness_peak_remaining.m, state.loudness_peak_remaining.s = 0, 0
       state.loudness_peak_previous.m, state.loudness_peak_previous.s = nil, nil
@@ -265,6 +346,8 @@ function session.update(state, snapshot, dt)
 
   if snapshot.playing ~= true then
     state.field_channels={}
+    if state.was_live then session.begin_fade(state) end
+    state.was_live = nil
     if not state.hold and state.values then
       -- Integrated and session statistics remain while live readings fall away.
       for key in pairs(LIVE_FIELDS) do state.values[key] = nil end
@@ -302,6 +385,7 @@ function session.update(state, snapshot, dt)
   state.field_channels.correlations=pair_values(snapshot.correlations,#state.field_channels)
   if state.hold then return state end
   state.peak_snapshot, state.peak_active = snapshot, true
+  state.was_live = true
 
   state.peak_warm = warm_m
   local loudness_available=snapshot.loudness_available~=false and state.loudness_available~=false
@@ -352,7 +436,9 @@ function session.update(state, snapshot, dt)
   update_peak_hold(state, 'l', reading(snapshot[peak_fields.peak..'l']), peak_dt, fresh_publication, snapshot[peak_fields.age..'l'])
   update_peak_hold(state, 'r', reading(snapshot[peak_fields.peak..'r']), peak_dt, fresh_publication, snapshot[peak_fields.age..'r'])
 
-  if not loudness_available then
+  if state.history_frozen then
+    -- Readings after Stop keep the meters live without extending history.
+  elseif not loudness_available then
     state.history,state.history_count,state.history_head={},0,1
     state.loudness_peak,state.loudness_peak_remaining={}, {m=0,s=0}
     state.last_history_t=state.elapsed
@@ -373,20 +459,102 @@ function session.update(state, snapshot, dt)
   return state
 end
 
+-- After playback hands over, each live bar falls at the stopped rate until it
+-- reaches the floor. A reading still decaying from the ended sound, such as
+-- the 3-second Short-Term window, must not hold a bar up, so a bar only
+-- follows a reading that rises to meet it: new sound. Returns the bars this
+-- frame moved.
+-- The fade runs every frame for as long as playback stays stopped, so these
+-- are reused rather than built per frame. `moved` is read only within the
+-- frame that fills it.
+local EMPTY = {}
+local CHANNEL_FIELDS = { 'rms', 'live_peak' }
+local channel_ids = {}
+local function channel_id(index, key)
+  local ids = channel_ids[index]
+  if not ids then ids = {}; channel_ids[index] = ids end
+  local id = ids[key]
+  if not id then id = index .. key; ids[key] = id end
+  return id
+end
+local moved_record = { channels = {} }
+local function fresh_moved()
+  for key in pairs(moved_record) do
+    if key ~= 'channels' then moved_record[key] = nil end
+  end
+  -- Channel entries go entirely, because an empty `channels` means no channel
+  -- moved. They are only built while bars are still falling after a handover.
+  local channels = moved_record.channels
+  for index in pairs(channels) do channels[index] = nil end
+  return moved_record
+end
+
+local function fall(previous, dt, id, current, target)
+  local last = previous[id]
+  if last == 'released' then return nil end
+  previous[id] = target
+  if current == nil then return nil end
+  if target ~= nil and last ~= nil and target > last and target >= current then
+    previous[id] = 'released'
+    return nil
+  end
+  local next_value = current - SILENCE_FALL_DB_PER_SECOND * dt
+  return next_value > PEAK_HOLD_FLOOR and next_value or false
+end
+
+local function fall_after_handoff(state, dt, moved)
+  local display = state.display
+  local values = state.valid and state.values or EMPTY
+  local previous = state.handoff_targets or {}
+  state.handoff_targets = previous
+  local falling = false
+  for key in pairs(LIVE_FIELDS) do
+    local result = fall(previous, dt, key, display[key], values[key])
+    if result ~= nil then
+      display[key], moved[key] = result or nil, true
+      falling = falling or result ~= false
+    end
+  end
+  for index, drawn in ipairs(display.channels or EMPTY) do
+    local channel = (values.channels or EMPTY)[index] or EMPTY
+    for _, key in ipairs(CHANNEL_FIELDS) do
+      local result = fall(previous, dt, channel_id(index, key), drawn[key], channel[key])
+      if result ~= nil then
+        drawn[key] = result or nil
+        moved.channels[index] = moved.channels[index] or {}
+        moved.channels[index][key] = true
+        falling = falling or result ~= false
+      end
+    end
+  end
+  if not falling then state.display_handoff, state.handoff_targets = nil, nil end
+  return moved
+end
+
 function session.animate(state, dt, loudness_floor)
   local display = state.display
+  dt = type(dt) == 'number' and dt or 0
+  if dt ~= dt or dt < 0 then dt = 0 end
+  local moved = state.display_handoff and not state.hold and fall_after_handoff(state, dt, fresh_moved()) or nil
+  local fade = state.readout_fade
+  if fade and not state.hold then
+    -- Integrated stays where it was until playback starts again.
+    moved = moved or fresh_moved()
+    display.i, moved.i = fade.values.i, true
+  end
   if not state.valid or not state.values then
-    for _, key in ipairs(MOVING_FIELDS) do display[key] = nil end
-    display.channels={}
+    for _, key in ipairs(MOVING_FIELDS) do
+      if not (moved and moved[key]) then display[key] = nil end
+    end
+    if not (moved and next(moved.channels)) then display.channels={} end
     return display
   end
   if state.hold then return display end
-  dt = type(dt) == 'number' and dt or 0
-  if dt ~= dt or dt < 0 then dt = 0 end
   local rise = 1 - math.exp(-dt / RISE_SECONDS)
   local fall = 1 - math.exp(-dt / FALL_SECONDS)
   loudness_floor = loudness_floor or -48
   for _, key in ipairs(MOVING_FIELDS) do
+    if moved and moved[key] then goto continue end
     local target, current = state.values[key], display[key]
     local starting_loudness = current == nil and target ~= nil
       and (key == 'm' or key == 's' or key == 'i')
@@ -407,13 +575,17 @@ function session.animate(state, dt, loudness_floor)
       if key == 'lra_low' or key == 'lra_high' then amount = 1 - math.exp(-dt / 0.12) end
       display[key] = current + (target - current) * amount
     end
+    ::continue::
   end
   display.channels=display.channels or {}
-  for index,channel in ipairs(state.values.channels or {}) do
+  for index,channel in ipairs(state.values.channels or EMPTY) do
     local drawn=display.channels[index] or {}
-    for _,key in ipairs({'rms','live_peak'}) do
+    local moved_channel=moved and moved.channels[index] or EMPTY
+    for _,key in ipairs(CHANNEL_FIELDS) do
       local target,current=channel[key],drawn[key]
-      if target==nil and current~=nil then
+      if moved_channel[key] then
+        -- Still falling from the ended source.
+      elseif target==nil and current~=nil then
         local falling=current-SILENCE_FALL_DB_PER_SECOND*dt
         drawn[key]=falling>PEAK_HOLD_FLOOR and falling or nil
       elseif target==nil or current==nil or dt>=MAX_FRAME_DT then drawn[key]=target
@@ -424,7 +596,9 @@ function session.animate(state, dt, loudness_floor)
     end
     display.channels[index]=drawn
   end
-  for index=#(state.values.channels or {})+1,#display.channels do display.channels[index]=nil end
+  if not state.display_handoff then
+    for index=#(state.values.channels or {})+1,#display.channels do display.channels[index]=nil end
+  end
   return display
 end
 

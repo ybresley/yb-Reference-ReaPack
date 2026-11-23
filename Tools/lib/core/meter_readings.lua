@@ -1,5 +1,7 @@
 -- Pure calculations for the optional meter readouts.
+local scale = require('core.meter_scale')
 local readings = {}
+local SIDES = { 'l', 'r' }
 
 local function valid_level(value)
   return type(value) == 'number'
@@ -104,6 +106,58 @@ function readings.target_difference(model)
     return nil
   end
   return value - target
+end
+
+-- After playback ends, the live numbers follow their falling bars down and
+-- show a dash once a bar leaves the scale. Integrated, and the maxima, crest
+-- and LRA of a measurement that a reset replaced, keep their last values until
+-- playback starts again. Returns the model itself when nothing is fading, so
+-- normal drawing is unchanged.
+function readings.shown(model)
+  local fade = model.readout_fade
+  if not fade then return model end
+  local prefs = model.prefs or {}
+  local loudness_low = prefs.range and scale.loudness(prefs) or -math.huge
+  local level_low = prefs.lr_floor or -48
+  local display = model.display or {}
+  local snapshot = fade.reset and fade.values or nil
+  local base = snapshot or model.values or {}
+  local function above(value, low)
+    return type(value) == 'number' and value > low and value or nil
+  end
+  local view = fade.view
+  if not view then
+    view = setmetatable({}, { __index = model })
+    fade.view, fade.view_values, fade.view_channels = view, {}, {}
+  end
+  local values = fade.view_values
+  for key in pairs(values) do values[key] = nil end
+  for key, value in pairs(base) do values[key] = value end
+  values.m, values.s = above(display.m, loudness_low), above(display.s, loudness_low)
+  values.i = fade.values.i
+  for _, side in ipairs(SIDES) do
+    local peak = above(display['live_peak_' .. side], level_low)
+    values['rms_' .. side] = above(display['rms_' .. side], level_low)
+    values['peak_' .. side], values['live_peak_' .. side] = peak, peak
+  end
+  local channels = fade.view_channels
+  for index = #channels, 1, -1 do channels[index] = nil end
+  for index, drawn in ipairs(display.channels or {}) do
+    local source = (base.channels or {})[index] or {}
+    local channel = channels[index] or {}
+    for key in pairs(channel) do channel[key] = nil end
+    for key, value in pairs(source) do channel[key] = value end
+    local peak = above(drawn.live_peak, level_low)
+    channel.rms, channel.peak, channel.live_peak = above(drawn.rms, level_low), peak, peak
+    channels[index] = channel
+  end
+  values.channels = channels
+  view.values = values
+  view.m_max = snapshot and fade.m_max or model.m_max
+  view.s_max = snapshot and fade.s_max or model.s_max
+  view.tp_max = snapshot and fade.tp_max or model.tp_max
+  view.sp_max = snapshot and fade.sp_max or model.sp_max
+  return view
 end
 
 return readings

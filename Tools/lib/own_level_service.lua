@@ -1,7 +1,8 @@
--- Measures the user's own project audio and keeps the trims of a locked
--- target in force. core/own_level.lua owns the numbers; this module owns
--- the REAPER side: the dry run of the time selection, the listening pass
--- through the live meter, and storing locked trims in the project.
+-- Measures the user's own project audio and keeps the lock's target. The
+-- lock is temporary: it sets the level a reference plays at and never writes
+-- a trim. core/own_level.lua owns the numbers; this module owns the REAPER
+-- side: the dry run of the time selection and the listening pass through the
+-- live meter.
 --
 -- Nothing here adds a track, an effect or a send. The dry run is REAPER's own
 -- read-only action, and listening reads the meter that is already running.
@@ -11,7 +12,6 @@ local match = require("core.match")
 local status_message = require("core.status_message")
 local reaper_api = require("reaper_api")
 local metering = require("metering")
-local pins_service = require("pins_service")
 local loudness = require("loudness")
 
 local service = {}
@@ -182,50 +182,15 @@ local function tick_listening(state)
   end
 end
 
--- Write the trims the lock still owes, as one stored project change with a
--- way back. Returns whether the selected reference's trim changed.
-local function tick_lock(state)
-  local ol = state.own_level
-  if not ol.lock then return false end
-  local list = state.pins and state.pins.data and state.pins.data.pins
-  local pending = own_level.pending_lock_trims(ol, list)
-  if #pending == 0 then return false end
-  local ok, reason = pins_service.edit(state, function()
-    local before = {}
-    for i, entry in ipairs(pending) do
-      before[i] = entry.pin.trim_db
-      entry.pin.trim_db = entry.trim
-    end
-    return function()
-      for i, entry in ipairs(pending) do entry.pin.trim_db = before[i] end
-    end
-  end)
-  if not ok then
-    -- A refused store would be retried on every update; stop instead and say so.
-    ol.lock = false
-    status_message.problem(state, reason
-      or "The pinned references' trims couldn't be saved in your project. The lock was turned off.")
-    return false
-  end
-  local selected = state.selected
-  if not selected then return false end
-  for _, entry in ipairs(pending) do
-    if entry.pin == selected then return true end
-    if entry.pin.id == selected.id then
-      selected.trim_db = entry.trim
-      return true
-    end
-  end
-  return false
-end
-
--- One update. Returns true when the selected reference's trim changed, so the
--- caller can make the audible level follow.
+-- One update. Returns true when the level the selected reference plays at
+-- changed while it stayed selected (the lock went on or off, its target moved,
+-- or a measurement arrived), so the caller can make the audible level follow.
+-- A newly selected reference starts at its level without this.
 function service.tick(state)
   local ol = state.own_level
   if not ol then return false end
   -- A measurement and its lock belong to the project they were made in. In
-  -- another project they would rewrite that project's pin trims to a level
+  -- another project they would play that project's references at a level
   -- measured somewhere else.
   local ps = state.pins
   -- pins_service gives every loaded pin set a new session number: another
@@ -233,15 +198,25 @@ function service.tick(state)
   -- again. Save As keeps the number, so it keeps the measurement too.
   local project_key = ps and ps.session or nil
   if ol.project_key ~= nil and ol.project_key ~= project_key then
-    ol.measurement, ol.lock, ol.listening, ol.released = nil, false, nil, {}
+    ol.measurement, ol.lock, ol.listening = nil, false, nil
+    -- Pin ids start again in the new pin set, so an old choice could name
+    -- another project's pin.
+    ol.chosen = {}
     if ol.target and ol.target.kind == "own" then ol.target = nil end
   end
   ol.project_key = project_key
   tick_listening(state)
-  return tick_lock(state)
+  local selected = state.selected
+  local id = selected and selected.id or nil
+  local level = selected and own_level.playing_trim(ol, selected) or nil
+  local changed = level ~= nil and ol.playing_id == id and ol.playing_level ~= level
+  ol.playing_id, ol.playing_level = id, level
+  return changed
 end
 
--- Lock every pinned reference to `target`, or unlock. A target that cannot
+-- Lock every reference to `target`, or unlock. While the lock is on, each
+-- reference with a stored reading in the target's unit plays at the target's
+-- level (own_level.playing_trim). A target that cannot
 -- give a trim (nothing measured, no usable number) leaves the lock as it was.
 function service.set_lock(state, on, target)
   local ol = state.own_level
@@ -253,25 +228,50 @@ function service.set_lock(state, on, target)
     ol.target = target
   end
   ol.lock = on == true
-  ol.released = {}
 end
 
--- The user normalized the selected reference to a target. That target is what
--- the lock holds from now on, and the selected pin is part of the lock again.
-function service.choose_target(state, target, pin_id)
+-- The user normalized the selected reference to a target. That target is
+-- the one the lock uses from now on. `sound_id` is the selected reference's
+-- id, a pin or a Library sound, and remembers which target it was set to.
+function service.choose_target(state, target, sound_id)
   local ol = state.own_level
   ol.target = target
-  if pin_id then ol.released[pin_id] = nil end
+  if sound_id then ol.chosen[sound_id] = target end
+end
+
+-- The user set this sound's trim by hand, so no target names it any more.
+function service.forget_choice(state, sound_id)
+  if sound_id then state.own_level.chosen[sound_id] = nil end
+end
+
+-- Pinning or unpinning hands a reference to a new id with the same trim, so
+-- the target it was set to stays lit.
+function service.carry_choice(state, from_id, to_id)
+  local chosen = state.own_level.chosen
+  if from_id and to_id and chosen[from_id] then chosen[to_id] = chosen[from_id] end
+end
+
+-- Another Library folder numbers its sounds from s1 again, so a choice kept
+-- for an old Library id would name a different sound. `matches` picks the ids
+-- to drop.
+function service.forget_choices(state, matches)
+  local chosen = state.own_level.chosen
+  for id in pairs(chosen) do
+    if matches(id) then chosen[id] = nil end
+  end
+end
+
+-- May this trim edit go ahead? While the lock is on, the lock sets the level
+-- and a trim moved by hand would sit apart from it unnoticed, so only
+-- normalizing to a target (`from_target`) still saves a trim. Every control
+-- that edits the trim shows this state itself; this is the last line.
+function service.accepts_trim(state, from_target)
+  local ol = state.own_level
+  return from_target == true or not (ol and ol.lock)
 end
 
 function service.set_unit(state, unit)
   if own_level.is_unit(unit) then state.own_level.unit = unit end
-end
-
--- The user moved a locked pin's trim by hand: it keeps that trim.
-function service.release(state, pin_id)
-  local ol = state.own_level
-  if ol.lock and pin_id then ol.released[pin_id] = true end
 end
 
 return service

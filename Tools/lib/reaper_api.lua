@@ -295,6 +295,8 @@ local EXT_BROWSER_ANCHOR = "browser_category_anchor"
 local EXT_BROWSER_SOUND = "browser_sound"
 local EXT_BROWSER_SORT  = "browser_sort"
 local EXT_BROWSER_SORT_ASC = "browser_sort_asc"
+local EXT_PIN_SORT      = "pinned_sort"
+local EXT_PIN_SORT_ASC  = "pinned_sort_asc"
 
 local function stored_ext(section, key)
   local value = reaper.GetExtState(section, key)
@@ -665,6 +667,19 @@ function reaper_api.set_browser_sort(sort)
   local asc = type(sort) == "table" and sort.asc
   reaper.SetExtState(EXT_SECTION, EXT_BROWSER_SORT, tostring(col or ""), true)
   reaper.SetExtState(EXT_SECTION, EXT_BROWSER_SORT_ASC, asc == false and "0" or "1", true)
+end
+
+-- The pinned list's header sort, as stored. Validated by core.browser_memory.
+function reaper_api.get_pin_sort()
+  local asc_text = reaper.GetExtState(EXT_SECTION, EXT_PIN_SORT_ASC)
+  local asc
+  if asc_text == "1" then asc = true elseif asc_text == "0" then asc = false end
+  return { col = stored_ext(EXT_SECTION, EXT_PIN_SORT), asc = asc }
+end
+
+function reaper_api.set_pin_sort(sort)
+  reaper.SetExtState(EXT_SECTION, EXT_PIN_SORT, tostring(sort.col or ""), true)
+  reaper.SetExtState(EXT_SECTION, EXT_PIN_SORT_ASC, sort.asc == false and "0" or "1", true)
 end
 
 -- What Measure Item hears: "fx" or "raw". Validated by the caller.

@@ -364,9 +364,12 @@ local function geometry(mode, order, width, height, gap, shares, mw, mh)
   return panels, dividers
 end
 
+-- options.shape_width: the width the automatic arrangement judges the area's
+-- shape by, when that differs from the width the panels fill.
 function layout.measure(width, height, prefs, options)
   options = options or {}
   width, height = math.max(0,width or 0), math.max(0,height or 0)
+  local shape_width = options.shape_width or width
   local gap = math.max(0,options.gap or 8*(options.scale or 1))
   local order = {}
   for _, id in ipairs(prefs.order) do
@@ -383,7 +386,7 @@ function layout.measure(width, height, prefs, options)
       if fallback ~= prefs.mode then candidates[#candidates+1] = fallback end
     end
   else
-    local ratio = width/math.max(height,1)
+    local ratio = shape_width/math.max(height,1)
     candidates = ratio >= 3 and {'row','grid','top','bottom','left','right','stack'}
       or ratio >= 1.1 and {'grid','row','top','bottom','left','right','stack'}
       or {'stack','left','right','grid','top','bottom','row'}
@@ -406,7 +409,7 @@ function layout.measure(width, height, prefs, options)
     mode = width >= row_width and 'row' or 'grid'
   end
   if count > 1 and prefs.mode == 'auto' then
-    local ratio = width/math.max(height,1)
+    local ratio = shape_width/math.max(height,1)
     local previous = options.previous_mode
     if previous and previous ~= mode
         and fits(previous,count,width,height,gap,mw,mh) then
@@ -555,17 +558,27 @@ end
 --   width     the card's column, including the gap after it
 --   natural   the card's height when it is not stretched
 --   minimum   the card's smallest height
--- The card covers however many rows from the top bring it closest to its
--- natural height; the panels in those rows narrow to make room, and the rows
--- below run the full width. When the leftmost panel runs the full height, or
--- the card would cover every row, it is a full-height column instead and the
--- panels share what is left. Returns the geometry with `card_h`, the card's
+-- When the panels form rows, the card covers however many rows above the
+-- last bring it closest to its natural height; the panels in those rows
+-- narrow to make room, and the rows below run the full width. When the
+-- leftmost panel runs the full height, or no row above the last can hold the
+-- card, it is a full-height column instead and the panels share what is left. Returns the geometry with `card_h`, the card's
 -- height.
 function layout.measure_with_card(width, height, prefs, options, card)
   options = options or {}
-  local g = layout.measure(width, height, prefs, options)
-  local rows = not g.temporary and #g.panels > 1 and left_rows(g, height)
-  if rows and #rows > 1 then
+  -- Whether the panels form rows is judged by the space beside a full-height
+  -- card, the same space the fallback below fills. Judged by the whole width,
+  -- a wide area could keep one row here and then turn into two rows beside
+  -- the full-height card.
+  local shaped = {}
+  for k, v in pairs(options) do shaped[k] = v end
+  shaped.shape_width = math.max(0, width - card.width)
+  local gap = math.max(0, options.gap or 8*(options.scale or 1))
+  -- Once the panels form rows, the bottom row always runs the full width,
+  -- so the card's switch matches the panels' own change of shape.
+  local function beside_rows(g)
+    local rows = not g.temporary and #g.panels > 1 and left_rows(g, height)
+    if not (rows and #rows > 1) then return nil end
     local best
     for i = 1, #rows - 1 do
       if rows[i] >= card.minimum
@@ -573,18 +586,31 @@ function layout.measure_with_card(width, height, prefs, options, card)
         best = i
       end
     end
-    -- The last row only competes as the full-height column below.
-    if best and math.abs(rows[best] - card.natural) <= math.abs(height - card.natural) then
-      local gap = math.max(0, options.gap or 8*(options.scale or 1))
-      if narrow(g, rows[best], card.width, gap, options) then
-        g.card_h = rows[best]
-        return g
-      end
+    if best and narrow(g, rows[best], card.width, gap, options) then
+      g.card_h = rows[best]
+      return g
     end
   end
-  g = layout.measure(math.max(0, width - card.width), height, prefs, options)
-  shift(g, card.width)
-  g.card_h = height
-  return g
+  local whole = layout.measure(width, height, prefs, shaped)
+  local placed = beside_rows(whole)
+  if placed then return placed end
+  local side = layout.measure(math.max(0, width - card.width), height, prefs, options)
+  -- One row can fit the whole width but not the space beside the card, which
+  -- then turns it into rows. The card belongs in the rows above the last, as
+  -- when the whole width forms the rows itself.
+  if prefs.mode == 'auto' and side.mode ~= whole.mode and left_rows(side, height) then
+    local forced = {}
+    for k, v in pairs(prefs) do forced[k] = v end
+    forced.mode = side.mode
+    local again = layout.measure(width, height, forced, shaped)
+    placed = again.mode == side.mode and beside_rows(again)
+    if placed then
+      placed.intended = prefs.mode
+      return placed
+    end
+  end
+  shift(side, card.width)
+  side.card_h = height
+  return side
 end
 return layout

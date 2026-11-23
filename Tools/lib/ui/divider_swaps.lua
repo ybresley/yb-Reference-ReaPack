@@ -80,7 +80,7 @@ function swaps.paint(ctx, input)
   end
   for _, pane in ipairs(input.highlights) do
     reaper.ImGui_DrawList_AddRect(dl, pane.x0+.5, pane.y0+.5, pane.x1-.5, pane.y1-.5,
-      theme.fade(T.ACTIVE_CONTROL_BORDER, alpha), rounding, 0, theme.scale)
+      theme.fade(T.ACCENT_QUIET_STROKE, alpha), rounding, 0, theme.scale)
   end
   for _, face in ipairs(input.faces) do
     reaper.ImGui_DrawList_AddRectFilled(dl, face.x0, face.y0, face.x1, face.y1,

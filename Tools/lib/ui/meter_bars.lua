@@ -75,18 +75,26 @@ local function meter_tooltip(ctx, r, message, id, presentation)
   return hovered
 end
 
+-- A maximum records the loudest moment, so it keeps the colour the bar had at
+-- that level. Clearing warnings does not reset maxima, so it does not recolour them.
+local function maximum_colour(opts,value)
+  if value==nil then return T.TEXT_TERTIARY end
+  if ramps.has(opts.colours) then
+    return ramps.nearest(opts.colours,value-opts.target,T.ACCENT,opts)
+  end
+  -- Matches the bar, which paints its red section only above the target.
+  if opts.colours=='Thresholds' and value>opts.target then return T.DANGER_RED end
+  return T.ACCENT
+end
+
 local function loudness_colour(model,opts,key,value)
   if value==nil then return T.TEXT_TERTIARY end
   if ramps.has(opts.colours) then
     -- Clearing the current warning still acknowledges that above-target episode.
     if value>=opts.target and not warnings.active(model.warnings,key) then return T.ACCENT end
-    -- Readouts retain full accent brightness at low levels so they stay legible.
-    return ramps.at(opts.colours,math.max(-(opts.yellow_lead or 5),value-opts.target),T.ACCENT,opts)
+    return maximum_colour(opts,value)
   end
   if opts.colours=='Solid Accent' then return T.ACCENT end
-  if opts.colours=='Thresholds' then
-    return warnings.active(model.warnings,key) and T.DANGER_RED or T.ACCENT
-  end
   return warnings.active(model.warnings,key) and T.DANGER_RED or T.ACCENT
 end
 
@@ -163,6 +171,7 @@ end
 
 -- The compact number view colours its tiles the same way.
 bars.loudness_colour=loudness_colour
+bars.maximum_colour=maximum_colour
 
 function bars.readout_size(opts)
   return 20*theme.scale
@@ -198,7 +207,7 @@ function bars.loudness(ctx,dl,r,model,opts,readout_size,presentation)
     drawing.meter_readout(ctx,dl,r,cx,e.label,loudness_number(raw,opts),loudness_colour(model,opts,e.key,raw),readout_size)
     if available and opts.extra_readings and not r.compact and e.maximum then
       local maximum=available and model[e.maximum] or nil
-      text(ctx,dl,cx,r.y,loudness_number(maximum,opts),maximum and T.ACCENT or T.TEXT_TERTIARY,
+      text(ctx,dl,cx,r.y,loudness_number(maximum,opts),maximum_colour(opts,maximum),
         12*s,'number',nil,style.plot_top*s)
       meter_tooltip(ctx,{x=cx-cell/2,y=r.y,w=cell,h=style.plot_top*s},
         (e.key=='m' and 'Momentary' or 'Short-term')..' maximum since reset ('..scale.unit(opts)..').',

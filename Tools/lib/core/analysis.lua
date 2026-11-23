@@ -30,6 +30,33 @@ function analysis.is_field(name)
   return false
 end
 
+-- Mono loudness as heard. REAPER measures a one-channel file as one channel,
+-- which is what BS.1770 specifies. Preview plays it from both speakers, and the
+-- live meter (like Audacity's and SWS's dual mono options) counts both, so the
+-- same sound reads about 3 dB louder there. Stored readings keep REAPER's
+-- figure, so libraries saved by older versions stay valid; everything that
+-- shows or compares loudness reads it through analysis.heard instead.
+analysis.DUAL_MONO_DB = 10 * math.log(2, 10)
+
+local LOUDNESS_FIELDS = { lufs_i = true, lufs_m_max = true, lufs_s_max = true }
+
+-- Is this record a one-channel sound? An unknown channel count (0 or missing)
+-- is not treated as mono.
+function analysis.is_mono(record)
+  return type(record) == "table" and record.channels == 1
+end
+
+-- The reading `field` of `record` as it is heard. Mono loudness gains
+-- DUAL_MONO_DB; peaks and RMS are per-channel values that both speakers share
+-- unchanged.
+function analysis.heard(record, field)
+  local v = record and record[field]
+  if type(v) == "number" and LOUDNESS_FIELDS[field] and analysis.is_mono(record) then
+    return v + analysis.DUAL_MONO_DB
+  end
+  return v
+end
+
 -- Does this sound still need measuring? Anything that isn't a finished measurement
 -- does, including a record from an older library that has no `analysis` field.
 function analysis.needs(sound)

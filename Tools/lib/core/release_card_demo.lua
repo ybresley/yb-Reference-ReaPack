@@ -12,7 +12,7 @@ local demo = {}
 demo.LENGTH = 4
 
 -- Overview: a short tour of the card's own controls. The pointer presses Play,
--- clicks the waveform to seek, drags the trim bar out and back, then presses
+-- clicks the waveform to seek, drags the trim value down and back, then presses
 -- Stop. Each click changes the card's state the way the entry script would
 -- after that click; the card itself draws every result.
 --
@@ -55,7 +55,7 @@ local OVERVIEW = cursor
 local SEEK_TO = .6
 demo.SEEK_FRACTION = SEEK_TO / demo.LENGTH
 
--- The trim bar's 0 dB sits at its middle; the drag stops at TRIM_FAR_T of the
+-- The trim slider's 0 dB sits at its middle; the drag stops at TRIM_FAR_T of the
 -- bar's width. ui/widgets.lua's taper turns that place into the bar's value.
 demo.TRIM_HOME_T, demo.TRIM_FAR_T = .5, .36
 
