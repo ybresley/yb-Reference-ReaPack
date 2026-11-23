@@ -40,7 +40,8 @@ local T = {
   ACTIVE_CONTROL_FILL   = 0x599CE71F, -- persistent active-button wash
   ACTIVE_CONTROL_HOVER  = 0x599CE72B, -- the wash strengthens under the pointer
   ACTIVE_CONTROL_HELD   = 0x599CE738, -- pressed active button
-  ACTIVE_CONTROL_BORDER = 0x599CE759, -- quiet accent outline around the wash
+  ACTIVE_CONTROL_BORDER = 0x599CE7FF, -- full accent outline: a panel is open or a mode is on
+  ACCENT_QUIET_STROKE   = 0x599CE759, -- hover and drop hints that are not button states
   SEARCH_MATCH_BG = 0x599CE747, -- matching text within a result row
   -- Destructive controls keep a fixed colour independent of the chosen accent.
   -- Red is reserved for warnings and destructive actions, not accent choices.
@@ -132,7 +133,8 @@ local function apply_accent(option)
   T.ACTIVE_CONTROL_FILL = (option.color & ~0xFF) | 0x1F
   T.ACTIVE_CONTROL_HOVER = (option.color & ~0xFF) | 0x2B
   T.ACTIVE_CONTROL_HELD = (option.color & ~0xFF) | 0x38
-  T.ACTIVE_CONTROL_BORDER = (option.color & ~0xFF) | 0x59
+  T.ACTIVE_CONTROL_BORDER = option.color
+  T.ACCENT_QUIET_STROKE = (option.color & ~0xFF) | 0x59
   T.SEARCH_MATCH_BG = (option.color & ~0xFF) | 0x47
   T.WAVE_PLAYED = option.color
   T.SPECTRUM_LIVE = option.color
@@ -360,6 +362,7 @@ local BASE = {
   PICK_MAX_W    = 260,
   PICK_LIST_W   = 280, -- minimum outer width; names determine the width on opening
   PICK_LIST_MAX_W = 560, -- maximum outer width, further limited by the monitor
+  PICK_LIBRARY_W = 400, -- the card's dropdown while it holds the Library's list; wider than a narrow card so names fit
   PICK_SCREEN_MARGIN = 8,
   PICK_ANCHOR_GAP = 3,
   -- EVERY row is this tall (2026-08-06, second pass — user-reported). A labeled
@@ -406,6 +409,9 @@ local BASE = {
   -- The strip's resize floor: below ~half the default the bars are a sliver,
   -- not a picture, and the strip must stay a usable click-to-audition target.
   BROWSER_WAVE_MIN_H = 48,
+  -- The separate window's preview strip keeps its waveform at least this wide;
+  -- a narrower window gives the readings' width to the waveform.
+  BROWSER_STRIP_WAVE_MIN_W = 120,
   -- The resize ceiling is window-relative, not a number: however tall the
   -- strip is dragged, the sound table above keeps its header plus this many
   -- rows visible — the strip is for checking a sound, the list is the
@@ -459,6 +465,8 @@ local BASE = {
   FADER_TRACK_H = 4,  -- track bar thickness (spacing scale)
   FADER_KNOB_W  = 4,  -- slim pill knob: width …
   FADER_KNOB_H  = 12, -- … and height (taller than the track so it reads at the ends)
+  -- Track length of the slider a dB value box opens while it is held.
+  DB_SLIDER_H = 150,
   -- TRIM_MIN_TAIL retired 2026-08-06: the bar's collapse order is now a plain
   -- list of arrangements tried richest-first (ui/transport.lua), so "how much
   -- tail must be left over" has nothing to guard.
@@ -793,11 +801,11 @@ local COLORS = {
   { "ResizeGrip",          "FILL_SECONDARY" },
   { "ResizeGripHovered",   "ACTIVE_CONTROL_HOVER" },
   { "ResizeGripActive",    "ACTIVE_CONTROL_HELD" },
-  { "SeparatorHovered",    "ACTIVE_CONTROL_BORDER" },
+  { "SeparatorHovered",    "ACCENT_QUIET_STROKE" },
   { "SeparatorActive",     "ACCENT" },
   { "TextSelectedBg",      "SEARCH_MATCH_BG" },
   { "DragDropTarget",      "ACCENT" },
-  { "DockingPreview",      "ACTIVE_CONTROL_BORDER" },
+  { "DockingPreview",      "ACCENT_QUIET_STROKE" },
 }
 
 -- ImGui style var -> value(s). The padding and spacing values come from the

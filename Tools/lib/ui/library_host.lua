@@ -50,6 +50,7 @@ local function library_heights(ctx, n)
   s.wave, s.ruler = m.BROWSER_PANEL_WAVE_H, m.RULER_H
   s.frame_pad = m.FRAME_PAD_Y
   s.bottom_pad = m.STRIP_PAD
+  s.list_only = true
   return panel_layout.form_heights(s, library_forms)
 end
 
@@ -81,8 +82,7 @@ local function layout_options(ctx, state, width, height)
   o.library_min_height = library_forms.list
   -- Dragging the card down stops before the Library's waveform would
   -- shrink from the height the user gave it.
-  o.library_keep_height = library_forms.list + math.max(0,
-    (state.browser_wave_h or 0) * theme.scale - theme.metrics.BROWSER_PANEL_WAVE_H)
+  o.library_keep_height = library_forms.list
   return o
 end
 
@@ -149,6 +149,7 @@ local function card_handle(ctx, x, y, width, gap, card_h, scale)
   elseif reaper.ImGui_IsItemActivated(ctx) then
     card_drag = { mouse = my, initial = card_h / scale, height = card_h / scale }
   elseif held and card_drag then
+    -- The card sits above the gap, so dragging down makes it taller.
     card_drag.height = card_drag.initial + (my - card_drag.mouse) / scale
   elseif card_drag and not held then
     action = { type = 'set_stacked_card_height', height = card_drag.height }
@@ -157,6 +158,14 @@ local function card_handle(ctx, x, y, width, gap, card_h, scale)
   if hot or held then reaper.ImGui_SetMouseCursor(ctx, reaper.ImGui_MouseCursor_ResizeNS()) end
   return action, hot, held
 end
+
+-- The card's dropdown: the docked Library's list with the list switch, drawn
+-- into the popup. Reused every frame.
+local dropdown_opts = { embedded = true, form = "list", dropdown = true }
+local dropdown = {
+  width = 0,
+  draw = function(ctx, state, res) return (browser.draw(ctx, state, res, dropdown_opts)) end,
+}
 
 function host.draw(ctx, state, res)
   local t, scale = theme.tokens, theme.scale
@@ -208,7 +217,8 @@ function host.draw(ctx, state, res)
     if child(ctx, 'embedded_library', x + l.x, y + l.y, l.w, math.min(l.h, height - l.y),
         theme.metrics.WINDOW_PAD) then
       local library_action
-      library_opts.form = form
+      -- The docked Library is always its list; it has no short picker form.
+      library_opts.form = form == "picker" and "list" or form
       library_action, browse_id, browse_cols = browser.draw(ctx, state, res, library_opts)
       action = merge(action, library_action)
       walkthrough.note_rect(ctx, state.walkthrough, 'library', x + l.x, y + l.y, x + l.x + l.w, y + l.y + l.h)
@@ -292,7 +302,8 @@ function host.draw(ctx, state, res)
   end
   reaper.ImGui_EndChild(ctx)
 
-  action = merge(action, controls.draw_popups(ctx, state, res))
+  dropdown.width = s and math.max(s.w, theme.metrics.PICK_LIBRARY_W) or 0
+  action = merge(action, controls.draw_popups(ctx, state, res, dropdown))
   return action, wave_id, wave_cols, browse_id, browse_cols
 end
 

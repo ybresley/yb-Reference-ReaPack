@@ -54,6 +54,19 @@ function colours.at(name, relative, accent, options)
   return red
 end
 
+-- Text cannot show a gradient, and the straight blend between the accent and
+-- yellow passes through grey. Readings therefore take the nearest solid
+-- landmark: the full accent, yellow at the target, or red past the red span.
+function colours.nearest(name, relative, accent, options)
+  assert(colours.has(name), 'Unknown meter palette')
+  assert(type(accent)=='number', 'Meter accent colour is required')
+  local lead=options and options.yellow_lead or 5
+  local span=options and options.red_span or 3
+  if relative<-lead/2 then return accent end
+  if relative<span/2 then return yellow end
+  return red
+end
+
 -- Split at colour and scale landmarks, bounded at eight draws
 -- per bar regardless of window height. No textures or per-pixel drawing.
 function colours.paint(draw,dl,name,x,w,top,bottom,low,high,value,target,opacity,accent,map,options)

@@ -1,6 +1,7 @@
 -- The selected reference's six stored readings, drawn in the Reference card
 -- and in the Normalize menu. Sharing the names, order and number format keeps
 -- the two from drifting apart. A ui/ module: draws only.
+local analysis = require("core.analysis")
 local theme = require("ui.theme")
 local tips = require("ui.tips")
 local T = theme.tokens
@@ -119,7 +120,8 @@ local function draw_reading(ctx, dl, u, sel, lx, rx, y, h, unit)
   local lh = select(2, reaper.ImGui_CalcTextSize(ctx, u.tag))
   local ty = snap(y + (h - lh) * 0.5)
   reaper.ImGui_DrawList_AddText(dl, lx, ty, T.TEXT_SECONDARY, u.tag)
-  local v = sel and sel[u.key]
+  -- Mono loudness is shown as heard, matching the meter and the trims.
+  local v = analysis.heard(sel, u.key)
   local text = readings.format(v)
   local number = type(v) == "number"
   local unit_w = unit and (M.STRIP_UNIT_GAP + reaper.ImGui_CalcTextSize(ctx, UNIT)) or 0

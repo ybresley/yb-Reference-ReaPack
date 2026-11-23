@@ -4,6 +4,7 @@
 --
 -- Pure Lua. Filing stores one category id on each sound.
 
+local analysis = require("core.analysis")
 local fold = require("core.text_fold")
 
 local search = {}
@@ -107,11 +108,17 @@ search.DEFAULT_LOUD_FIELD = "lufs_i"
 -- to one project — so the pin column can only be sorted with it handed in; absent,
 -- nothing counts as pinned. The pin column prefers DESCENDING (see the browser's
 -- column setup), so the first click puts the pinned sounds on top.
-function search.sort(list, col, asc, loud_field, pinned)
+--
+-- `name_of` (optional) gives the text the Name column shows for a row, when that
+-- is not just its name: a pinned reference with a label reads as its label first.
+function search.sort(list, col, asc, loud_field, pinned, name_of)
   local field = loud_field or search.DEFAULT_LOUD_FIELD
   local compare = COMPARE[col]
   if col == "loud" then
-    compare = function(a, b) return cmp_number(a[field], b[field]) end -- both present (nils handled below)
+    -- As heard, so the order matches the column, which shows mono loudness as heard.
+    compare = function(a, b)
+      return cmp_number(analysis.heard(a, field), analysis.heard(b, field))
+    end -- both present (nils handled below)
   elseif col == "pin" then
     local marks = pinned or {}
     compare = function(a, b)
@@ -123,7 +130,9 @@ function search.sort(list, col, asc, loud_field, pinned)
   local keys
   if col == "name" then
     keys = {}
-    for _, s in ipairs(list) do keys[s] = fold.lower(tostring(s.name or "")) end
+    for _, s in ipairs(list) do
+      keys[s] = fold.lower(tostring(name_of and name_of(s) or s.name or ""))
+    end
   end
   table.sort(list, function(a, b)
     if col == "loud" then

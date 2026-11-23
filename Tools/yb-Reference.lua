@@ -1,5 +1,5 @@
 -- @description yb-Reference
--- @version 0.7.1
+-- @version 0.8.0
 -- @author Yoni Bresley
 -- @about
 --   A floating/dockable window for keeping a curated library of reference sounds
@@ -50,14 +50,51 @@
 --   [main] yb-Reference_Hotkey_ToggleSettings.lua
 --   [nomain] yb-Reference_ToggleSettings.lua
 -- @changelog
---   This update fixes a crash in Reference View and restores the border beside
---   History.
+--   This update turns the Library into a list, so every sound is shown and
+--   played on the Reference card with all of its tools. Mono references now
+--   match stereo ones at the same target, and the meters and layout get
+--   several fixes.
+--    
+--   Highlights
+--     • Library: The Library is now a list, and the Reference card is the one
+--       place a sound is shown and played. Click a Library sound to make it
+--       the reference, with trim, start and end points, Normalize and
+--       Reference Mode, without pinning it first. The card's name box opens a
+--       dropdown that switches between the Library and the project's pinned
+--       references.
+--         The separate Library window keeps a small waveform strip under its
+--         list.
+--    
+--   Changes
+--     • Loudness: The Normalize lock is now temporary: it sets the level each
+--       reference plays at and never saves a trim, so unlocking returns every
+--       reference to its own level. Normalize to a target to save a trim.
+--     • Loudness: When playback ends, the meters and Spectrum fade out instead
+--       of clearing at once. Integrated and the maxima stay until playback
+--       starts again.
+--     • Loudness: The M and S maxima take their bar's colour, so a maximum
+--       over target shows yellow or red.
+--     • Reference Picker: Pinned references use the Library's table, with the
+--       same columns. Click a header to sort them, and the pinned list
+--       remembers its own sort.
+--         Pins can no longer be reordered by hand. The card's arrows follow
+--         the sorted order.
+--     • Library: Durations always show minutes, seconds and tenths, such as
+--       0:00.4.
+--     • Appearance: A button whose panel is open now has a full accent
+--       outline. Buttons that switch a mode on, such as Mono or Loop, keep
+--       only the fill.
 --    
 --   Fixes
---     • Window: The Spectrum, Scope and Loudness panels no longer stop
---       yb-Reference with a script error.
---     • Loudness: History beside the meters has a dark border again, like the
---       other panels.
+--     • Loudness: Mono references now meter and play at their normalize
+--       target, instead of about 3 dB louder than stereo references. The
+--       Normalize panel shows a short note while a mono reference is selected.
+--     • Loudness: The Normalize menu highlights only the target you picked,
+--       not another target that happens to give the same trim.
+--     • Window: When the panels split into two rows, the Reference card moves
+--       into the top row instead of staying full height beside them.
+--     • Appearance: The tips for Pitch, Settings, Spectrum Settings and Edit
+--       Filter Range no longer cover the panels those buttons open.
 --    
 --   ------------------------------------------------
 --    
@@ -612,6 +649,7 @@ local holders    = require("holders")  -- what is holding a sound, and letting g
 local picker_preview = require("picker_preview") -- independent dropdown playback and pause ownership
 local playback_coordinator = require("playback_coordinator")
 local dragout    = require("dragout")  -- dropping a sound onto the arrange view
+local reference_list = require("core.reference_list")
 local pins_core    = require("core.pins")     -- per-project pin records (pure)
 local pins_service = require("pins_service")  -- pin/unpin/adopt + project switch handling
 local own_level = require("core.own_level")   -- the user's own measured level (pure)
@@ -725,6 +763,7 @@ local state = {
   view           = stored_browser.view,           -- which category set the list is showing
   query          = "",                           -- search box text
   sort           = stored_browser.sort,           -- remembered header sort; safe defaults on stale data
+  pin_sort       = browser_memory.normalise_pin_sort(reaper_api.get_pin_sort()), -- the pinned list's own sort
   loud_unit      = stored_unit,                  -- which measurement the Loudness column shows
   -- How many times the columns have been reset — carried over from the last run
   -- (2026-08-11), because it is part of the name ImGui files the table's widths
@@ -753,6 +792,11 @@ local state = {
   stereo_preferences = stored_stereo_preferences,
   stereo_preferences_error = stereo_preferences_error,
   visible_sounds = {},                           -- library sounds for the view (filtered + sorted, cached)
+  -- What the docked Library lists: "library" (its sounds) or "pinned" (this
+  -- project's pinned references). Session state, like auto_audition.
+  library_list   = "library",
+  -- The Library draws no waveform of its own, so none is built for its rows.
+  browse_preview = false,
   -- Playback (Phase 3). auto_audition on by default = clicking a sound plays it.
   auto_audition  = true,
   loop           = false,
@@ -1157,7 +1201,18 @@ local function select_sound(id, quiet)
   -- to a library sound CLEARS the memory: restoring an older pin later would
   -- claim it was the last reference when it wasn't.
   pins_service.remember_selected(state, is_pin_id(id) and id or nil)
+  if not is_pin_id(id) then analysis_service.prioritise(state, id) end
   if not quiet and state.auto_audition and not state.reference.latched then playback.play(state.selected, nil, "main") end
+end
+
+-- The reference a Library row stands for: this project's pin made from that
+-- sound when there is one, so the project's own trim and span apply, and
+-- otherwise the Library sound itself.
+-- The pin is matched by verified origin (pins_service's markers), the same
+-- match that draws the list's pin marker.
+local function reference_id_for(library_id)
+  local pin = state.pins and state.pins.by_origin and state.pins.by_origin[library_id]
+  return pin and pin.id or library_id
 end
 
 -- Browse a LIBRARY sound in the browser popup: entirely separate from
@@ -1196,13 +1251,74 @@ local function browse_sound(id, quiet, selection)
   playback.audition_browse()
 end
 
+-- Asks the Library's lists to scroll `id` into view, once each. `from` names
+-- the list the choice was made in, which already shows the row and stays put.
+local function reveal_in_library(id, from)
+  state.reveal_id, state.reveal_from = id, from
+  state.reveal_seq = state.reveal_seq + 1
+end
+
+-- Moves the Library's row highlight to the sound the selected reference
+-- stands for, silently, and scrolls it into view. A reference with no Library
+-- sound behind it (a teammate's pin, a pin whose sound was deleted) leaves the
+-- highlight where it is.
+local function follow_in_library()
+  local ps = state.pins
+  local id = reference_list.library_id(state.selected_id, ps and ps.origin_of)
+  if not id or is_pin_id(id) or state.browse_id == id or not find_sound(id) then return end
+  browse_sound(id, true)
+  reveal_in_library(id)
+end
+
+-- A Library row chosen as the reference, by a click or by the card's arrows.
+local function choose_library_reference(id, quiet, selection)
+  browse_sound(id, true, selection)
+  if state.browse then select_sound(reference_id_for(id), quiet) end
+end
+
+-- Pinning the selected Library sound, or unpinning the selected pin, changes
+-- who owns the reference and nothing the user hears or sees. `keep_reference`
+-- notes its Pitch, zoom and place in the sound before the change, and
+-- `hand_over_reference` selects the new owner and puts them back.
+local function keep_reference()
+  local p, id = state.preview, state.selected_id
+  local playing = p.playing and p.slot == "main" and p.sound_id == id
+  return {
+    pitch = state.pitch.main, view = state.wave_view, cols = state.wave_cols,
+    position = playing and p.position or nil,
+    parked = holders.paused_on(state, "main", id),
+    live = state.reference.active == true,
+    from = id,
+  }
+end
+
+local function hand_over_reference(id, kept)
+  select_sound(id, true)
+  if not state.selected then return end
+  own_level_service.carry_choice(state, kept.from, id)
+  state.pitch.main = kept.pitch
+  -- The same audio, so the same stretch of it stays on screen.
+  state.wave_view, state.wave_cols = kept.view, kept.cols
+  wave.refresh_detail(state, sound_path)
+  if kept.parked then
+    holders.set_pause(state, "main", id, kept.parked.at, kept.parked.length)
+  end
+  if kept.position then
+    local ref = state.reference
+    local live = kept.live and ref.latched
+    if playback.play(state.selected, kept.position, "main", live and true or nil) and live then
+      -- Reference mode carries on with the new owner instead of starting it again.
+      ref.active, ref.sound_id, ref.failed_id = true, id, nil
+    end
+  end
+end
+
 -- Search text and raw scroll height deliberately start fresh. A remembered
 -- sound is restored silently, then the table centres it the first time the
 -- Library opens, whether that is at startup or later in the session.
 if stored_browser.sound_id then
   browse_sound(stored_browser.sound_id, true)
-  state.reveal_id = stored_browser.sound_id
-  state.reveal_seq = state.reveal_seq + 1
+  reveal_in_library(stored_browser.sound_id)
 end
 
 -- "Show in library" (a pin's right-click menu, 2026-08-01): open the browser on
@@ -1246,8 +1362,7 @@ local function show_in_library(pin_id)
   -- The scroll itself belongs to the table (only it knows where the row landed).
   -- A counter rather than a flag, so revealing the SAME sound twice still
   -- scrolls — the browser acts on each new number exactly once.
-  state.reveal_id = sound_id
-  state.reveal_seq = (state.reveal_seq or 0) + 1
+  reveal_in_library(sound_id)
 end
 
 -- The project in front of the user changed (tab switch, open, Save As): `r` is
@@ -1274,7 +1389,19 @@ local function apply_pins_refresh(r)
   -- playback; another tab's live latch never reads this project's selection.
   if r.selected and not state.selected_id and find_sound(r.selected) then
     select_sound(r.selected, true)
+    follow_in_library()
   end
+  local sel = state.selected_id
+  if sel and not is_pin_id(sel) then
+    -- The Library is shared by every project, so a Library sound chosen in the
+    -- last project stays chosen. When this project has pinned it, the pin is
+    -- the reference, exactly as a click on its row would choose.
+    local pin_id = reference_id_for(sel)
+    if pin_id ~= sel then hand_over_reference(pin_id, keep_reference()) end
+  end
+  -- A pin from the last project is not carried over, even as the Library
+  -- sound behind it: with no reference remembered here the card is empty, so
+  -- it never shows a sound this project has not pinned as if it had.
   return state.pins.load_error or r.warning
 end
 
@@ -1305,9 +1432,16 @@ local function drop_sound()
       status_message.problem(state, "One of those sounds is no longer in the Library, so nothing was added.")
       return
     end
+    -- A Library row that stands for the selected pin carries that pin's start
+    -- and end points with the card's pitch: what the card plays is what lands.
+    local framed = sound
+    if drag.span_id and #ids == 1
+        and drag.pins_session == (state.pins and state.pins.session) then
+      framed = find_sound(drag.span_id) or sound
+    end
     entries[#entries + 1] = {
       path = sound_path(sound), name = sound.name,
-      span_start = sound.span_start, span_end = sound.span_end,
+      span_start = framed.span_start, span_end = framed.span_end,
       pitch = drag.pitch,
     }
   end
@@ -1580,6 +1714,11 @@ end
 -- and its remembered reference restored — without auto-playing anything.
 local pins_warning = apply_pins_refresh(pins_service.refresh(state))
 if pins_warning then add_status(pins_warning) end
+-- With no pin to restore, the Library row remembered from the last session is
+-- the reference, silently, so the highlighted row and the card agree.
+if not state.selected_id and state.browse then
+  select_sound(reference_id_for(state.browse_id), true)
+end
 
 -- Stray files get their own notice, which waits until the messages above have
 -- been read.
@@ -1652,7 +1791,15 @@ local function start_pinning(sounds, progress_view)
       selected = true
       -- Adding or pinning never starts playback. Auto-audition remains a
       -- browser-click preference, not an import side effect.
-      select_sound(pid, true)
+      -- Pinning the reference that is playing only changes who owns it, so it
+      -- carries on from where it was instead of going silent.
+      local pin = find_sound(pid)
+      if pin and pin.origin_id ~= nil and pin.origin_id == state.selected_id then
+        hand_over_reference(pid, keep_reference())
+      else
+        select_sound(pid, true)
+      end
+      follow_in_library()
       walkthrough.event(state.walkthrough, "sound_pinned")
     end
   end)
@@ -1939,6 +2086,7 @@ local function switch_library(new_dir)
   -- sound than "s1" in the old one.
   holders.forget_browse(state, holders.is_library)
   state.browse_ids, state.browse_anchor_id = {}, nil
+  own_level_service.forget_choices(state, holders.is_library)
 
   state.library, state.library_dir, state.library_path = lib, new_dir, new_path
   reaper_api.set_library_dir(new_dir)
@@ -2048,6 +2196,11 @@ local function handle_action(a)
       refresh_view()
       reaper_api.set_browser_sort(state.sort)
     end
+  elseif a.type == "set_pin_sort" then
+    if a.col and (state.pin_sort.col ~= a.col or state.pin_sort.asc ~= a.asc) then
+      state.pin_sort = { col = a.col, asc = a.asc }
+      reaper_api.set_pin_sort(state.pin_sort)
+    end
   elseif a.type == "drag_sound" then
     -- The name is captured HERE, at the start of the drag, not looked up each
     -- frame: it feeds the tag that follows the mouse, and a record that goes
@@ -2067,11 +2220,19 @@ local function handle_action(a)
         local channels = dragged and tonumber(dragged.channels) or 0
         if channels > drag_channels then drag_channels = channels end
       end
+      local stands_for_selected = a.target == "browse" and #ids == 1
+        and reference_id_for(a.id) == state.selected_id
       state.drag = { sound_id = a.id, sound_ids = ids, name = drag_name,
         channels = drag_channels,
         pins_session = state.pins and state.pins.session,
-        pitch = ((a.target == "browse" and a.id == state.browse_id)
-          and state.pitch.browse)
+        -- Dragged out of the card itself: letting go over the card is a change
+        -- of mind, not a request to pin.
+        from_card = a.target ~= "browse",
+        span_id = stands_for_selected and is_pin_id(state.selected_id)
+          and state.selected_id or nil,
+        -- A Library row plays through the Reference card, so the row that
+        -- is the selected reference carries the card's pitch.
+        pitch = (stands_for_selected and state.pitch.main)
           or ((a.target ~= "browse" and a.id == state.selected_id)
             and state.pitch.main)
           or 0 }
@@ -2179,22 +2340,28 @@ local function handle_action(a)
     state.col_gen = state.col_gen + 1
     reaper_api.set_col_gen(state.col_gen)
   elseif a.type == "step_reference" then
-    -- The picker's arrows. Stepping WRAPS (the list is a loop), and it behaves
-    -- exactly as clicking a tab used to: it retargets a latched reference live
-    -- while the transport rolls, silently while it's stopped.
+    -- The picker's arrows. Stepping WRAPS (the list is a loop). It selects as
+    -- a click on a Library row does: the new reference plays when auto-audition
+    -- is on, in either list. While latched, select_sound stands auto-audition
+    -- down and the step retargets the reference live while the transport rolls.
     local ps = state.pins
-    if ps and not ps.load_error then
-      local id = pins_core.step(ps.data, state.selected_id, a.delta)
-      -- Quiet, like the list's own rows: stepping ARMS the next reference, it
-      -- doesn't audition it (user's call, 2026-08-06). Stepping while latched
-      -- still retargets live exactly as clicking a tab used to.
-      if id then select_sound(id, true) end
+    if reference_list.source(state) == "library" then
+      -- The docked Library shows its sounds, so the arrows walk the rows on
+      -- screen, from the row the selected reference stands for.
+      local from = reference_list.library_id(state.selected_id, ps and ps.origin_of) or state.browse_id
+      local id = reference_list.step(state.visible_sounds, from, a.delta)
+      if id then
+        choose_library_reference(id, false)
+        reveal_in_library(id)
+      end
+    elseif ps and not ps.load_error then
+      local id = pins_core.step(pins_core.ordered(ps.data, state.pin_sort.col, state.pin_sort.asc,
+        state.loud_unit), state.selected_id, a.delta)
+      if id then
+        select_sound(id, false)
+        follow_in_library()
+      end
     end
-  elseif a.type == "reorder_pin" then
-    -- The stored order IS the order the arrows step through, so this is real
-    -- project data: the service persists it and rolls back if it can't.
-    local ok, msg = pins_service.reorder_pin(state, a.id, a.to)
-    if msg then status_message.report(state, ok, msg) end
   elseif a.type == "open_refs_folder" then
     -- Settings' Project References row (the bar's folder square until
     -- 2026-08-10). The folder is created if this project has never had
@@ -2288,13 +2455,41 @@ local function handle_action(a)
       -- The Library's status line may be hidden while the picker is in use.
       reaper_api.message(message, "yb-Reference · Preview Unavailable")
     end
+  elseif a.type == "preview_library_sound" then
+    -- The dropdown's Library rows: the same borrowed preview as a pinned row.
+    -- A sound this project has pinned plays as its pin, with the project's
+    -- trim and start and end points, the same as clicking its row chooses.
+    local pin_id = reference_id_for(a.id)
+    local ok, message
+    if pin_id ~= a.id then
+      ok, message = picker_preview.play(state, pin_id, a.session, playback.play)
+    else
+      ok, message = picker_preview.play_sound(state, find_sound(a.id), a.session, playback.play)
+    end
+    if not ok and message then
+      status_message.problem(state, message)
+      reaper_api.message(message, "yb-Reference · Preview Unavailable")
+    end
   elseif a.type == "select_sound" then
-    -- a.quiet = arm it without auditioning. The reference picker sets it on
-    -- every route (rows and arrows): choosing what the transport will A/B
-    -- against is not a request to hear it right now.
+    -- a.quiet = select it without auditioning. Without it the selection
+    -- follows auto-audition, as a pinned row in the card's dropdown does.
     select_sound(a.id, a.quiet)
+    follow_in_library()
+  elseif a.type == "set_library_list" then
+    state.library_list = a.list == "pinned" and "pinned" or "library"
   elseif a.type == "browse_sound" then
-    browse_sound(a.id, a.quiet == true, a.selection)
+    -- The Library list chooses the reference: the row becomes the selected
+    -- sound in the Reference card, with no separate Library audition.
+    -- A mouse press only moves the highlight: it may be the start of a drag
+    -- or of a Ctrl or Shift selection. The finished click chooses, below.
+    if a.press then browse_sound(a.id, true, a.selection)
+    else
+      -- A choice made in the Library returns the card's arrows to its list.
+      state.library_list = "library"
+      choose_library_reference(a.id, a.quiet == true, a.selection)
+      -- A key step in the card's dropdown: the docked Library follows it.
+      if a.list then reveal_in_library(a.id, a.list) end
+    end
   elseif a.type == "select_browse_sounds" then
     -- Selecting a set must not restart auditioning or rebuild the current waveform.
     state.browse_ids = a.ids
@@ -2306,7 +2501,22 @@ local function handle_action(a)
       state.browse_ids = a.selection.ids
       state.browse_anchor_id = a.selection.anchor
     end
-    if state.browse_id == a.id then playback.audition_browse() end
+    -- A finished plain click makes the row the reference and plays it. A
+    -- Ctrl or Shift click builds a selection and leaves the reference alone.
+    -- Latched, Reaper's transport is the trigger and the playback coordinator
+    -- follows the selection.
+    if state.browse_id == a.id and state.browse and a.plain ~= false then
+      -- A choice made in the Library returns the card's arrows to its list.
+      state.library_list = "library"
+      local reference_id = reference_id_for(a.id)
+      if state.selected_id ~= reference_id then select_sound(reference_id, true) end
+      -- A choice in the card's dropdown or the Library's picker: the other
+      -- lists scroll to the chosen row too.
+      if a.list and a.list ~= "main" then reveal_in_library(a.id, a.list) end
+      if state.selected and state.auto_audition and not state.reference.latched then
+        playback.trigger("main")
+      end
+    end
   elseif a.type == "show_in_library" then
     show_in_library(a.id)
   elseif a.type == "trigger_play" then
@@ -2451,12 +2661,13 @@ local function handle_action(a)
     -- project-specific snapshot, stored with the project — deliberately separate
     -- lives (see DESIGN). Audio updates live either way; persist only on release
     -- (a.commit) so dragging the slider doesn't hammer the disk every frame.
-    if state.selected then
+    -- While the normalize lock is on, the Trim box is read-only and the lock
+    -- sets the level. Normalizing to a target is the one edit that still saves.
+    if state.selected and own_level_service.accepts_trim(state, a.from_target) then
       state.selected.trim_db = a.db
-      -- A trim set by hand takes this pin out of the lock. A trim set by
-      -- choosing a target does not: the lock follows that target.
-      if not a.from_target and is_pin_id(state.selected.id) then
-        own_level_service.release(state, state.selected.id)
+      -- A trim set by hand is no longer at the target it was normalized to.
+      if not a.from_target then
+        own_level_service.forget_choice(state, state.selected.id)
       end
       if a.commit then
         if is_pin_id(state.selected.id) then
@@ -2600,7 +2811,18 @@ local function handle_action(a)
       start_pinning(sounds, a.progress_view or "browse")
     end
   elseif a.type == "unpin" then
+    -- Unpinning the selected reference keeps it selected as the Library sound
+    -- it was pinned from, when the Library still holds that sound: pinning is
+    -- optional, so removing a pin is not a reason to stop comparing.
+    local origin = state.selected_id == a.id and state.pins and state.pins.origin_of
+      and state.pins.origin_of[a.id] or nil
+    -- Noted before the pin lets go of its audio.
+    local kept = origin and keep_reference() or nil
     unpin_sound(a.id)
+    if origin and not state.selected_id and find_sound(origin) then
+      hand_over_reference(origin, kept)
+      follow_in_library()
+    end
   elseif a.type == "save_pin_to_library" then
     save_pin_to_library(a.id)
   elseif a.type == "reset_pins" then
@@ -2973,6 +3195,7 @@ local function loop()
   end
   -- After the meter, so a listening pass reads this update's values.
   if own_level_service.tick(state) then playback.trim_changed(state.selected) end
+  playback.follow_picker_level()
   channel_settings:capture(state)
   report_save_problem("stereo", stereo_settings.flush(state))
   browser_geom_save:tick(reaper.time_precise())

@@ -594,7 +594,7 @@ function panel.draw(ctx,state,res,x,y,width,height,geometry,footer_height,blocke
     R.ImGui_BeginDisabled(ctx)
   end
   local passive=(error or split_blocked) and PASSIVE or nil
-  local action=panel.paint(ctx,model,geometry,x,y,passive,channel_layout_notice or error)
+  local action=panel.paint(ctx,readings.shown(model),geometry,x,y,passive,channel_layout_notice or error)
   if split_blocked then
     R.ImGui_EndDisabled(ctx)
     R.ImGui_PopStyleVar(ctx)

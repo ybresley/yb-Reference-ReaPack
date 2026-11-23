@@ -281,7 +281,9 @@ function transport.draw_pitch(ctx, state, font, slot, width)
   if pressed and sound and not state.showcase then
     pitchwin.toggle_at(slot, x0, y0, y1)
   end
-  tips.show(ctx, hovered,
+  -- No tip while the panel is open: the outline already says so, and a tip
+  -- would draw over the panel it opened.
+  tips.show(ctx, hovered and (state.showcase or not pitchwin.is_open(slot)),
     "Adjust Pitch. Higher values shorten playback; lower values lengthen it.", id)
   return nil
 end

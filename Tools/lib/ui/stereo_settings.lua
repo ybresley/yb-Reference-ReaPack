@@ -196,7 +196,7 @@ local function draw_content(ctx, state)
   reaper.ImGui_SetCursorPosY(ctx, reaper.ImGui_GetCursorPosY(ctx) + M.ITEM_SPACING_Y)
   local frozen = state.stereo.frozen == true
   local width = (reaper.ImGui_GetContentRegionAvail(ctx) - M.ITEM_SPACING_X) / 2
-  if widgets.panel_button_frame(ctx, 'Freeze', width, 0, frozen) then
+  if widgets.panel_button_frame(ctx, 'Freeze', width, 0, false, frozen) then
     action = {type='stereo_freeze', value=not frozen}
   end
   tips.show(ctx, reaper.ImGui_IsItemHovered(ctx), 'Holds the picture while audio continues. Click again to resume.')
@@ -355,7 +355,7 @@ function settings.draw(ctx, state, res, x, y, width, height, exclusion, presenta
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), T.FILL_PRIMARY)
     reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), 0)
     local resume, resume_hovered = widgets.panel_button(ctx, res and res.icon_font,
-      'stereo_resume', 'pause', true, '||')
+      'stereo_resume', 'pause', false, '||', true)
     if resume and not presentation then action = {type='stereo_freeze', value=false} end
     if not presentation then
       tips.show(ctx, resume_hovered, 'Resume Scope Display', 'stereo_resume')

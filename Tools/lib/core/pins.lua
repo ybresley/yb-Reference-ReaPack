@@ -15,6 +15,7 @@
 
 local json = require("vendor.json")
 local importer = require("core.importer")
+local search = require("core.search")
 
 local pins = {}
 
@@ -367,57 +368,40 @@ function pins.index_of(data, id)
   return nil
 end
 
--- The next (delta 1) or previous (delta -1) pin in stored order, WRAPPING at
--- both ends — the list is a loop, so with two pins one arrow is an A/B toggle
--- (picker brief page 13). Returns nil only when there are no pins at all.
+-- What a pin's row reads as in the Name column: its label first when it has
+-- one, so sorting by name follows the text on screen.
+local function shown_name(p)
+  if p.label and p.label ~= "" then return p.label:upper() .. " " .. (p.name or "") end
+  return p.name
+end
+
+-- The pins in the order the pinned list shows them: a new array sorted by one
+-- column, as the Library's header sorts its sounds. `col` is "name", "dur",
+-- "ch" or "loud"; anything else keeps the stored order. `loud_field` names the
+-- measurement the Loudness column shows. The stored order itself is untouched.
+function pins.ordered(data, col, asc, loud_field)
+  local list = {}
+  for i, p in ipairs(data.pins) do list[i] = p end
+  if col == "pin" then return list end -- every row is pinned: nothing to sort by
+  return search.sort(list, col, asc ~= false, loud_field, nil, shown_name)
+end
+
+-- The next (delta 1) or previous (delta -1) pin in `list` (the order the
+-- pinned list shows), WRAPPING at both ends: the list is a loop, so with two
+-- pins one arrow is an A/B toggle. Returns nil only when there are no pins.
 --
 -- A `current_id` that isn't one of these pins (a library sound is selected, or
 -- the armed pin was just unpinned) enters the list at the end the direction
 -- comes from, rather than refusing to move.
-function pins.step(data, current_id, delta)
-  local n = #data.pins
+function pins.step(list, current_id, delta)
+  local n = #list
   if n == 0 then return nil end
-  local i = pins.index_of(data, current_id)
-  if not i then return data.pins[delta < 0 and n or 1].id end
-  return data.pins[(i - 1 + delta) % n + 1].id
-end
-
--- Move a pin to another position in the stored order (the picker's edit mode,
--- dragging a row by its handle). `to_index` is clamped into range rather than
--- refused — a drag past the last row means "put it last". Returns the position
--- it CAME FROM so a failed store can put it back exactly, or nil when nothing
--- moved (already there).
-function pins.reorder(data, id, to_index)
-  local from = pins.index_of(data, id)
-  if not from then
-    error("pin \"" .. tostring(id) .. "\" isn't one of this project's pins")
+  local i
+  for k, p in ipairs(list) do
+    if p.id == current_id then i = k; break end
   end
-  if type(to_index) ~= "number" then
-    error("a pin's new position must be a number")
-  end
-  to_index = math.floor(to_index)
-  local n = #data.pins
-  if to_index < 1 then to_index = 1 elseif to_index > n then to_index = n end
-  if to_index == from then return nil end
-  table.insert(data.pins, to_index, table.remove(data.pins, from))
-  return from
-end
-
--- Turn a drag's INSERTION GAP into the final position `pins.reorder` wants.
--- The picker's list reports the gap the mouse is hovering (1 = above the first
--- row, #pins + 1 = below the last); a pin dragged DOWNWARD leaves its own slot
--- before it lands, so everything below shifts up one and the gap the user is
--- pointing at is one lower than it looks. Getting this wrong drops a
--- dragged-down pin one row too far — which is exactly what happened before
--- 2026-08-06's Codex review caught it.
---
--- Returns nil when the move would change nothing (dropping a pin into either
--- gap touching its own row), so the caller can skip a pointless save.
-function pins.drop_target(from, gap)
-  if type(from) ~= "number" or type(gap) ~= "number" then return nil end
-  local to = (gap > from) and (gap - 1) or gap
-  if to == from then return nil end
-  return to
+  if not i then return list[delta < 0 and n or 1].id end
+  return list[(i - 1 + delta) % n + 1].id
 end
 
 -- Set (or clear) a pin's job label — the one optional field that turns a plain

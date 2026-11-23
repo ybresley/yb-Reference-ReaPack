@@ -222,7 +222,21 @@ function spectrum.tick(state)
   -- Open-project and source identities remain observable while audio is closed.
   local project_key = project or ''
   local project_playing = project and (reaper.GetPlayStateEx(project) & 5) ~= 0 or false
+  local project_paused = project and (reaper.GetPlayStateEx(project) & 2) ~= 0 or false
   local source, playing = spectrum.context(model, state, project_key, project_playing)
+  -- Starting REAPER playback from Stop begins a new picture, even when a
+  -- monitored input kept the project source live. Resuming from Pause continues
+  -- the picture, and a playing reference keeps its own. A reference that ends
+  -- by itself, or by Stop, hands back without wiping the display; a new
+  -- selection does not.
+  local preview_playing = state.preview.playing == true
+  local transport_started = project_playing and model.last_project_playing == false
+    and not model.last_project_paused and not preview_playing
+  local preview_ended = model.last_preview_playing == true and not preview_playing
+    and not transport_started and model.last_selected_id == state.selected_id
+  model.last_project_playing, model.last_preview_playing = project_playing, preview_playing
+  model.last_project_paused = project_paused
+  model.last_selected_id = state.selected_id
   if state.stereo then
     local channels = state.analysis_output_profile or state.analysis_channels
     local captured = state.preview_analysis_profile or state.analysis_output_profile
@@ -280,9 +294,15 @@ function spectrum.tick(state)
   if checking or still_stopped then
     return hold_for_route_check(state, model, source, active, now)
   end
-  if model.route_capture_interrupted or not model.context_ready or source ~= model.source_key then
+  if transport_started then
+    core.set_context(model, source, playing, now, true)
+    model.drain_deadline,model.route_capture_interrupted = nil,nil
+  elseif model.route_capture_interrupted or not model.context_ready or source ~= model.source_key then
     -- A new source cancels any pending final frame from the old one.
-    core.set_context(model, source, playing, now, model.route_capture_interrupted)
+    local restart = model.route_capture_interrupted
+    local handoff = preview_ended and not restart
+    core.set_context(model, source, playing, now, restart, handoff)
+    model.stereo_handoff = handoff and model.stop ~= nil or nil
     model.drain_deadline,model.route_capture_interrupted = nil,nil
   elseif model.draining then
     if playing then
@@ -331,7 +351,9 @@ function spectrum.tick(state)
       measurement = model.measurement,
       session = helper.session(), now = now,
       expecting_capture = expecting_stereo,
-      first_capture_delay = first_capture_delay}
+      first_capture_delay = first_capture_delay,
+      handoff = model.stereo_handoff}
+    model.stereo_handoff = nil
     -- Process immediately: the adapter reuses its staging arrays. Older
     -- captures need more catch-up work, but each UI tick has a fixed limit.
     for packet = 1, 8 do

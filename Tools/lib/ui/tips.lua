@@ -188,10 +188,16 @@ local function work_area(ctx, anchor)
     local viewport = reaper.ImGui_GetWindowViewport(ctx)
     local x, y = reaper.ImGui_Viewport_GetWorkPos(viewport)
     local w, h = reaper.ImGui_Viewport_GetWorkSize(viewport)
+    if not (x and y and w and h) then return UNBOUNDED end
     return { left = x, top = y, right = x + w, bottom = y + h }
   end
   return UNBOUNDED
 end
+
+-- The usable screen area around the rectangle `anchor` ({left, top, right,
+-- bottom}), for a caller that places its own tooltip-layer panel. This asks
+-- REAPER for the monitor, so call it when the rectangle changes, not per frame.
+function tips.work_area(ctx, anchor) return work_area(ctx, anchor) end
 
 -- The pin: which tip is showing, the rectangle it belongs to, and where the
 -- pointer was when it appeared. Fields are copied, never the caller's table,

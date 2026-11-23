@@ -74,9 +74,11 @@ local function push_overlay_button_state(ctx, visible, selected)
     0)
 end
 
-local function draw_segment_outline(ctx, selected, hovered, visible)
-  if not (visible and (selected or hovered)) then return end
-  widgets.button_outline(ctx, selected and T.ACTIVE_CONTROL_BORDER or T.STROKE_PRIMARY)
+-- The accent outline marks the open Filter Range panel. A chosen preset keeps
+-- only its wash, so hover alone adds the neutral outline there.
+local function draw_segment_outline(ctx, panel_open, hovered, visible)
+  if not (visible and (panel_open or hovered)) then return end
+  widgets.button_outline(ctx, panel_open and T.ACTIVE_CONTROL_BORDER or T.STROKE_PRIMARY)
 end
 
 local function draw_divider_after(ctx, selected, visible, segment, hovered_segment)
@@ -188,9 +190,9 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
     entry.open_at(x, y, bottom, 'low')
   end
   reaper.ImGui_PopStyleColor(ctx, 4)
-  draw_segment_outline(ctx, custom_highlighted, custom_hovered, visible)
+  draw_segment_outline(ctx, entry_open, custom_hovered, visible)
   draw_divider_after(ctx, custom_highlighted, visible, 1, hovered_segment)
-  tips.show(ctx, custom_hovered, 'Edit Filter Range. Right-click to return to Full.', 'filter_entry')
+  tips.show(ctx, custom_hovered and not entry.is_open(), 'Edit Filter Range. Right-click to return to Full.', 'filter_entry')
   for i, preset in ipairs(filter.PRESETS) do
     reaper.ImGui_SameLine(ctx, 0, 0)
     local band = value.presets[preset.id]
@@ -208,7 +210,7 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
     region_icon(ctx, band.low_hz, band.high_hz,
       selected and visible and T.ACCENT_HOVER
         or (hovered and T.TEXT_PRIMARY or idle_icon))
-    draw_segment_outline(ctx, selected, hovered, visible)
+    draw_segment_outline(ctx, false, hovered, visible)
     draw_divider_after(ctx, selected, visible, i + 1, hovered_segment)
     reaper.ImGui_EndDisabled(ctx)
     tips.show(ctx, hovered, tips.with_shortcut(state, 'filter_' .. preset.id, preset.label .. ' · ' .. band.low_hz .. '–' .. band.high_hz .. ' Hz'
@@ -239,7 +241,9 @@ function controls.overlay(ctx, state, res, x, y, width, height, axis_height)
       right - M.UPDATE_DOT_R, top + M.UPDATE_DOT_R, M.UPDATE_DOT_R,
       theme.fade(T.TEXT_PRIMARY, alpha))
   end
-  tips.show(ctx, settings_hovered, settings_tip, 'spectrum_settings')
+  -- No tip while the panel is open, so it never draws over the panel it opened.
+  tips.show(ctx, settings_hovered and not settings.panel_is_open(), settings_tip,
+    'spectrum_settings')
   reaper.ImGui_PopStyleVar(ctx)
   return action
 end

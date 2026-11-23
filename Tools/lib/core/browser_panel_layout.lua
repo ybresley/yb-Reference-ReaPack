@@ -58,6 +58,9 @@ function layout.form_heights(s, h)
   local audition = s.frame_pad + g + c + (s.bottom_pad or 0)
   local core = c + g + s.list + g + c + (s.readings or 0) + g + s.wave + s.ruler + audition
   h = h or {}
+  -- Docked, the Library is its category row and list alone: the selected
+  -- sound's name, readings, waveform and controls belong to the Reference card.
+  if s.list_only then core = c + g + s.list end
   h.list = s.inset + core
   return h
 end

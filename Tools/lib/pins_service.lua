@@ -424,6 +424,10 @@ function service.edit(state, fn)
   if refusal then return false, refusal end
   local undo, value = fn()
   if not undo then return true end
+  -- Counts every record change (a label, a trim, a measurement), so a list
+  -- sorted from these records knows to sort again. Bumped even when the store
+  -- is refused: the undo below is a change too.
+  state.pins.data_version = (state.pins.data_version or 0) + 1
   if not persist(state) then
     undo()
     return false, nil
@@ -646,29 +650,6 @@ function service.set_pin_label(state, pin_id, label)
   return true, p.label
     and string.format("\"%s\" labelled \"%s\".", p.name, p.label)
     or string.format("\"%s\"'s label cleared.", p.name)
-end
-
--- Move a pin to another position in the stored order (the picker's edit mode).
--- The order is what the picker's arrows step through, so it's real project data:
--- refused while stored data is damaged, persisted + marks the project dirty on
--- success, and put back exactly where it was if the store fails.
-function service.reorder_pin(state, pin_id, to_index)
-  local ps = state.pins
-  local refusal = damaged(state)
-  if refusal then return false, refusal end
-  local p = pins.find(ps.data, pin_id)
-  if not p then return false, "That pin is no longer in this project." end
-
-  local ok, reason = edit(state, function()
-    local from = pins.reorder(ps.data, pin_id, to_index)
-    if not from then return nil end -- already there: nothing to store, nothing to say
-    return function() pins.reorder(ps.data, pin_id, from) end
-  end)
-  if not ok then
-    return false, reason or
-      string.format("\"%s\" couldn't be moved because the new order couldn't be saved in your project.", p.name)
-  end
-  return true
 end
 
 -- Adopt a pin into the library ("save to my library"). Dedup comes first, both

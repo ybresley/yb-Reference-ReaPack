@@ -122,7 +122,8 @@ end
 -- The loudness readings a comparison uses, measured from part of a source the
 -- caller owns (this module neither keeps nor destroys it). Synchronous: three
 -- passes over the range, so the interface waits for them. Returns
--- { lufs_i, lufs_m_max, lufs_s_max }, or nil when a pass throws.
+-- { lufs_i, lufs_m_max, lufs_s_max, channels }, or nil when a pass throws.
+-- The channel count lets the caller count mono loudness as heard.
 local RANGE_MODES = { MODES[1], MODES[2], MODES[3] }
 
 function loudness.measure_range(src, from, to)
@@ -132,6 +133,7 @@ function loudness.measure_range(src, from, to)
     if not ok then return nil end
     results[m.key] = to_db(gain)
   end
+  results.channels = reaper.GetMediaSourceNumChannels(src)
   return results
 end
 

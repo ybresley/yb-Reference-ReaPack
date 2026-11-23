@@ -179,12 +179,22 @@ end
 -- A loop is still the same source in a playing state. The caller must not
 -- manufacture stop events for timeline position wrapping back to the start.
 -- Explicit Play uses restart to discard both traces even for the same source.
-function spectrum.set_context(state, source_key, playing, now, restart)
+-- A handoff is a reference ending while the analysers return to another
+-- source. Average starts again, but Live falls away from the ended sound into
+-- whatever the new source captures, as it would after Stop.
+function spectrum.set_context(state, source_key, playing, now, restart, handoff)
   playing = playing == true
   local changed = state.context_ready and source_key ~= state.source_key
   local stopped = state.context_ready and state.playing and not playing
   local resumed = state.context_ready and not state.playing and playing
-  if changed or restart then
+  if changed and handoff and not restart and (state.stop or state.math.ready) then
+    if not state.stop then begin_stopped_display(state, now) end
+    state.stop.handoff = true
+    state.draining = false
+    fresh_window(state, true)
+    state.measurement = state.measurement + 1
+    refresh_stopped_display(state, stopped_elapsed(state, 0, now))
+  elseif changed or restart then
     state.draining = false
     state.stop = nil
     fresh_window(state, true)
@@ -362,6 +372,18 @@ function spectrum.update(state, frame, dt, context)
     state.fresh, state.target, state.has_signal = false, nil, false
   end
   state.status = status or state.status
+  if state.stop and state.stop.handoff and state.playing and state.fresh and state.target then
+    -- The new source has its first frame. Continue Live from the decayed
+    -- trace so it moves toward the new audio instead of jumping to it.
+    refresh_stopped_display(state, stopped_elapsed(state, elapsed_dt, context.now))
+    for index = 1, state.count do
+      state.math.live[index] = state.live[index]
+      state.math.live_power[index] = maths.db_to_power(state.live[index])
+    end
+    state.math.live_motion_mode, state.math.ready = "power", true
+    state.math.average_ready = false
+    state.stop = nil
+  end
   if state.stop then
     refresh_stopped_display(state, stopped_elapsed(state, elapsed_dt, context.now))
   elseif state.playing and state.fresh and state.target then

@@ -65,8 +65,10 @@ local function overview(ctx, res, demo, elapsed, x, y, width, height)
   end
   set(anchors.play, row.play_x, row.cy)
   set(anchors.stop, row.stop_x, row.cy)
-  set(anchors.trim, row.trim_x + story.trim_t(0) * row.trim_w, row.cy)
-  set(anchors.trim_far, row.trim_x + story.trim_t(1) * row.trim_w, row.cy)
+  -- The trim value is dragged down from its box, as far as its slider moves.
+  local trim_cx = row.trim_x + row.trim_w * .5
+  set(anchors.trim, trim_cx, row.cy)
+  set(anchors.trim_far, trim_cx, row.cy + (story.trim_t(0) - story.trim_t(1)) * row.trim_travel)
   paint_pointer(ctx, demo, x, y, width, height)
 end
 

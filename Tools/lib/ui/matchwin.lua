@@ -1,4 +1,4 @@
--- matchwin: Normalize — the target button beside the trim bar and the dropdown
+-- matchwin: Normalize — the target button beside the trim value and the dropdown
 -- menu it opens (DESIGN.md "Loudness").
 --
 -- The file, the module and every internal name stay `match*`: `core/match.lua`
@@ -26,15 +26,16 @@ local icons = require("ui.icons")
 local widgets = require("ui.widgets")
 local tips = require("ui.tips")
 local focus = require("ui.focus")
+local analysis = require("core.analysis")
 local match = require("core.match")
 local own_level = require("core.own_level")
 local anchored_panel = require("ui.anchored_panel")
 local numeric_input = require("ui.numeric_input")
 local readings = require("ui.readings")
--- Only for pins.drop_target — the tested "insertion gap -> final position"
--- arithmetic the picker's reorder drag uses; the preset list reorders with
--- exactly the same gesture and must not re-derive that off-by-one.
-local pins = require("core.pins")
+-- Only for categories.drop_target — the tested "insertion gap -> final
+-- position" arithmetic the category reorder drag uses; the preset list reorders
+-- with exactly the same gesture and must not re-derive that off-by-one.
+local categories = require("core.categories")
 local T = theme.tokens
 local M = theme.metrics
 
@@ -112,6 +113,13 @@ end
 
 local HEADING = "NORMALIZE REFERENCE TO..."
 local READINGS_HEADING = "MEASUREMENTS"
+-- Shown only for a mono reference, whose loudness is counted from both
+-- speakers (core/analysis.lua, analysis.heard).
+local MONO_NOTE = "Note: A mono sound plays from both speakers and sounds 3 dB louder. "
+  .. "Normalize measures it the way you hear it, so mono and stereo sounds end up equally loud."
+-- Lines the wrapped note takes at the menu's width, for the first-frame
+-- height estimate.
+local MONO_NOTE_LINES = 4
 local EDITING_TEXT = "Editing…"
 local APPLY_TEXT = "Apply"
 local UNIT = "dB"
@@ -152,9 +160,26 @@ local function fmt_shortfall(required, trim)
   return string.format("%.1f dB short", math.abs(required - trim))
 end
 
--- One decimal, the precision both the row and the trim bar show. Two trims
+-- One decimal, the precision both the row and the trim value show. Two trims
 -- that read "-3.2 dB" are the same trim as far as the reader is concerned.
 local function round1(v) return math.floor(v * 10 + 0.5) / 10 end
+
+-- The level the selected reference plays at: the lock's while the lock holds
+-- it, otherwise its own trim.
+local function playing_level(state, sel)
+  return (own_level.playing_trim(state.own_level, sel))
+end
+
+-- Is the selected reference set to this target right now? It must be the
+-- target the user picked (or the lock holds), AND the level it plays at must
+-- still be the one that target gives. Two targets that happen to give the
+-- same trim are not both "picked" (user-reported 2026-11-22), and a hand trim
+-- clears it. While the lock holds the reference this is the locked target, so
+-- the menu never points at one target while the reference plays at another.
+local function is_at_target(state, sel, trim, kind, unit, value)
+  if not sel or not trim or round1(playing_level(state, sel)) ~= round1(trim) then return false end
+  return own_level.is_target(own_level.chosen_target(state.own_level, sel), kind, unit, value)
+end
 
 -- Snap to a whole pixel: a glyph run at a fractional origin renders softer.
 local function px(v) return math.floor(v + 0.5) end
@@ -218,16 +243,23 @@ local function paint_button_face(ctx, font, colour)
   end
 end
 
--- width: the Reference card's Normalize cell.
-function matchwin.draw_button(ctx, state, res, width)
+-- width: the button's square at the left of the Reference card's Trim box.
+-- `bare` draws no frame of its own: the button sits inside that box, which
+-- frames it, and only its open or hovered fill is painted here.
+function matchwin.draw_button(ctx, state, res, width, bare)
   local font = res and res.icon_font
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   -- A release demonstration's button never shows the live menu as open.
   local shown_open = not state.showcase and matchwin.is_open()
   -- The panel stays open through clicks elsewhere, so this button is its
   -- switch: one click opens it, the next closes it.
-  if widgets.panel_button_frame(ctx, "##matchtarget", width or ctrl, ctrl, shown_open)
-      and not state.showcase then
+  local clicked
+  if bare then
+    clicked = reaper.ImGui_InvisibleButton(ctx, "##matchtarget", width or ctrl, ctrl)
+  else
+    clicked = widgets.panel_button_frame(ctx, "##matchtarget", width or ctrl, ctrl, shown_open)
+  end
+  if clicked and not state.showcase then
     if matchwin.is_open() then
       matchwin.close()
     else
@@ -238,6 +270,15 @@ function matchwin.draw_button(ctx, state, res, width)
     end
   end
   local hovered = reaper.ImGui_IsItemHovered(ctx)
+  if bare and (shown_open or hovered) then
+    local x0, y0 = reaper.ImGui_GetItemRectMin(ctx)
+    local x1, y1 = reaper.ImGui_GetItemRectMax(ctx)
+    local alpha = reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_Alpha())
+    local left = reaper.ImGui_DrawFlags_RoundCornersLeft and reaper.ImGui_DrawFlags_RoundCornersLeft() or 0
+    reaper.ImGui_DrawList_AddRectFilled(reaper.ImGui_GetWindowDrawList(ctx), x0, y0, x1, y1,
+      theme.fade(shown_open and T.ACTIVE_CONTROL_FILL or T.FILL_TERTIARY, alpha),
+      reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FrameRounding()), left)
+  end
   local colour = shown_open and T.ACCENT_HOVER
     or (hovered and T.TEXT_PRIMARY or T.TEXT_SECONDARY)
   paint_button_face(ctx, font, colour)
@@ -253,8 +294,10 @@ end
 
 --------------------------------------------------------------- target locks
 
--- Every normalize target ends in a small lock. A locked target holds every
--- pinned reference at that level, so the row itself says what the lock uses.
+-- Every normalize target ends in a small lock. While a target is locked,
+-- every reference the user selects plays at that level and no saved trim
+-- changes, so the row itself says what the lock uses. The Reference card's
+-- Trim box carries the same lock for the target used last.
 
 -- The width a row gives up for its lock, gap included.
 local function lock_space() return M.PICK_TOOL_W + M.PICK_TOOL_GAP end
@@ -267,9 +310,9 @@ end
 
 local function lock_tip(name, on, missing)
   if not name then return missing end
-  if on then return "Every pinned reference is kept at " .. name .. ". Click to unlock." end
-  return "Lock every pinned reference to " .. name .. ". Pins you add later follow. "
-    .. "A reference you trim by hand keeps its own trim."
+  if on then return "Every reference you select plays at " .. name .. ". Click to unlock." end
+  return "Lock every reference you select to " .. name .. ", pinned or from the Library. "
+    .. "Saved trims do not change."
 end
 
 -- One lock at (x, y). `kind` is "own" or "fixed" (with unit and value);
@@ -362,10 +405,9 @@ local function draw_preset_row(ctx, state, res, sel, p, i, width)
     reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x1, y1, row_fill, 4)
   end
 
-  -- ACCENT means "the trim is AT this row right now" — nothing else. A hand
+  -- ACCENT means "the reference is set to this preset right now". A hand
   -- trim elsewhere clears it (user-reported 2026-08-07).
-  local at_this = trim ~= nil and sel ~= nil
-    and round1(sel.trim_db or 0) == round1(trim)
+  local at_this = is_at_target(state, sel, trim, "fixed", p.unit, p.value)
   local label = fmt_target(p.unit, p.value)
   local lh = select(2, reaper.ImGui_CalcTextSize(ctx, label))
   local text_y = px((y0 + y1) * 0.5 - lh * 0.5)
@@ -444,7 +486,7 @@ local function draw_preset_row(ctx, state, res, sel, p, i, width)
     elseif why == "unmeasured" then
       tip = "No " .. measurement_name(p.unit) .. " measurement is available. It may still be analysing, or the audio may have no measurable signal."
     elseif limited == "range" then
-      local shortfall = fmt_shortfall(p.value - sel[p.unit], trim)
+      local shortfall = fmt_shortfall(p.value - analysis.heard(sel, p.unit), trim)
       tip = shortfall .. " of the target. Selecting it applies "
         .. fmt_trim(trim) .. ", the maximum."
     else
@@ -524,8 +566,9 @@ local function draw_target_row(ctx, state, res, sel, presets, width)
   else
     local trim, aux
     if unit and value then trim, aux = match.trim_for(sel, unit.key, value) end
-    if trim and aux == "range" and sel and type(sel[unit.key]) == "number" then
-      limit_text = fmt_shortfall(value - sel[unit.key], trim)
+    local heard = analysis.heard(sel, unit and unit.key)
+    if trim and aux == "range" and type(heard) == "number" then
+      limit_text = fmt_shortfall(value - heard, trim)
     end
     local why = (not trim) and aux or nil
     local ok_match = trim ~= nil and sel ~= nil
@@ -634,7 +677,7 @@ local function resolve_drag(ctx, presets, x, width)
     end
   end
   if not reaper.ImGui_IsMouseDown(ctx, 0) then
-    local to = gap_i and pins.drop_target(ui.drag_index, gap_i) or nil
+    local to = gap_i and categories.drop_target(ui.drag_index, gap_i) or nil
     if to and presets[ui.drag_index] then
       action = { type = "reorder_match_preset", from = ui.drag_index, to = to }
     end
@@ -644,13 +687,14 @@ local function resolve_drag(ctx, presets, x, width)
 end
 
 -- Reset to Original Loudness: trim back to 0 dB, so the reference plays as
--- recorded. A committed set_trim, the same as the trim bar's right-click.
+-- recorded. A committed set_trim, the same as the trim value's right-click.
 -- Disabled with nothing selected or no trim to remove, so the row never moves.
 local RESET_TEXT = "Reset to Original Loudness"
-local function draw_reset_item(ctx, sel, width)
+local function draw_reset_item(ctx, sel, width, locked)
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local pad_x = select(1, reaper.ImGui_GetStyleVar(ctx, reaper.ImGui_StyleVar_FramePadding()))
-  local live = sel ~= nil and round1(sel.trim_db or 0) ~= 0
+  -- The lock sets the level while it is on, so the trim cannot be reset then.
+  local live = not locked and sel ~= nil and round1(sel.trim_db or 0) ~= 0
   local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
   local clicked = reaper.ImGui_InvisibleButton(ctx, "##matchreset", width, ctrl)
   local hovered = reaper.ImGui_IsItemHovered(ctx)
@@ -663,7 +707,8 @@ local function draw_reset_item(ctx, sel, width)
   reaper.ImGui_DrawList_AddText(dl, px(x0 + pad_x), px(y0 + (ctrl - lh) * 0.5), colour, RESET_TEXT)
   tips.show(ctx, hovered, live
     and "Set the trim back to 0 dB so the reference plays at its recorded level."
-    or (sel and "The reference already plays at its recorded level." or "Select a reference first."))
+    or (locked and "Unlock to reset the trim."
+      or (sel and "The reference already plays at its recorded level." or "Select a reference first.")))
   if clicked and live then return { type = "set_trim", db = 0, commit = true } end
   return nil
 end
@@ -978,12 +1023,13 @@ local function draw_measure_settings(ctx, state, res, width)
 end
 
 -- The Reaper Measurement as the first normalize target, in the presets' own
--- row style: the trim it would set on the right, accent when the trim is there.
+-- row style: the trim it would set on the right, accent when the reference is
+-- set to it.
 local function draw_own_target_row(ctx, state, res, sel, width)
   local own = state.own_level
   local trim, why
   if sel then trim, why = own_level.trim_for(sel, own.measurement, own.unit) end
-  local at_this = trim ~= nil and round1(sel.trim_db or 0) == round1(trim)
+  local at_this = is_at_target(state, sel, trim, "own")
   local ctrl = reaper.ImGui_GetFrameHeight(ctx)
   local x0, y0 = reaper.ImGui_GetCursorScreenPos(ctx)
   local action
@@ -1040,7 +1086,7 @@ local function draw_presets_row(ctx, state, res, sel, presets, width, open)
   if sel then
     for _, p in ipairs(presets) do
       local trim = match.trim_for(sel, p.unit, p.value)
-      if trim and round1(sel.trim_db or 0) == round1(trim) then
+      if is_at_target(state, sel, trim, "fixed", p.unit, p.value) then
         current = fmt_target(p.unit, p.value)
         break
       end
@@ -1099,6 +1145,7 @@ local function place_menu(ctx, res, presets, outer_width)
   local est_h = 2 * M.WINDOW_PAD + rows * ctrl + 6 * M.ITEM_SPACING_Y
     + (ui.show_readings and (ctrl + 3 * M.STRIP_READING_H + 2 * M.ITEM_SPACING_Y) or 0)
     + (ui.show_own and (OWN_ROWS * (ctrl + M.ITEM_SPACING_Y)) or 0)
+    + (ui.mono_note and (MONO_NOTE_LINES * reaper.ImGui_GetTextLineHeight(ctx) + M.ITEM_SPACING_Y) or 0)
   local measured_h = ui.rect and (ui.rect.y2 - ui.rect.y1) or 0
   local height = math.max(est_h, measured_h)
   local anchor = {
@@ -1142,6 +1189,7 @@ function matchwin.draw_popup(ctx, state, res)
   local outer_width = width + M.WINDOW_PAD * 2
   local presets = (state.match and state.match.presets) or {}
   ui.show_own = state.own_level ~= nil and not state.showcase
+  ui.mono_note = analysis.is_mono(state.selected)
   -- Editing presets needs the list, so a request to edit shows it.
   ui.presets_open = (state.match and state.match.presets_open == true) or ui.edit_mode
 
@@ -1261,8 +1309,15 @@ function matchwin.draw_popup(ctx, state, res)
 
   local target_action = draw_target_row(ctx, state, res, sel, presets, width)
   action = action or target_action
+  if ui.mono_note then
+    local small = theme.push_small_font(ctx)
+    reaper.ImGui_PushTextWrapPos(ctx, reaper.ImGui_GetCursorPosX(ctx) + width)
+    reaper.ImGui_TextColored(ctx, T.TEXT_TERTIARY, MONO_NOTE)
+    reaper.ImGui_PopTextWrapPos(ctx)
+    if small then reaper.ImGui_PopFont(ctx) end
+  end
   reaper.ImGui_Separator(ctx)
-  local reset_action = draw_reset_item(ctx, sel, width)
+  local reset_action = draw_reset_item(ctx, sel, width, state.own_level and state.own_level.lock == true)
   action = action or reset_action
 
   local escape = reaper.ImGui_IsWindowFocused(ctx, reaper.ImGui_FocusedFlags_RootAndChildWindows())

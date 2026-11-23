@@ -101,6 +101,8 @@ function view.apply(v, scene, trim_db)
   if not scene.playing then preview.position = 0 end
   preview.start_serial = scene.plays or 1
   v.state.selected.trim_db = trim_db or 0
+  -- The trim value shows its slider for as long as the story drags it.
+  v.state.trim_held = (scene.trim_drag or 0) > 0
 end
 
 -- The card's measured sizes (ui/reference_controls.lua), in pixels.
@@ -151,7 +153,7 @@ function view.wave_rect(ctx, x, y, w, h)
 end
 
 -- Where the card's bottom-row controls are, for the same card as wave_rect:
--- the Play, Stop cells' centres, the row's centre line and the trim bar's
+-- the Play, Stop cells' centres, the row's centre line and the trim value's
 -- left edge and width. Fills and returns `out`.
 function view.bottom_row(ctx, x, y, w, h, out)
   out = out or {}
@@ -162,8 +164,13 @@ function view.bottom_row(ctx, x, y, w, h, out)
   local cell = controls.cell_width(ctx, w)
   out.cy = snap(y + p.height - p.pad - ctrl) + ctrl * .5
   out.play_x, out.stop_x = left + cell * .5, left + cell * 2.5
-  out.trim_x = left + 8 * cell + 2 * M.STRIP_GROUP_GAP
-  out.trim_w = left + inner - out.trim_x
+  -- Four playback and three listening cells come before the level control,
+  -- and Library and Settings after it (reference_controls.lua).
+  -- The number comes after the control's two button squares.
+  out.trim_x = left + 7 * cell + 2 * M.STRIP_GROUP_GAP + 2 * ctrl
+  out.trim_w = inner - 9 * cell - 3 * M.STRIP_GROUP_GAP - 2 * ctrl
+  -- How far the pointer travels for the trim slider's whole range.
+  out.trim_travel = M.DB_SLIDER_H
   return out
 end
 

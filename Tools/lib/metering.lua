@@ -203,6 +203,9 @@ local function channel_capture_blocked(state)
         local ok,reason=backend:close()
         if not ok then model.error=reason; return true end
       end
+      -- The meter is unavailable, so nothing from the ended source stays drawn.
+      model.keep_display_until=nil
+      session.end_fade(model)
       session.reset(model)
       model.attached,model.playing=false,false
     end
@@ -211,6 +214,15 @@ local function channel_capture_blocked(state)
   end
   if model.channel_blocked then model.channel_blocked,model.error=nil,nil end
   return false
+end
+
+-- Only a reset that the handoff itself causes, such as the helper starting a
+-- new run for the next source, keeps the ended source drawn. Manual resets and
+-- changes in what can be measured always clear it.
+local function handoff_reset(model)
+  model.keep_display = model.handoff_window
+  session.reset(model)
+  model.keep_display = nil
 end
 
 local function reset_backend(model, mode)
@@ -271,6 +283,9 @@ function metering.prepare_preview(state, slot, sound_id)
   if not model or not measuring_enabled(state) then return true end
   apply_channel_profile(state)
   if channel_capture_blocked(state) then return true end
+  -- Starting a reference ends any fade left by the previous one.
+  model.keep_display_until = nil
+  session.end_fade(model)
   local project = reaper.EnumProjects(-1)
   local mixed = state.analysis_preview_mixed == true
   local key = preview_key(project, slot, sound_id, mixed)
@@ -394,6 +409,39 @@ function metering.tick(state)
   local project_playing = project and (reaper.GetPlayStateEx(project) & 5) ~= 0 or false
   local project_changed=model.source_project~=nil and model.source_project~=project
   model.source_project=project
+  -- A reference that ends, or REAPER stopping, hands over to whatever the
+  -- project sends next. The bars and numbers fall away, and any reset in the
+  -- next moments keeps them drawn instead of clearing them. Starting REAPER
+  -- playback or a reference clears them.
+  local preview_playing=state.preview and state.preview.playing==true
+  local transport_started=project_playing and model.last_project_playing==false
+  local transport_stopped=not project_playing and model.last_project_playing==true
+  local preview_started=preview_playing and not model.last_preview_playing
+  local preview_ended=model.last_preview_playing and not preview_playing
+    and model.last_selected_id==state.selected_id
+  -- History stops with playback, even while the meters follow live input. It
+  -- freezes one update after Stop so the stopped run's last audio still lands.
+  if model.history_freeze_pending then model.history_frozen,model.history_freeze_pending=true,nil end
+  if transport_started or preview_started or project_changed then
+    model.keep_display_until,model.history_frozen,model.history_freeze_pending=nil,nil,nil
+    session.end_fade(model)
+  -- REAPER stopping under a reference that still plays is not a handover:
+  -- the meter keeps measuring the reference.
+  elseif preview_ended or (transport_stopped and not preview_playing) then
+    model.keep_display_until=now+UPDATE_TIMEOUT+0.5
+    session.begin_fade(model,true)
+    if not project_playing and not preview_playing then model.history_freeze_pending=true end
+  end
+  model.last_project_playing,model.last_preview_playing=project_playing,preview_playing
+  model.last_selected_id=state.selected_id
+  model.handoff_window=model.keep_display_until~=nil and now<model.keep_display_until or nil
+  if not model.handoff_window then model.keep_display_until=nil end
+  -- A reference that ended while REAPER plays hands over to the project. Once
+  -- the handover has passed, the project's run is what the meter measures, so
+  -- its own Integrated and maxima show instead of the reference's.
+  if not model.handoff_window and model.readout_fade and project_playing and not preview_playing then
+    session.release_readings(model)
+  end
   if state.analysis_audio_suspended then
     local key,playing=source(state,project,project_playing)
     -- Stopping a preview retains its measurement until another source starts.
@@ -480,7 +528,7 @@ function metering.tick(state)
     end
     if final.ready then
       if model.capture_epoch and final.capture_epoch ~= model.capture_epoch then
-        session.reset(model)
+        handoff_reset(model)
       end
       model.capture_epoch = final.capture_epoch
       final.playing = true
@@ -497,17 +545,17 @@ function metering.tick(state)
   if model.force_source_reset or model.route_hold_project or (playing and mix_changed(model, mixed)) then
     if not reset_backend(model,mode) then return end
     model.force_source_reset,model.route_hold_project=nil,nil
-    session.reset(model)
+    handoff_reset(model)
   elseif legacy_monitor_restart or playing and changed and model.prefs.auto_reset == 'New Reference' then
     -- A compatible older helper used preview mode for stopped monitoring.
     -- Reset as soon as Lua sees Play when its audio callback cannot see that edge.
     if not reset_backend(model, mode) then return end
-    session.reset(model)
+    handoff_reset(model)
   elseif model.capture_mode ~= mode then
     local ok, reason = backend:capture(mode, false)
     if not ok then model.error = reason; return end
   end
-  if started and model.prefs.auto_reset == 'On Play' then session.reset(model) end
+  if started and model.prefs.auto_reset == 'On Play' then handoff_reset(model) end
   if playing then model.measured_source, model.measured_preview_mixed = key, mixed end
   model.source_key, model.playing, model.capture_mode = key, playing, mode
   local snapshot = backend:poll()
@@ -515,7 +563,7 @@ function metering.tick(state)
   check_progress(model, snapshot, mode, now)
   if snapshot.ready then
     if model.capture_epoch and snapshot.capture_epoch ~= model.capture_epoch then
-      session.reset(model)
+      handoff_reset(model)
     end
     model.capture_epoch = snapshot.capture_epoch
   end
@@ -523,10 +571,15 @@ function metering.tick(state)
   elseif not snapshot.pending_publication then model.error = snapshot.status end
   if snapshot.ready and not playing and snapshot.history and #snapshot.history > 0 then
     -- A whole run can start and stop between interface ticks. Drain its audio
-    -- windows before the stopped display releases live readings.
+    -- windows before the stopped display releases live readings. That run was
+    -- playback, so it belongs in history even after Stop. Later stopped
+    -- readings stay out of history.
+    local frozen = model.history_frozen
+    model.history_frozen = nil
     snapshot.playing = true
     session.update(model, snapshot, 0)
     snapshot.playing = false
+    model.history_frozen = frozen
   end
   session.update(model, snapshot, dt)
   if not model.stall_retry_deadline then warnings.update(model.warnings, model.values, model.prefs, dt) end

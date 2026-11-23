@@ -27,6 +27,8 @@ local function pin_drop_target(ctx, state, x0, y0, x1, y1)
   local ps = state.pins
   if ps and ps.load_error then return nil end
   if type(drag.sound_id) == 'string' and drag.sound_id:sub(1, 1) == 'p' then return nil end
+  -- Pulled out of the card and let go over it again: nothing to pin.
+  if drag.from_card then return nil end
   if HAS_WIN_HOVER_BLOCKED and not reaper.ImGui_IsWindowHovered(ctx,
       reaper.ImGui_HoveredFlags_AllowWhenBlockedByActiveItem()) then return nil end
   if not reaper.ImGui_IsMouseHoveringRect(ctx, x0, y0, x1, y1) then return nil end
@@ -248,7 +250,11 @@ function window.draw(ctx, state, res, card)
       analysis_x0,analysis_y0,analysis_x1,analysis_y1=mx0,my0,mx1,my1
     end
   end
-  if analysis_panel.is_visible(state, 'main', dropzone.file_drag_active()) then
+  -- The Library is its list alone, with no picture of its own to carry a
+  -- progress card, so measurements started from it report here too.
+  local files_dragged = dropzone.file_drag_active()
+  if analysis_panel.is_visible(state, 'main', files_dragged)
+      or analysis_panel.is_visible(state, 'browse', files_dragged) then
     analysis_panel.draw(ctx, state.analysis_progress, analysis_x0, analysis_y0, analysis_x1, analysis_y1)
   end
   local warning_action=analysis_notice.draw(ctx,notice)

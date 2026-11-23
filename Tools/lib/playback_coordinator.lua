@@ -8,6 +8,7 @@ local api = require("reaper_api")
 local span = require("core.span")
 local status_message = require("core.status_message")
 local pitch = require("core.pitch")
+local own_level = require("core.own_level")
 
 local coordinator = {}
 local REF_PLAYING_MSG = "Reference mode is playing. Stop the transport to audition here."
@@ -27,6 +28,16 @@ function coordinator.new(state, callbacks, startup_alert)
     return slot == "browse" and state.master_db or 0
   end
 
+  -- A reference plays at its own trim, or at the locked target's level while
+  -- the normalize lock holds it.
+  local function reference_trim(s)
+    return (own_level.playing_trim(state.own_level, s))
+  end
+
+  -- The record a dropdown row preview is playing, so a change to the lock can
+  -- re-apply its level without searching the Library every frame.
+  local picker_sound
+
   function playback.play(s, position, slot, loop, resuming)
     if loop == nil then loop = state.loop end
     -- Exact positions belong to the user's seek or pause. Only an ordinary
@@ -35,7 +46,7 @@ function coordinator.new(state, callbacks, startup_alert)
       and type(s.span_start) == "number" and s.span_start > 0 then
       position = s.span_start
     end
-    local trim_db = (slot == "browse") and 0 or (s.trim_db or 0)
+    local trim_db = (slot == "browse") and 0 or reference_trim(s)
     local ok = preview.play(callbacks.path(s), {
       db = trim_db + library_volume(slot), loop = loop, position = position,
       pitch = state.pitch[slot] or 0, channels = s.channels,
@@ -50,6 +61,7 @@ function coordinator.new(state, callbacks, startup_alert)
     state.preview.sound_id = ok and s.id or nil
     state.preview.slot = ok and slot or nil
     state.preview.trim_db = ok and trim_db or 0
+    picker_sound = (ok and slot == "picker") and s or nil
     state.preview.channels = ok and preview.channels() or 0
     state.preview.length = ok and preview.length() or 0
     state.preview.position = ok and (position or 0) or 0
@@ -175,12 +187,29 @@ function coordinator.new(state, callbacks, startup_alert)
     end
   end
 
-  -- Called after persistence has accepted the edit or restored the saved value.
+  -- Called after persistence has accepted the edit or restored the saved value,
+  -- and when the normalize lock changes the level the reference plays at.
   -- A Library audition remains untrimmed even if its record is the same sound.
   function playback.trim_changed(s)
     if state.preview.playing and state.preview.slot == "main" and state.preview.sound_id == s.id then
-      state.preview.trim_db = s.trim_db
-      preview.set_volume_db(s.trim_db)
+      local trim_db = reference_trim(s)
+      state.preview.trim_db = trim_db
+      preview.set_volume_db(trim_db)
+    end
+  end
+
+  -- A dropdown row preview follows the lock too: switching it on or off, or
+  -- changing its target, changes the level that row plays at. Cheap enough to
+  -- ask every frame, and it only touches the player when the level differs.
+  function playback.follow_picker_level()
+    local p = state.preview
+    if not (p.playing and p.slot == "picker" and picker_sound and picker_sound.id == p.sound_id) then
+      return
+    end
+    local trim_db = reference_trim(picker_sound)
+    if trim_db ~= p.trim_db then
+      p.trim_db = trim_db
+      preview.set_volume_db(trim_db + library_volume("picker"))
     end
   end
 

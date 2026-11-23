@@ -70,4 +70,17 @@ function memory.normalise(saved, lib)
   }
 end
 
+-- The pinned list's own sort, remembered apart from the Library's. Every row
+-- there is pinned, so the pin column is not one of its choices.
+local VALID_PIN_SORT = { name = true, dur = true, ch = true, loud = true }
+
+function memory.normalise_pin_sort(saved)
+  local sort = { col = "name", asc = true }
+  if type(saved) == "table" and VALID_PIN_SORT[saved.col] then
+    sort.col = saved.col
+    if type(saved.asc) == "boolean" then sort.asc = saved.asc end
+  end
+  return sort
+end
+
 return memory

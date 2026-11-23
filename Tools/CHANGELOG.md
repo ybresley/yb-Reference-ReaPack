@@ -26,6 +26,32 @@ workflow, area vocabulary, and curation rules. Include only user-noticeable
 changes.
 -->
 
+## 0.8.0 — 2026-11-23
+
+This update turns the Library into a list, so every sound is shown and played on the Reference card with all of its tools. Mono references now match stereo ones at the same target, and the meters and layout get several fixes.
+
+### Highlights
+
+- **Library** — The Library is now a list, and the Reference card is the one place a sound is shown and played. Click a Library sound to make it the reference, with trim, start and end points, Normalize and Reference Mode, without pinning it first. The card's name box opens a dropdown that switches between the Library and the project's pinned references.
+  The separate Library window keeps a small waveform strip under its list.
+
+### Changes
+
+- **Loudness** — The Normalize lock is now temporary: it sets the level each reference plays at and never saves a trim, so unlocking returns every reference to its own level. Normalize to a target to save a trim.
+- **Loudness** — When playback ends, the meters and Spectrum fade out instead of clearing at once. Integrated and the maxima stay until playback starts again.
+- **Loudness** — The M and S maxima take their bar's colour, so a maximum over target shows yellow or red.
+- **Reference Picker** — Pinned references use the Library's table, with the same columns. Click a header to sort them, and the pinned list remembers its own sort.
+  Pins can no longer be reordered by hand. The card's arrows follow the sorted order.
+- **Library** — Durations always show minutes, seconds and tenths, such as 0:00.4.
+- **Appearance** — A button whose panel is open now has a full accent outline. Buttons that switch a mode on, such as Mono or Loop, keep only the fill.
+
+### Fixes
+
+- **Loudness** — Mono references now meter and play at their normalize target, instead of about 3 dB louder than stereo references. The Normalize panel shows a short note while a mono reference is selected.
+- **Loudness** — The Normalize menu highlights only the target you picked, not another target that happens to give the same trim.
+- **Window** — When the panels split into two rows, the Reference card moves into the top row instead of staying full height beside them.
+- **Appearance** — The tips for Pitch, Settings, Spectrum Settings and Edit Filter Range no longer cover the panels those buttons open.
+
 ## 0.7.1 — 2026-11-20
 
 This update fixes a crash in Reference View and restores the border beside History.
